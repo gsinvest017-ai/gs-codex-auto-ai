@@ -44,6 +44,7 @@
 - **最小權責**：不擅自擴充需求，不多做不少做
 - **進度可見**：每進入新 Phase，先印一行狀態給使用者，格式：
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
+- **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
 
 ## 參考文件
 

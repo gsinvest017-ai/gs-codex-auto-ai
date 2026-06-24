@@ -116,6 +116,17 @@ python tools/progress.py --watch  # 持續刷新（每 2 秒）
 
 ---
 
+## 不停下來問人（非停模式）
+
+這個 repo **預設就不會逐一問你工具權限**（`.claude/settings.json` 設了 `bypassPermissions`）——
+所以跑一跑不會卡在「要允許這個指令嗎？」。同時開**多個 session** 也各自順跑、互不干擾。
+
+- **保留的安全停點**：`git commit` / `push` / `reset --hard` / `rm -rf` 等不可逆操作仍會**停下來問你**（憲章 C6）。
+- **連回合都不想停**：打 `/autopilot on <把需求一次講完>`。它會用 Stop hook 把流程一路推到 Phase 7 交付（上限 30 次續跑、per-session 獨立）；`/autopilot off` 關閉、`/autopilot status` 看進度。
+- 首次在新機器開這個資料夾時，Claude Code 會要你「信任此資料夾」一次，才會套用上述設定（這是天然的 opt-in 關卡）。
+
+---
+
 ## 產出在哪
 
 | 路徑 | 內容 |

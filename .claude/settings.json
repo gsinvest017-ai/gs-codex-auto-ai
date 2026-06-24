@@ -1,5 +1,9 @@
 {
+  "env": {
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "40"
+  },
   "permissions": {
+    "defaultMode": "bypassPermissions",
     "allow": [
       "Bash(*)",
       "Read(*)",
@@ -13,7 +17,23 @@
       "WebSearch(*)",
       "Skill(*)"
     ],
-    "deny": []
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(rm -rf:*)",
+      "Bash(*deploy*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(* | sh)",
+      "Bash(curl * | bash)",
+      "Bash(wget * | bash)",
+      "Bash(mkfs*)",
+      "Bash(dd if=*)"
+    ]
   },
   "hooks": {
     "UserPromptSubmit": [
@@ -24,6 +44,28 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR/tools/dispatch_hook.py\"",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^/autopilot",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/tools/autopilot/arm.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/tools/autopilot/cont.py\"",
+            "timeout": 15
           }
         ]
       }
