@@ -68,14 +68,23 @@ claude
 
 ## 怎麼看進度
 
-跑的過程中，隨時可以在另一個終端機看目前跑到哪：
+**最方便：同一個對話視窗自動顯示。** 只要有進行中的 run，你每次在 Claude Code 送出訊息時，視窗頂端就會自動出現進度條（由 `UserPromptSubmit` hook 注入；閒置時自動靜默）。也可以隨時打 `/progress` 主動查看。
+
+```
+[CodexAutoAI] Phase 3/7 ▓▓▓▓░░░░ 架構設計  ● 進行中
+            已完成階段：[0, 1]
+            當前迭代：第 2 輪（守衛上限 3）
+            累計成本：$0.0123 USD
+```
+
+需要在獨立終端機持續盯著看，也可以：
 
 ```bash
-python tools/progress.py          # 顯示 phase 進度條 + 當前迭代 + 累計成本
+python tools/progress.py          # 印一次
 python tools/progress.py --watch  # 持續刷新（每 2 秒）
 ```
 
-進度資料來自 `log/events.jsonl`（系統自動寫入的結構化事件）。
+進度資料來自 `log/events.jsonl`——其中 phase 邊界事件由 orchestrator **確定性寫入**（不靠 LLM 記得），所以進度條保證會推進。
 
 ---
 
@@ -100,5 +109,16 @@ python tools/progress.py --watch  # 持續刷新（每 2 秒）
 | 調度邏輯與各 agent/skill 定義 | `CLAUDE.md`、`.claude/agents/`、`.claude/skills/` |
 
 > `CLAUDE.md` 裡的 `/phaseN` 指令是**調度中心內部自動呼叫**的機制，使用者一般不用手動敲。你只需要 `/start` 或一句需求。
-</content>
-</invoke>
+
+---
+
+## 維護者：一次性設定
+
+clone 之後跑一次，啟用 git hooks（之後 commit 會自動由 `CLAUDE.md` 重生 `AGENTS.md`，給 Codex 讀取）：
+
+```bash
+python tools/install_hooks.py
+```
+
+> 規則：**只改 `CLAUDE.md`**（唯一 SSOT），`AGENTS.md` 由 hook 自動生成，別手動編輯。
+> 遠端另有 GitHub Actions CI（`.github/workflows/ci.yml`）把關 sync 與測試。

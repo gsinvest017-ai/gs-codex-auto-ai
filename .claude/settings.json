@@ -14,5 +14,19 @@
       "Skill(*)"
     ],
     "deny": []
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/tools/progress_hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }

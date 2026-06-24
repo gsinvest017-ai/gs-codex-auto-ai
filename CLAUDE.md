@@ -50,5 +50,6 @@
 - 使用者入口：`.claude/skills/start/SKILL.md`（`/start`，唯一需使用者觸發的指令）
 - Agent 定義：`.claude/agents/`（dispatcher、requirements-analyst、architecture-planner、codex-reviewer、function-builder、test-runner、log-writer）
 - Skill 定義：`.claude/skills/`（各 Phase 詳細流程）
-- 進度視圖：`tools/progress.py`（讀 `log/events.jsonl` 印進度條）
+- 進度視圖：`tools/progress.py`（讀 `log/events.jsonl` 印進度條）；另有 `/progress` skill 與 `tools/progress_hook.py`（UserPromptSubmit hook）在對話視窗同窗顯示進度
 - 日誌格式：時間戳由系統時鐘（`clock.now_iso()` 或 shell `date`）產生，**禁止 LLM 自填**；命名 `{system-timestamp}-{phase}-{描述}.md`（見 `log-writer.md` OBS-R1）
+- 指令同步：只改本檔（SSOT）；`AGENTS.md`（供 Codex 讀取）由 `.githooks/pre-commit` 於 commit 時自動重生，不手動編輯（一次性安裝 `python tools/install_hooks.py`）

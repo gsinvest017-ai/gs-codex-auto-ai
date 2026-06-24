@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# pre-commit — 由 CLAUDE.md（SSOT）自動重生 AGENTS.md 並一起進本次 commit。
+#
+# 規則：只改 CLAUDE.md，AGENTS.md 由此 hook 自動同步，使用者永遠不必手動跑
+# tools/sync_agents_md.py。本 hook 永不阻擋 commit（AGENTS.md 是純生成物，
+# 自動修復優於擋人）。
+#
+# 安裝：執行一次 `python tools/install_hooks.py`（設定 core.hooksPath=.githooks）。
+set -euo pipefail
+
+# 移到 repo 根目錄（hook 的工作目錄即 repo 根，但保險起見明確切換）
+cd "$(git rev-parse --show-toplevel)"
+
+PYTHON="$(command -v python3 || command -v python || true)"
+if [ -z "$PYTHON" ]; then
+  echo "pre-commit: 找不到 python，略過 AGENTS.md 同步。" >&2
+  exit 0
+fi
+
+# 由 CLAUDE.md 重新生成 AGENTS.md
+"$PYTHON" tools/sync_agents_md.py >/dev/null 2>&1 || {
+  echo "pre-commit: sync_agents_md.py 執行失敗，略過（不擋 commit）。" >&2
+  exit 0
+}
+
+# 若 AGENTS.md 有變動，stage 進本次 commit
+if ! git diff --quiet -- AGENTS.md 2>/dev/null; then
+  git add AGENTS.md
+  echo "pre-commit: AGENTS.md 已由 CLAUDE.md 重生並併入本次 commit。"
+fi
+
+exit 0
