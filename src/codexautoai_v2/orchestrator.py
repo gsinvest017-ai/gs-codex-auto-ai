@@ -14,8 +14,9 @@ testable without any model call.
 from __future__ import annotations
 
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterator
 
 from .audit import AuditLog
 from .depgraph import CycleError, topological_batches
@@ -68,6 +69,43 @@ class Orchestrator:
         self.state = RunState.resume_or_new(state_path, run_id)
         self.escalator = Escalator()
         self.policy = policy or PermissionPolicy()
+
+    # --- OBS-R2/R3: deterministic phase-boundary events ----------------------
+    @contextmanager
+    def phase(self, phase: str) -> Iterator[None]:
+        """Emit exactly one ``phase_start`` and one ``phase_end`` event around a
+        phase, no matter what the LLM does inside it.
+
+        Because the deterministic shell (not the LLM) owns these writes, the
+        phase progress in ``log/events.jsonl`` — and therefore ``tools/progress.py``
+        — is guaranteed to advance even if an agent forgets to log. ``status`` on
+        ``phase_end`` is ``"success"`` on normal exit and ``"failure"`` if the
+        body raises (the exception still propagates).
+
+        Usage::
+
+            with orch.phase("phase3"):
+                ... run the phase ...
+        """
+        self.state.set_phase(phase)
+        self.events.emit("phase_start", phase=phase, status="in_progress")
+        self.audit.append({"event": "phase_start", "phase": phase})
+        try:
+            yield
+        except BaseException as exc:  # noqa: BLE001 — record then re-raise
+            self.events.emit(
+                "phase_end", phase=phase, status="failure",
+                error=type(exc).__name__,
+            )
+            self.audit.append(
+                {"event": "phase_end", "phase": phase, "status": "failure"}
+            )
+            raise
+        else:
+            self.events.emit("phase_end", phase=phase, status="success")
+            self.audit.append(
+                {"event": "phase_end", "phase": phase, "status": "success"}
+            )
 
     # --- C11 / SECGOV-R6: MODE3 entry requires out-of-band authorization -----
     def authorize_mode3(self, token: str | None, *, embedded: bool = False) -> bool:

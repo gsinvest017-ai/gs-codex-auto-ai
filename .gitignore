@@ -29,8 +29,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# 本地自動生成的指令鏡像（CLAUDE.md 為 SSOT，見 project.md C3）
-AGENTS.md
+# AGENTS.md 由 CLAUDE.md 生成（tools/sync_agents_md.py）並納入版控，供 Codex 讀取；
+# 改指令一律改 CLAUDE.md（project.md C3 SSOT）。.agents/ 是工具的本地鏡像，不入庫。
 .agents/
 
 # 依賴鎖定檔（由各專案自行產生）

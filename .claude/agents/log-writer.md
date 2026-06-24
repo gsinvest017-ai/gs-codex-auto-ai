@@ -154,6 +154,7 @@ v2 採用雙層日誌：
 - `events.EventBus` 為主日誌寫入者。
 - 欄位遵循 OpenTelemetry GenAI 慣例（`gen_ai.request.model`、`gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens` 等）。
 - Markdown 摘要為次層，不可取代 JSONL。
+- **phase 邊界事件由協調引擎強制寫入**：每個 phase 一律用 `with orchestrator.phase("phaseN"):` 包住，由 `Orchestrator.phase()`（`orchestrator.py`）在進入時寫 `phase_start`、離開時寫 `phase_end`（`status=success/failure`）。此為確定性程式碼所有，**不依賴 LLM 記得寫**，因此 `tools/progress.py` 的進度條保證會推進。
 
 ### OBS-R3 — 迴圈指標可觀測
 

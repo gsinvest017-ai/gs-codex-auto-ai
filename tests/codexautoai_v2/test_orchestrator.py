@@ -288,3 +288,34 @@ def test_build_with_worktrees_merges_into_current_branch(tmp_path):
     assert all(r.ok for r in reports)
     assert (repo / "a.py").exists()
     assert (repo / "b.py").exists()
+
+
+def _read_events(tmp_path):
+    import json
+    from pathlib import Path
+    lines = Path(tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(l) for l in lines if l.strip()]
+
+
+def test_phase_emits_start_and_end_on_success(tmp_path):
+    """OBS-R2: orchestrator deterministically emits phase_start + phase_end."""
+    o = _orch(tmp_path)
+    with o.phase("phase3"):
+        pass
+    events = _read_events(tmp_path)
+    kinds = [(e["event_type"], e.get("phase"), e.get("status")) for e in events]
+    assert ("phase_start", "phase3", "in_progress") in kinds
+    assert ("phase_end", "phase3", "success") in kinds
+    assert o.audit.verify() is True
+
+
+def test_phase_emits_failure_end_and_reraises(tmp_path):
+    """A raising phase body still produces a phase_end(status=failure) event."""
+    o = _orch(tmp_path)
+    with pytest.raises(ValueError):
+        with o.phase("phase5"):
+            raise ValueError("boom")
+    events = _read_events(tmp_path)
+    ends = [e for e in events if e["event_type"] == "phase_end" and e["phase"] == "phase5"]
+    assert ends and ends[-1]["status"] == "failure"
+    assert ends[-1]["error"] == "ValueError"
