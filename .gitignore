@@ -3,6 +3,7 @@ src/*
 !src/codexautoai_v2/
 tests/*
 !tests/codexautoai_v2/
+!tests/tools/
 log/
 
 # 環境與依賴
@@ -36,3 +37,10 @@ Thumbs.db
 # 依賴鎖定檔（由各專案自行產生）
 requirements.txt
 package-lock.json
+
+# 桌面 App 打包產物（原始碼與 desktop/codexautoai.ico 入庫；build 產物不入庫）
+build/
+dist/
+*.spec
+installer/payload/
+desktop/__pycache__/

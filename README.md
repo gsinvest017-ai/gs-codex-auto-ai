@@ -8,6 +8,19 @@
 
 ---
 
+## 最簡單：桌面 App（不會用指令也能跑）
+
+到 [Releases](https://github.com/gsinvest017-ai/gs-codex-auto-ai/releases) 下載 `CodexAutoAI-setup-x.y.z.exe` → 安裝 → 點桌面**金色圖示**。
+
+App 會：環境檢查（Claude / Codex / Node / git）→ 一鍵「設定 / 修復」（登入、裝 Codex、啟用 hooks）→ 在輸入框打一句需求按 **🚀 啟動** → 自動開終端機跑完整七階段。
+
+> 仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**（App 內「設定/修復」會逐步引導，登入會開瀏覽器）。
+> 想自己 build：`pwsh installer/build-installer.ps1`（需 PyInstaller + Inno Setup 6）；開發測試：`run.cmd`。
+
+不想用 App，想直接用指令 → 看下面。
+
+---
+
 ## 快速開始（三步）
 
 ### 步驟 1 — 一鍵首次設定
