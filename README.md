@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="desktop/codexautoai.png" alt="CodexAutoAI" width="120">
+</p>
+
 # CodexAutoAI — 多 Agent 自動開發系統
 
 **Claude Code 當「大腦／調用中心」，OpenAI Codex CLI 當「寫手」。**

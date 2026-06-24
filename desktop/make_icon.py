@@ -50,11 +50,15 @@ def render(px: int) -> Image.Image:
     return img
 
 
+PNG_OUT = OUT.with_suffix(".png")
+
+
 def main() -> int:
     sizes = [16, 24, 32, 48, 64, 128, 256]
     base = render(256)
     base.save(OUT, format="ICO", sizes=[(s, s) for s in sizes])
-    print(f"已生成 {OUT}（尺寸 {sizes}）")
+    base.save(PNG_OUT, format="PNG")   # README / Release 頁內嵌用
+    print(f"已生成 {OUT}（尺寸 {sizes}）與 {PNG_OUT}")
     return 0
 
 
