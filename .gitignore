@@ -44,3 +44,9 @@ dist/
 *.spec
 installer/payload/
 desktop/__pycache__/
+
+# VS Code extension 打包產物（原始碼入庫；框架快照/icon/vsix/node_modules 不入庫）
+vscode-extension/framework/
+vscode-extension/icon.png
+vscode-extension/node_modules/
+*.vsix

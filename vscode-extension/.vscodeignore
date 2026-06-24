@@ -1,0 +1,6 @@
+.vscode/**
+.gitignore
+build-vsix.ps1
+build-vsix.sh
+**/*.map
+node_modules/**
