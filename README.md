@@ -110,13 +110,34 @@ python tools/progress.py --watch  # 持續刷新（每 2 秒）
 
 ---
 
+## 可靠性引擎（重構後「真正接上」運行時）
+
+v2 的確定性引擎（`src/codexautoai_v2/`）以前只有規格與測試、執行時從沒被呼叫；現在由 `tools/` 的橋接器真正驅動。**控制流由 Python 擁有，Codex 只是被驅動的 worker，不是 LLM 自己在循環。** 這些工具由各 Phase 的 skill 自動呼叫，使用者通常不必手動敲。
+
+| 工具 | 作用 | 對應 Phase |
+|------|------|-----------|
+| `tools/run_phase.py` | phase 邊界事件確定性寫入 `log/events.jsonl`（進度來源）；run_id 跨 phase 持久化，支援 `resume` 中斷續跑 | 全程 |
+| `tools/run_loop.py` | 把 review-fix 迴圈交給 `Orchestrator`：**三守衛（迭代上限 / 無進度 / 預算）真正強制**，卡住會 escalate 而非無限燒 token | 4、6 |
+| `tools/run_build.py` | `plan`：拓樸排序 + **循環依賴直接拒絕**；`gen-tests`：由 EARS 生成屬性測試；`build`：worktree 隔離建置（opt-in） | 4.5、5 |
+| `tools/repo_context.py` | 給 Codex prompt 預算內的 symbol 摘要而非整檔，省 token | 5 |
+
+實際保證（已用真實 Codex 端到端驗證「加法 CLI」全七階段）：
+
+- **有界終止**：修復迴圈最多 3 輪、缺陷集不縮小或超預算即停 → 一次 replan → 升級通知你，**不會無限循環**。
+- **不會跑壞 git**：絕不自動 `commit` / `push`；worktree 建置有護欄拒絕在框架 repo 執行。
+- **可恢復**：中斷後 `/start` 會問是否從上次的 phase 續跑，不必從頭重來。
+- **全程可觀測**：每個 phase / 每輪迭代 / 累計成本都進 `log/events.jsonl`，餵給進度視圖。
+
+---
+
 ## 想更深入
 
 | 想知道 | 看這裡 |
 |--------|--------|
 | 框架怎麼運作（角色分工、控制流） | `docs/codexAutoAI-architecture-analysis.md` |
+| 可靠性引擎怎麼接上運行時（橋接器） | `tools/run_phase.py`、`tools/run_loop.py`、`tools/run_build.py` |
 | 治理規則（不可逆邊界、信任邊界、終止守衛） | `DESIGN/project.md`（憲章） |
-| v2 可靠性重構做了什麼 | `DESIGN/changes/2026-06-19-v2-reliability-overhaul/` |
+| v2 可靠性重構的設計規格 | `DESIGN/changes/2026-06-19-v2-reliability-overhaul/` |
 | 調度邏輯與各 agent/skill 定義 | `CLAUDE.md`、`.claude/agents/`、`.claude/skills/` |
 
 > `CLAUDE.md` 裡的 `/phaseN` 指令是**調度中心內部自動呼叫**的機制，使用者一般不用手動敲。你只需要 `/start` 或一句需求。
