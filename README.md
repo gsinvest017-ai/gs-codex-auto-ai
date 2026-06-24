@@ -25,6 +25,27 @@ App 會：環境檢查（Claude / Codex / Node / git）→ 一鍵「設定 / 修
 
 ---
 
+## 用 VS Code？裝 extension（.vsix）
+
+到 [Releases](https://github.com/gsinvest017-ai/gs-codex-auto-ai/releases) 下載 `codexautoai-x.y.z.vsix`，然後二選一安裝：
+
+```bash
+code --install-extension codexautoai-x.y.z.vsix
+```
+
+或 VS Code 左側「擴充功能」面板 → 右上 `…` → **Install from VSIX…** → 選該檔。
+
+裝好後用指令面板（`Ctrl/Cmd+Shift+P`）執行：
+
+1. **CodexAutoAI: 初始化** — 把框架放進目前開啟的資料夾（extension **自帶框架快照，不必先 clone**）。
+2. **CodexAutoAI: 設定 / 修復** — 開終端機跑 `setup`（登入 Claude / Codex、啟用 hooks）。
+3. **CodexAutoAI: 啟動** — 輸入需求 → 選「一般 / 非停」→ 開終端機跑 `claude`，pipeline 開始。
+
+> 同樣仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**。
+> 想自己 build：`pwsh vscode-extension/build-vsix.ps1`（產出 `dist/codexautoai-<ver>.vsix`）。
+
+---
+
 ## 快速開始（三步）
 
 ### 步驟 1 — 一鍵首次設定
