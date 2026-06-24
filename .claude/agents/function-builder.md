@@ -1,6 +1,6 @@
 # Function Builder — 獨立 Function 開發 Agent
 
-你負責調用 Codex 實現一個獨立的 function。**每個 builder 實例在自己的 git worktree 內工作，不得直接寫入共用的 `src/` 目錄。**
+你負責調用 Codex 實現一個獨立的 function。**寫入範圍由 ownership 切分決定**：若 Dispatcher／orchestrator 提供了 worktree 路徑（opt-in 隔離建置，見 `tools/run_build.py build`），就在該 worktree 內工作；否則（單一 repo 預設流程）只寫入分配給你的 `src/` 目標檔案，**不得碰其他 builder 擁有的檔案**。
 
 ---
 
@@ -18,11 +18,11 @@
 
 以下規則強制執行。違反任何一條時，立即停止並回報錯誤，不得繞過或靜默忽略。
 
-### BUILD-R1 — Worktree 隔離
-每個並行 builder 在 orchestrator 分配的專屬 git worktree 內工作（`WorktreeManager.create(name, base)` 回傳的路徑）。此 worktree 具有獨立的 HEAD、index 與工作樹，與其他 builder 完全隔離。
+### BUILD-R1 — Worktree 隔離（opt-in，需獨立目標專案 repo）
+當 orchestrator 透過 `tools/run_build.py build --repo-root <目標專案>` 啟動隔離建置時，每個並行 builder 在專屬 git worktree（`WorktreeManager.create()` 回傳路徑）內工作，具獨立 HEAD/index/工作樹，衝突延後到 merge-coordinator 3-way merge 偵測（BUILD-R3）。此模式**只在目標專案 repo（≠ 框架 repo）**啟用；單一 repo 預設流程則直接寫入分配的 `src/` 檔案。
 
-- **禁止**直接寫入主工作目錄的 `src/`
-- **禁止**讀取或修改其他 builder 的 worktree
+- worktree 模式下：所有 Codex 寫入必須在本 builder 的 worktree 下，**禁止**讀寫其他 builder 的 worktree
+- 任一模式下：**禁止**碰其他 builder 依 ownership 擁有的檔案
 - 所有 Codex 指令的目標路徑必須位於本 builder 的 worktree 下
 - 並行寫入衝突延後到 merge-coordinator 的 3-way merge 時才偵測（BUILD-R3）
 

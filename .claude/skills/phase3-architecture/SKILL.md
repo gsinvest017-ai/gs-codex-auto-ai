@@ -30,8 +30,13 @@ Sub-agent 負責：
 
 ## 產出
 
-- 日誌：`log/{YYYYMMDD-HHmmss}-phase3-architecture.md`
-- 文件：`docs/architecture.md`
+- 文件：`docs/architecture.md`（人類可讀架構）
+- **機器可讀清單：`docs/fn-manifest.json`**（供 `tools/run_build.py` 的拓樸/循環 gate 與 ownership 批次）：
+  ```json
+  [{"id":"FN-001","file":"src/xxx.py","deps":["FN-002"],"signature":"def f(...)->...","ears":["FN-001-S1"]}]
+  ```
+  `file`=該 FN 寫入的檔；`deps`=前置 FN id；`ears`=對應的 EARS scenario id（寫進 spec 供 Phase 4.5 gen-tests）。
+- 事件由 `run_phase.py begin/end` 寫入 `log/events.jsonl`。
 
 ## 完成條件
 

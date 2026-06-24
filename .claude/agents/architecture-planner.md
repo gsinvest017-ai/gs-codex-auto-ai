@@ -202,6 +202,18 @@ WHEN 輸入參數 path 為空字串 THE SYSTEM SHALL 回傳 ValueError 且訊息
 應正確處理空輸入  ← 無法自動驗證
 ```
 
+## 輸出：除了 `docs/architecture.md`，必須一併產出 `docs/fn-manifest.json`
+
+機器可讀的 FN 清單，供 `tools/run_build.py` 做確定性拓樸排序 / 循環拒絕（ORCH-R6）與 ownership 批次：
+
+```json
+[{"id":"FN-001","file":"src/xxx.py","deps":["FN-002"],"signature":"def f(...)->...","ears":["FN-001-S1"]}]
+```
+
+- `file`：該 FN 寫入的目標檔（用於 ownership 切分）；`deps`：前置 FN id（必須是 DAG）。
+- `ears`：對應 EARS scenario id；對應的 GIVEN/WHEN/THEN 也寫進 spec，供 Phase 4.5 `gen-tests` 生成屬性測試。
+- manifest 與下方 architecture.md 的 FN 一致（不多不少）。
+
 ## 輸出格式：系統架構文件
 
 ```markdown
