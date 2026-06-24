@@ -123,10 +123,10 @@ def cmd_build(args) -> dict:
         cmd = (args.build_cmd.replace("{worktree}", wt)
                .replace("{owner_file}", owner)
                .replace("{fns}", ",".join(assignment.get("fns", []))))
-        subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True)
-        subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True, text=True)
+        subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         subprocess.run(["git", "-C", wt, "commit", "-m", f"build {owner}"],
-                      capture_output=True, text=True)  # 無變更時 commit 失敗無妨
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")  # 無變更時 commit 失敗無妨
 
     reports = orch.build_with_worktrees(str(repo_root), batches, build_fn)
     conflicts = [b for r in reports for b in getattr(r, "conflicts", [])]

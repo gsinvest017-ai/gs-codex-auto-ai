@@ -144,7 +144,7 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         # REVIEW-R2-S2：若有 compile 步驟且編譯失敗，跳過昂貴的 reviewer/測試，直接 fix。
         if compile_cmd:
             cp = subprocess.run(_subst(compile_cmd, iteration, defects_file, review_out),
-                               shell=True, cwd=workdir, capture_output=True, text=True)
+                               shell=True, cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if _grounding(cp.returncode == 0, (cp.stdout or "") + (cp.stderr or "")):
                 raw = (cp.stdout or "") + "\n" + (cp.stderr or "")
                 _write(defects_file, raw); raw_box[0] = raw
@@ -154,7 +154,7 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
                 return {"defects": ["compile:failed"], "tokens": 0}
         cmd = _subst(review_cmd, iteration, defects_file, review_out)
         proc = subprocess.run(cmd, shell=True, cwd=workdir,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
         if mode == "test":
             defects = parse_pytest_failures(proc.stdout, proc.stderr, proc.returncode)
             raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -179,7 +179,7 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         cmd = _subst(fix_cmd, iteration, defects_file, review_out)
         # Codex CLI 薄 retry：非零 exit 先便宜地重試，再交給下一輪 review 判定。
         for _ in range(max(1, fix_retries)):
-            p = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True)
+            p = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if p.returncode == 0:
                 break
         diff = _git_diff_stat(workdir)            # 唯讀，永不 commit（C6）
@@ -207,7 +207,7 @@ def _write(path: str, text: str) -> None:
 def _git_diff_stat(workdir: str) -> str:
     try:
         p = subprocess.run(["git", "-C", workdir, "diff", "--stat"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
         return p.stdout.strip()
     except Exception:
         return ""
