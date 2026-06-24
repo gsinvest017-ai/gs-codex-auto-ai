@@ -29,6 +29,10 @@ Thumbs.db
 .vscode/
 .idea/
 
+# 本地自動生成的指令鏡像（CLAUDE.md 為 SSOT，見 project.md C3）
+AGENTS.md
+.agents/
+
 # 依賴鎖定檔（由各專案自行產生）
 requirements.txt
 package-lock.json
