@@ -10,18 +10,29 @@
 
 ## 快速開始（三步）
 
-### 步驟 1 — 登入兩個工具（首次必做）
+### 步驟 1 — 一鍵首次設定
+
+clone 後跑一次。它會一條龍完成「登入 Claude → 安裝/登入 Codex → 啟用 git hooks」，**已完成的步驟會自動跳過**（可安全重跑），登入時會開瀏覽器，完成後自動往下。
 
 ```bash
-# Claude Code
-claude --version
-claude login           # 會開瀏覽器
+# Windows：雙擊 setup.cmd，或在 PowerShell：
+./setup.ps1
 
-# OpenAI Codex CLI
-npm install -g @openai/codex   # 如未安裝
-codex --version
-codex login            # 會開瀏覽器
+# Git Bash / Linux / macOS：
+./setup.sh
 ```
+
+> 想先看它會做什麼而不實際登入：加 `--dry-run`（bash）或 `-DryRun`（ps1）。
+> 其他旗標：`--force-login` 強制重新登入、`--skip-hooks` 不裝 git hooks。
+
+<details><summary>不想用腳本？手動三條指令（等價）</summary>
+
+```bash
+claude login                              # Claude Code 登入（開瀏覽器）
+npm install -g @openai/codex && codex login  # Codex 安裝 + 登入（開瀏覽器）
+python tools/install_hooks.py             # 啟用 git hooks（AGENTS.md 自動同步）
+```
+</details>
 
 ### 步驟 2 — 在這個資料夾開啟 Claude Code
 
@@ -112,13 +123,9 @@ python tools/progress.py --watch  # 持續刷新（每 2 秒）
 
 ---
 
-## 維護者：一次性設定
+## 維護者：改指令的規則
 
-clone 之後跑一次，啟用 git hooks（之後 commit 會自動由 `CLAUDE.md` 重生 `AGENTS.md`，給 Codex 讀取）：
+git hooks 已由步驟 1 的 `setup` 啟用（或單獨跑 `python tools/install_hooks.py`）。之後：
 
-```bash
-python tools/install_hooks.py
-```
-
-> 規則：**只改 `CLAUDE.md`**（唯一 SSOT），`AGENTS.md` 由 hook 自動生成，別手動編輯。
+> 規則：**只改 `CLAUDE.md`**（唯一 SSOT），`AGENTS.md` 由 `.githooks/pre-commit` 在 commit 時自動重生並一起進 commit，別手動編輯。
 > 遠端另有 GitHub Actions CI（`.github/workflows/ci.yml`）把關 sync 與測試。
