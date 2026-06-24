@@ -132,6 +132,25 @@ def cmd_status(root: Path) -> None:
     print(ptr.read_text(encoding="utf-8").strip() if ptr.exists() else "(no active run)")
 
 
+def cmd_resume(root: Path) -> dict:
+    """讀 state.json 回報可續跑點（STATE-R1）：run_id / 最後 phase / 已完成 action。
+    Dispatcher / /start 可據此從中斷的 phase 續跑，而非從 Phase 0 重來。"""
+    paths = _paths(root)
+    info = {"resumable": False, "run_id": None, "phase": None, "completed": []}
+    try:
+        if str(_TOOL_ROOT) not in sys.path:
+            sys.path.insert(0, str(_TOOL_ROOT))
+        from src.codexautoai_v2.state import RunState  # noqa: E402
+        st = RunState.load(paths["state"])
+        info.update(resumable=True, run_id=st.run_id, phase=st.phase,
+                    completed=st.completed_actions())
+    except Exception:
+        pass
+    import json as _json
+    print(_json.dumps(info, ensure_ascii=False))
+    return info
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -148,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     p_end.add_argument("--status", choices=["success", "failure"], required=True)
     p_end.add_argument("--error"); p_end.add_argument("--run-id")
     sub.add_parser("status")
+    sub.add_parser("resume")
 
     args = ap.parse_args(argv)
     root = _project_dir()
@@ -162,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd_end(root, args.phase, args.status, args.error, args.run_id)
         elif args.cmd == "status":
             cmd_status(root)
+        elif args.cmd == "resume":
+            cmd_resume(root)
     except Exception as exc:  # noqa: BLE001
         print(f"run_phase: {type(exc).__name__}: {exc}", file=sys.stderr)
     return 0

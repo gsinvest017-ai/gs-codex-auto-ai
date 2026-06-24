@@ -130,10 +130,28 @@ def _subst(template: str, iteration: int, defects_file: str, review_out: str) ->
 # callable 工廠
 # ---------------------------------------------------------------------------
 def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
-                    defects_file, review_out, boxes):
+                    defects_file, review_out, boxes, compile_cmd=None, fix_retries=1):
     cost_box, raw_box = boxes["cost"], boxes["raw"]
 
+    def _grounding(compiled, test_out):
+        # 延遲匯入 review.py，套用 REVIEW-R2 的 grounding / skip 規則。
+        from src.codexautoai_v2.review import GroundingSignals, require_grounding, should_skip_llm_review
+        sig = GroundingSignals(compiled=compiled, test_output=test_out or "", lint_output="")
+        require_grounding(sig)            # 確保審查錨定事實（不會 raise，compiled 為具體訊號）
+        return should_skip_llm_review(sig)
+
     def review(fix, iteration):
+        # REVIEW-R2-S2：若有 compile 步驟且編譯失敗，跳過昂貴的 reviewer/測試，直接 fix。
+        if compile_cmd:
+            cp = subprocess.run(_subst(compile_cmd, iteration, defects_file, review_out),
+                               shell=True, cwd=workdir, capture_output=True, text=True)
+            if _grounding(cp.returncode == 0, (cp.stdout or "") + (cp.stderr or "")):
+                raw = (cp.stdout or "") + "\n" + (cp.stderr or "")
+                _write(defects_file, raw); raw_box[0] = raw
+                orch.events.emit("loop_tick", phase=phase_label, iteration=iteration,
+                                cumulative_cost_usd=round(cost_box[0] / 1000.0, 6),
+                                status="in_progress")
+                return {"defects": ["compile:failed"], "tokens": 0}
         cmd = _subst(review_cmd, iteration, defects_file, review_out)
         proc = subprocess.run(cmd, shell=True, cwd=workdir,
                               capture_output=True, text=True)
@@ -159,8 +177,11 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         if iteration == 0 or not raw_box[0].strip():
             return {"diff": "", "tokens": 0}
         cmd = _subst(fix_cmd, iteration, defects_file, review_out)
-        subprocess.run(cmd, shell=True, cwd=workdir,
-                      capture_output=True, text=True)
+        # Codex CLI 薄 retry：非零 exit 先便宜地重試，再交給下一輪 review 判定。
+        for _ in range(max(1, fix_retries)):
+            p = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True)
+            if p.returncode == 0:
+                break
         diff = _git_diff_stat(workdir)            # 唯讀，永不 commit（C6）
         tokens = estimate_tokens(cmd, raw_box[0])
         cost_box[0] += tokens
@@ -220,7 +241,8 @@ def run(args) -> dict:
 
     produce_fix, review = _make_callables(
         orch, args.mode, phase_label, workdir,
-        args.review_cmd, args.fix_cmd, defects_file, review_out, boxes)
+        args.review_cmd, args.fix_cmd, defects_file, review_out, boxes,
+        compile_cmd=args.compile_cmd, fix_retries=args.fix_retries)
 
     result = orch.run_fix_loop(
         produce_fix=produce_fix, review=review,
@@ -251,6 +273,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workdir")
     ap.add_argument("--review-cmd", required=True)
     ap.add_argument("--fix-cmd", required=True)
+    ap.add_argument("--compile-cmd", default=None,
+                    help="可選：先跑編譯/語法檢查；失敗則跳過 reviewer 直接 fix（REVIEW-R2-S2 省成本）")
+    ap.add_argument("--fix-retries", type=int, default=1,
+                    help="fix-cmd 非零 exit 時的便宜 CLI 重試次數（預設 1）")
     ap.add_argument("--reviewer-model")
     ap.add_argument("--fixer-model")
     ap.add_argument("--available")

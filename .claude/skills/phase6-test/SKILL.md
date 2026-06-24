@@ -77,6 +77,8 @@ python tools/run_loop.py --mode test --phase 6 --run-id <id> --max-iters 3 --pat
   --fix-cmd 'codex exec --full-auto "下列測試失敗，請修正 src/ 下程式碼（禁止改 tests/），只寫入 src/：\n$(cat {defects_file})"'
 ```
 
+（可選旗標：`--fix-retries 2` 便宜地重試 Codex；`--compile-cmd "<語法/編譯檢查>"` 編譯失敗時跳過測試直接 fix，省成本——REVIEW-R2-S2。）
+
 讀 stdout 的 JSON `status`：
 - `resolved` / `resolved_after_replan` → 全部通過 → **進入 Phase 7**
 - `escalated` → 守衛觸發且一次 replan 未解 → **停止並通知使用者，不得再循環**
