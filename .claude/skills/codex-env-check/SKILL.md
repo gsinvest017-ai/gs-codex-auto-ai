@@ -1,6 +1,7 @@
 ---
 name: codex-env-check
 description: 檢查 Codex CLI 環境是否設定完成。Claude 每次被觸發時應最先執行此檢查。
+user-invocable: false
 ---
 
 # Codex 環境檢查

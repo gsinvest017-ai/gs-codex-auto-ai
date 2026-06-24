@@ -1,5 +1,6 @@
 ---
 name: phase4-review
+user-invocable: false
 description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求契合度。"
 ---
 

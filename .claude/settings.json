@@ -22,17 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/tools/start_hook.py\"",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/tools/progress_hook.py\"",
+            "command": "python \"$CLAUDE_PROJECT_DIR/tools/dispatch_hook.py\"",
             "timeout": 10
           }
         ]

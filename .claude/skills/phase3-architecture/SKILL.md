@@ -1,5 +1,6 @@
 ---
 name: phase3-architecture
+user-invocable: false
 description: "Phase 3：派遣架構規劃 agent，產出系統架構文件與 function 拆解。"
 ---
 

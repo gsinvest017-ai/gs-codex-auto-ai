@@ -1,5 +1,6 @@
 ---
 name: phase5-build
+user-invocable: false
 description: "Phase 5：根據架構文件並行派遣 function-builder agent 開發所有 function。"
 ---
 

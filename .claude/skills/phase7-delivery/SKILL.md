@@ -1,5 +1,6 @@
 ---
 name: phase7-delivery
+user-invocable: false
 description: "Phase 7：建置專案執行環境、產出類型專屬報告與交付說明。"
 ---
 

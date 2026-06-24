@@ -1,5 +1,6 @@
 ---
 name: qaqa
+user-invocable: false
 description: "qaqa：對當前專案進行完整品質審查（SDD spec + 雙軌測試 + 三方審查）"
 ---
 

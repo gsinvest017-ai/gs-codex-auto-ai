@@ -1,5 +1,6 @@
 ---
 name: phase0-init
+user-invocable: false
 description: "Phase 0：專案初始化，建立標準資料夾結構並記錄日誌。"
 ---
 

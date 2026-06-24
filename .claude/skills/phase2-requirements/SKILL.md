@@ -1,5 +1,6 @@
 ---
 name: phase2-requirements
+user-invocable: false
 description: "Phase 2：派遣需求分析 agent，產出需求規格書。"
 ---
 

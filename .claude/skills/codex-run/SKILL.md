@@ -1,5 +1,6 @@
 ---
 name: codex-run
+user-invocable: false
 description: 調用 OpenAI Codex CLI 執行任務。當使用者要求透過 Codex 執行程式碼生成、修復、重構等任務時使用。
 ---
 

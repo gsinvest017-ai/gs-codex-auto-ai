@@ -1,5 +1,6 @@
 ---
 name: phase6-test
+user-invocable: false
 description: "Phase 6：環境建置 + 根據專案類型並行執行完整測試。"
 ---
 
