@@ -18,6 +18,8 @@
 
 App 會：環境檢查（Claude / Codex / Node / git）→ 一鍵「設定 / 修復」（登入、裝 Codex、啟用 hooks）→ 在輸入框打一句需求按 **🚀 啟動** → 自動開終端機跑完整七階段。
 
+> **自動檢查更新**：App 啟動時會在背景比對 GitHub Release 的最新 `app-v*` 版本，有新版就在上方跳金色橫幅，按 **⬇ 立即更新** 即自動下載安裝檔並啟動更新（私有 repo，需先 `gh auth login` 或設定 `GH_TOKEN`）。
+
 > 仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**（App 內「設定/修復」會逐步引導，登入會開瀏覽器）。
 > 想自己 build：`pwsh installer/build-installer.ps1`（需 PyInstaller + Inno Setup 6）；開發測試：`run.cmd`。
 
@@ -44,9 +46,11 @@ code --install-extension codexautoai-x.y.z.vsix
 1. **CodexAutoAI: 初始化** — 把框架放進目前開啟的資料夾（extension **自帶框架快照，不必先 clone**）。
 2. **CodexAutoAI: 設定 / 修復** — 開終端機跑 `setup`（登入 Claude / Codex、啟用 hooks）。
 3. **CodexAutoAI: 啟動** — 輸入需求 → 選「一般 / 非停」→ 開終端機跑 `claude`，pipeline 開始。
+4. **CodexAutoAI: 檢查更新** — 手動比對 GitHub Release 的最新 `ext-v*` 版本；啟動時也會自動查（每天一次，可在設定 `codexautoai.checkForUpdates` 關閉）。有新版會跳通知，按 **下載 .vsix** 取得新版重裝。
 
 > 同樣仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**。
 > 想自己 build：`pwsh vscode-extension/build-vsix.ps1`（產出 `dist/codexautoai-<ver>.vsix`）。
+> 想發佈新版：`pwsh vscode-extension/release-vsix.ps1`（建 `ext-v<ver>` tag + 上傳 .vsix 到 Release）。
 
 ---
 

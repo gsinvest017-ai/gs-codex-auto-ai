@@ -4,6 +4,7 @@ src/*
 tests/*
 !tests/codexautoai_v2/
 !tests/tools/
+!tests/test_updater.py
 log/
 
 # 環境與依賴

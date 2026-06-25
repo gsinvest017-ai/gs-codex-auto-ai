@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "gsinvest",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other", "AI"],
@@ -11,12 +11,13 @@
   "repository": { "type": "git", "url": "https://github.com/gsinvest017-ai/gs-codex-auto-ai" },
   "license": "SEE LICENSE IN ../LICENSE",
   "main": "./extension.js",
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
       { "command": "codexautoai.init", "title": "CodexAutoAI: 初始化（把框架放進這個資料夾）" },
       { "command": "codexautoai.start", "title": "CodexAutoAI: 啟動（輸入需求跑 pipeline）" },
-      { "command": "codexautoai.setup", "title": "CodexAutoAI: 設定 / 修復（登入 + 啟用 hooks）" }
+      { "command": "codexautoai.setup", "title": "CodexAutoAI: 設定 / 修復（登入 + 啟用 hooks）" },
+      { "command": "codexautoai.checkUpdate", "title": "CodexAutoAI: 檢查更新" }
     ],
     "configuration": {
       "title": "CodexAutoAI",
@@ -25,6 +26,11 @@
           "type": "string",
           "default": "做一個記帳 CLI 工具，資料存 SQLite",
           "description": "啟動時輸入框的預設需求。"
+        },
+        "codexautoai.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "啟動時自動檢查 GitHub Release 是否有新版 extension（每天最多一次）。"
         }
       }
     }
