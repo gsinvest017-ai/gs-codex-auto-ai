@@ -58,7 +58,8 @@ function activate(context) {
       if (!hasFramework(root)) { copyFramework(extPath, root); }
       const t = termInRoot(root, "CodexAutoAI Setup");
       t.show();
-      t.sendText(process.platform === "win32" ? "setup.cmd" : "bash setup.sh");
+      // PowerShell/cmd 不會從目前目錄載入指令，必須 .\ 前綴；Git Bash/Linux 用 bash。
+      t.sendText(process.platform === "win32" ? ".\\setup.cmd" : "bash setup.sh");
     })
   );
 
