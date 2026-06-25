@@ -70,7 +70,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $ver = $tag.Substring(4)
+          $ver = $tag.Substring(5)  # 去掉 "ext-v" 前綴（5 字元）
           $asset = "dist/codexautoai-$ver.vsix"
           if (-not (Test-Path $asset)) { throw "找不到 .vsix：$asset" }
           $notes = "VS Code extension $ver：自帶框架快照 + 自動檢查更新。"
