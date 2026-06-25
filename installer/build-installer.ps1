@@ -46,9 +46,10 @@ foreach ($f in $includeFiles) { if (Test-Path $f) { Copy-Item $f -Destination $p
 # docs：只帶 templates（報告模板）
 New-Item -ItemType Directory -Force (Join-Path $payload "docs") | Out-Null
 if (Test-Path "docs/templates") { Copy-Item "docs/templates" -Destination (Join-Path $payload "docs") -Recurse -Force }
-# 圖示（捷徑用）
+# 圖示（捷徑用）+ VERSION（更新檢查讀本機版號用）
 New-Item -ItemType Directory -Force (Join-Path $payload "desktop") | Out-Null
 Copy-Item "desktop/codexautoai.ico" -Destination (Join-Path $payload "desktop") -Force
+if (Test-Path "desktop/VERSION") { Copy-Item "desktop/VERSION" -Destination (Join-Path $payload "desktop") -Force }
 # launcher exe
 Copy-Item "dist/CodexAutoAI.exe" -Destination $payload -Force
 

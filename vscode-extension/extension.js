@@ -1,9 +1,16 @@
 // CodexAutoAI VS Code extension — 啟動器（自帶框架快照）。
-// 三個指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復。
-// 純 vscode API + Node fs，無第三方依賴。
+// 四個指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復、檢查更新。
+// 純 vscode API + Node 內建模組（fs / path / https / child_process），無第三方依賴。
 const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
+const { execFile } = require("child_process");
+
+// extension 以 .vsix 發佈（非 Marketplace），更新來源為 GitHub Release（tag 前綴 ext-v）。
+const REPO = process.env.CODEXAUTOAI_UPDATE_REPO || "gsinvest017-ai/gs-codex-auto-ai";
+const TAG_PREFIX = "ext-v";
+const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 每天最多自動查一次
 
 function workspaceRoot() {
   const f = vscode.workspace.workspaceFolders;
@@ -32,6 +39,125 @@ function copyFramework(extPath, root) {
 
 function termInRoot(root, name) {
   return vscode.window.createTerminal({ name, cwd: root });
+}
+
+// ── 版本檢查（借鏡 autogo updater：private repo 需 token、永不 throw）─────────────
+function parseVer(s) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(s || "");
+  return m ? [+m[1], +m[2], +m[3]] : null;
+}
+
+function isNewer(latest, current) {
+  const a = parseVer(latest), b = parseVer(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i]; }
+  return false;
+}
+
+// token 解析：環境變數 → gh CLI（與桌面 App updater 同策略）。回傳 Promise<string|null>。
+function ghToken() {
+  for (const k of ["CODEXAUTOAI_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
+    const v = (process.env[k] || "").trim();
+    if (v) return Promise.resolve(v);
+  }
+  return new Promise((resolve) => {
+    // gh 在 Windows 是真正的 gh.exe（非 .cmd 蓋子），execFile 免 shell 即可，
+    // 也避開 shell:true + args 的 DEP0190 警告。
+    const cmd = process.platform === "win32" ? "gh.exe" : "gh";
+    execFile(cmd, ["auth", "token"], { timeout: 6000 }, (err, stdout) => {
+      resolve(err ? null : (stdout || "").trim() || null);
+    });
+  });
+}
+
+// GET https://api.github.com<path>，帶 auth。回傳 Promise<parsed|null>，永不 reject。
+function apiGet(apiPath, token) {
+  return new Promise((resolve) => {
+    const headers = {
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "codexautoai-vsix-updater",
+    };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const req = https.request(
+      { host: "api.github.com", path: apiPath, method: "GET", headers, timeout: 8000 },
+      (res) => {
+        let buf = "";
+        res.on("data", (c) => (buf += c));
+        res.on("end", () => {
+          try { resolve(res.statusCode < 300 ? JSON.parse(buf) : null); }
+          catch { resolve(null); }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+// 取最新的 extension release（tag 以 ext-v 開頭），與桌面 app-v* 區隔。
+async function latestExtRelease(token) {
+  const list = await apiGet(`/repos/${REPO}/releases?per_page=30`, token);
+  if (!Array.isArray(list)) return null;
+  let best = null, bestVer = null;
+  for (const rel of list) {
+    if (rel.draft) continue;
+    const tag = rel.tag_name || "";
+    if (!tag.startsWith(TAG_PREFIX)) continue;
+    const ver = parseVer(tag);
+    if (!ver) continue;
+    if (!bestVer || isNewer(tag, `${bestVer[0]}.${bestVer[1]}.${bestVer[2]}`)) {
+      best = rel; bestVer = ver;
+    }
+  }
+  return best;
+}
+
+// 主流程：查到新版跳通知；manual=true 時連「已最新 / 查不到」也回報。
+async function checkForUpdate(context, { manual = false } = {}) {
+  const current = (context.extension && context.extension.packageJSON &&
+                   context.extension.packageJSON.version) || "0.0.0";
+
+  if (!manual) {
+    const cfg = vscode.workspace.getConfiguration("codexautoai");
+    if (cfg.get("checkForUpdates", true) === false) return;
+    const last = context.globalState.get("lastUpdateCheck", 0);
+    if (Date.now() - last < CHECK_INTERVAL_MS) return;
+    context.globalState.update("lastUpdateCheck", Date.now());
+  }
+
+  const token = await ghToken();
+  const rel = await latestExtRelease(token);
+  if (!rel) {
+    if (manual) {
+      vscode.window.showWarningMessage(
+        token ? "CodexAutoAI: 查不到 extension release（尚未發佈或網路問題）。"
+              : "CodexAutoAI: 無法讀取 Release（repo 為 private，請先 `gh auth login` 或設定 GH_TOKEN）。");
+    }
+    return;
+  }
+  const tag = rel.tag_name || "";
+  const latest = tag.startsWith(TAG_PREFIX) ? tag.slice(TAG_PREFIX.length) : tag.replace(/^v/, "");
+  if (!isNewer(latest, current)) {
+    if (manual) vscode.window.showInformationMessage(`CodexAutoAI: 已是最新版 v${current}。`);
+    return;
+  }
+
+  const vsix = (rel.assets || []).find((a) => /\.vsix$/i.test(a.name || ""));
+  const dlUrl = (vsix && vsix.browser_download_url) || rel.html_url;
+  const picks = ["下載 .vsix", "查看 Release", "不再提醒"];
+  const choice = await vscode.window.showInformationMessage(
+    `🎉 CodexAutoAI 有新版本 v${latest}（目前 v${current}）`, ...picks);
+  if (choice === "下載 .vsix") {
+    vscode.env.openExternal(vscode.Uri.parse(dlUrl));
+    vscode.window.showInformationMessage(
+      "下載 .vsix 後，在命令面板執行「Extensions: Install from VSIX…」或 `code --install-extension <檔>` 安裝。");
+  } else if (choice === "查看 Release") {
+    vscode.env.openExternal(vscode.Uri.parse(rel.html_url));
+  } else if (choice === "不再提醒") {
+    vscode.workspace.getConfiguration("codexautoai").update(
+      "checkForUpdates", false, vscode.ConfigurationTarget.Global);
+  }
 }
 
 function activate(context) {
@@ -96,6 +222,14 @@ function activate(context) {
       t.sendText(inner);
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.checkUpdate", () =>
+      checkForUpdate(context, { manual: true }))
+  );
+
+  // 啟動時背景檢查（不阻塞 activate；失敗靜默）。
+  checkForUpdate(context).catch(() => {});
 }
 
 function deactivate() {}

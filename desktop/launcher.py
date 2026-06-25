@@ -14,11 +14,18 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import webbrowser
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
+
+try:
+    import updater  # 版本檢查 / 自動更新（sibling module，凍結時一併打包）
+except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
+    updater = None
 
 # ── GS 暗金主題 ──────────────────────────────────────────────────────────────
 BG = "#0f1115"          # warm-black
@@ -158,16 +165,30 @@ class LauncherUI:
         self.h2 = tkfont.Font(family="Segoe UI", size=11)
         self.mono = tkfont.Font(family="Consolas", size=10)
         self.rows: dict[str, dict] = {}
+        self._update_info: dict | None = None
         self._build()
         self.refresh()
+        self.start_update_check()
 
     def _build(self) -> None:
         tk.Label(self.root, text="CodexAutoAI", font=self.h1, fg=GOLD, bg=BG).pack(pady=(22, 2))
         tk.Label(self.root, text="一句話描述需求，自動跑完需求→架構→寫碼→測試→交付",
                  font=self.h2, fg=MUTED, bg=BG).pack(pady=(0, 16))
 
+        # 更新橫幅（預設隱藏，背景檢查到新版才 pack 進來）
+        self.update_banner = tk.Frame(self.root, bg="#2a2410")
+        self.update_text = tk.Label(self.update_banner, text="", font=self.h2,
+                                    fg=GOLD, bg="#2a2410", anchor="w", justify="left")
+        self.update_text.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=8)
+        self.update_btn = tk.Button(self.update_banner, text="⬇ 立即更新",
+                                    command=self.on_update_apply, font=self.h2,
+                                    bg=GOLD, fg=BG, relief="flat", padx=10, pady=2)
+        self.update_btn.pack(side="left", padx=(0, 6), pady=8)
+        tk.Button(self.update_banner, text="✕", command=self.dismiss_update, font=self.h2,
+                  bg="#2a2410", fg=MUTED, relief="flat", padx=6).pack(side="left", padx=(0, 10))
+
         # 環境檢查卡
-        card = tk.Frame(self.root, bg=CARD)
+        self.card = card = tk.Frame(self.root, bg=CARD)
         card.pack(fill="x", padx=22)
         tk.Label(card, text="環境檢查", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(anchor="w", padx=14, pady=(12, 6))
         for c in gather_checks():
@@ -225,6 +246,75 @@ class LauncherUI:
         req = self.req.get("1.0", "end").strip()
         if launch_claude(req):
             self.status.config(text="已開啟終端機，CodexAutoAI 在新視窗執行中…", fg=GREEN)
+
+    # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
+    def start_update_check(self) -> None:
+        """背景 thread 查 GitHub Release，避免卡住 UI；查到新版才顯示橫幅。"""
+        if updater is None:
+            return
+
+        def worker() -> None:
+            try:
+                info = updater.check_update()
+            except Exception:  # noqa: BLE001 — 檢查失敗就靜默
+                return
+            # 回主執行緒更新 UI（tkinter 非 thread-safe）
+            self.root.after(0, lambda: self._on_update_result(info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_result(self, info: dict) -> None:
+        if not info or not info.get("update_available"):
+            return
+        self._update_info = info
+        latest, current = info.get("latest"), info.get("current")
+        self.update_text.config(
+            text=f"🎉 有新版本 v{latest}（目前 v{current}）")
+        # 安裝版才提供一鍵更新；dev/無資產時退化成「查看 Release」
+        if info.get("installed") and info.get("asset_name"):
+            self.update_btn.config(text="⬇ 立即更新", command=self.on_update_apply)
+        else:
+            self.update_btn.config(text="↗ 查看 Release", command=self.open_release)
+        self.update_banner.pack(fill="x", padx=22, pady=(0, 10), before=self.card)
+
+    def open_release(self) -> None:
+        info = self._update_info or {}
+        url = info.get("html_url") or f"https://github.com/{(updater.repo() if updater else '')}/releases"
+        webbrowser.open(url)
+
+    def dismiss_update(self) -> None:
+        self.update_banner.pack_forget()
+
+    def on_update_apply(self) -> None:
+        if updater is None:
+            return
+        self.update_btn.config(state="disabled", text="⏳ 下載中…")
+        self.status.config(text="正在下載更新…", fg=GOLD)
+
+        def worker() -> None:
+            try:
+                res = updater.apply_update()
+            except Exception as exc:  # noqa: BLE001
+                res = {"status": "error", "error": str(exc)}
+            self.root.after(0, lambda: self._on_update_applied(res))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_applied(self, res: dict) -> None:
+        st = res.get("status")
+        if st == "updating":
+            self.update_text.config(
+                text=f"⬇ 安裝程式已開啟：v{res.get('from')} → v{res.get('to')}，"
+                     "請依精靈完成更新後重新開啟。")
+            self.update_btn.pack_forget()
+            self.status.config(text="安裝程式已啟動，完成後請重開 App", fg=GREEN)
+        elif st == "refused":
+            self.update_btn.config(state="normal", text="↗ 查看 Release",
+                                  command=self.open_release)
+            self.status.config(text=res.get("error", "非安裝版，請用 git pull"), fg=GOLD)
+        else:
+            self.update_btn.config(state="normal", text="⬇ 立即更新")
+            self.status.config(text="更新失敗：" + str(res.get("error")), fg=RED)
 
 
 def main() -> int:

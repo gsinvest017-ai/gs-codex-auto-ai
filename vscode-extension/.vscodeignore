@@ -2,5 +2,6 @@
 .gitignore
 build-vsix.ps1
 build-vsix.sh
+release-vsix.ps1
 **/*.map
 node_modules/**
