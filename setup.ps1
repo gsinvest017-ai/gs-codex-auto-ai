@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   CodexAutoAI 一鍵首次設定（Windows PowerShell）。
 .DESCRIPTION
@@ -17,6 +17,8 @@ param(
   [switch]$SkipHooks
 )
 $ErrorActionPreference = "Stop"
+# 讓 Windows PowerShell 5.1 主控台也能正確顯示繁體中文（本檔為 UTF-8 with BOM）。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 Set-Location -Path $PSScriptRoot
 
 function Ok($m)   { Write-Host "  [OK]  $m" -ForegroundColor Green }
