@@ -48,6 +48,18 @@
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
 - **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
 
+## 開發此框架的工作慣例（維護者 / Claude 自身改動）
+
+**對本 repo 自身的修改（框架碼、工具、文件、設定——非使用者專案產出），預設走 dev worktree 驗證再 merge，不直接動 `main`。** 尤其同時有其他 worktree 在跑別的任務時，直接改 `main` 會干擾它們。
+
+1. 從 `main` 開分支 + worktree：`git worktree add -b dev/<主題> <路徑> main`（路徑取 repo 外的 sibling，避免巢狀）。
+2. 在 worktree 內修改並**實際驗證**（跑相關測試 / 真的執行一次 / dry-run）。
+3. **驗證通過才 merge 回 `main`**；未通過就丟棄分支，不留痕跡到 `main`。
+4. 完成後清理：`git worktree remove <路徑>` + `git branch -d dev/<主題>`。
+5. 例外：使用者明確要求「直接改」、或純機械瑣碎修正且當下無其他 worktree 在跑時，可省略——但有疑慮一律走 worktree。
+
+> `git worktree list` 先看有哪些 worktree 在進行中，**絕不動到別的 worktree 的分支**。
+
 ## 參考文件
 
 - 使用者入口：`.claude/skills/start/SKILL.md`（`/start`，唯一需使用者觸發的指令）
