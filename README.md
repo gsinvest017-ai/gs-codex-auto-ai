@@ -27,6 +27,10 @@ App 會：環境檢查（Claude / Codex / Node / git）→ 一鍵「設定 / 修
 
 ## 用 VS Code？裝 extension（.vsix）
 
+<p align="center">
+  <img src="assets/vscode-extension.png" alt="CodexAutoAI VS Code extension" width="760">
+</p>
+
 到 [Releases](https://github.com/gsinvest017-ai/gs-codex-auto-ai/releases) 下載 `codexautoai-x.y.z.vsix`，然後二選一安裝：
 
 ```bash
