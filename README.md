@@ -58,7 +58,7 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ### 步驟 1 — 一鍵首次設定
 
-clone 後跑一次。它會一條龍完成「登入 Claude → 安裝/登入 Codex → 啟用 git hooks」，**已完成的步驟會自動跳過**（可安全重跑），登入時會開瀏覽器，完成後自動往下。
+clone 後跑一次。它會一條龍完成「安裝/登入 Claude → 安裝/登入 Codex → 安裝/登入 gh → 啟用 git hooks」，**缺的 CLI 會自動智慧安裝**（claude/codex 用 npm；gh 用 winget→scoop→choco 擇一），**已完成的步驟會自動跳過**（可安全重跑），登入時會開瀏覽器，完成後自動往下。裝好並登入 gh 後，桌面 App / extension 的「自動檢查更新」即可直接運作。
 
 ```bash
 # Windows：雙擊 setup.cmd，或在 PowerShell：
@@ -71,12 +71,13 @@ clone 後跑一次。它會一條龍完成「登入 Claude → 安裝/登入 Cod
 > 想先看它會做什麼而不實際登入：加 `--dry-run`（bash）或 `-DryRun`（ps1）。
 > 其他旗標：`--force-login` 強制重新登入、`--skip-hooks` 不裝 git hooks。
 
-<details><summary>不想用腳本？手動三條指令（等價）</summary>
+<details><summary>不想用腳本？手動指令（等價）</summary>
 
 ```bash
-claude login                              # Claude Code 登入（開瀏覽器）
-npm install -g @openai/codex && codex login  # Codex 安裝 + 登入（開瀏覽器）
-python tools/install_hooks.py             # 啟用 git hooks（AGENTS.md 自動同步）
+npm install -g @anthropic-ai/claude-code && claude login  # Claude Code 安裝 + 登入（開瀏覽器）
+npm install -g @openai/codex && codex login               # Codex 安裝 + 登入（開瀏覽器）
+winget install --id GitHub.cli -e && gh auth login --web  # GitHub CLI 安裝 + 登入（自動檢查更新用）
+python tools/install_hooks.py                             # 啟用 git hooks（AGENTS.md 自動同步）
 ```
 </details>
 

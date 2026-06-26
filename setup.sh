@@ -31,6 +31,17 @@ todo() { printf "  ${c_b}→${c_reset} %s\n" "$1"; }
 err()  { printf "  ${c_r}✗${c_reset} %s\n" "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then todo "[dry-run] $*"; else "$@"; fi; }
+# 用可用的套件管理器安裝 GitHub CLI（依平台擇一），成功回 0。
+install_gh() {
+  if   have winget;  then winget install --id GitHub.cli -e --silent --accept-package-agreements --accept-source-agreements
+  elif have brew;    then brew install gh
+  elif have apt-get; then sudo apt-get update && sudo apt-get install -y gh
+  elif have dnf;     then sudo dnf install -y gh
+  elif have pacman;  then sudo pacman -S --noconfirm github-cli
+  elif have scoop;   then scoop install gh
+  elif have choco;   then choco install gh -y
+  else return 1; fi
+}
 
 printf "${c_b}CodexAutoAI 一鍵設定${c_reset}"; [ "$DRY_RUN" = 1 ] && printf "  ${c_y}(dry-run)${c_reset}"; echo
 echo "──────────────────────────────────"
@@ -44,12 +55,16 @@ ok "python：$($PY --version 2>&1)"
 have git || { err "找不到 git"; exit 1; }; ok "git：$(git --version | awk '{print $3}')"
 if have npm; then ok "npm：$(npm --version)"; else skip "npm 未安裝（若 Codex 也未安裝將無法自動安裝）"; fi
 
-# --- 步驟 2：Claude Code 登入 ----------------------------------------------
-echo "2. Claude Code 登入"
+# --- 步驟 2：Claude Code 安裝 + 登入 ---------------------------------------
+echo "2. Claude Code 安裝 + 登入"
 if ! have claude; then
-  err "找不到 claude CLI，請先安裝（見 README）後重跑本腳本。"
-  CLAUDE_MISSING=1
-else
+  if have npm; then
+    todo "安裝 @anthropic-ai/claude-code…"; run npm install -g @anthropic-ai/claude-code
+  else
+    err "claude 與 npm 都不存在，無法自動安裝 Claude。請先裝 Node.js 後重跑。"
+  fi
+fi
+if have claude || [ "$DRY_RUN" = 1 ]; then
   CRED="$HOME/.claude/.credentials.json"
   if [ "$FORCE_LOGIN" = 0 ] && [ -f "$CRED" ]; then
     skip "Claude 已登入（偵測到 .credentials.json）"
@@ -75,8 +90,27 @@ if have codex || [ "$DRY_RUN" = 1 ]; then
   fi
 fi
 
-# --- 步驟 4：啟用 git hooks ------------------------------------------------
-echo "4. 啟用 git hooks（AGENTS.md commit 時自動同步）"
+# --- 步驟 4：GitHub CLI（gh）安裝 + 登入 -----------------------------------
+# 自動更新檢查（桌面 App / extension）需要 gh token 才能讀 private repo 的 Release。
+echo "4. GitHub CLI（gh，自動檢查更新用）"
+if ! have gh; then
+  if [ "$DRY_RUN" = 1 ]; then
+    todo "[dry-run] 安裝 GitHub CLI（winget/brew/apt/dnf/scoop/choco 擇一）"
+  else
+    todo "智慧安裝 GitHub CLI…"
+    install_gh || err "自動安裝 gh 失敗，請手動安裝 https://cli.github.com 後重跑（或改設 GH_TOKEN）。"
+  fi
+fi
+if have gh || [ "$DRY_RUN" = 1 ]; then
+  if [ "$FORCE_LOGIN" = 0 ] && gh auth status >/dev/null 2>&1; then
+    skip "gh 已登入（gh auth status 通過）"
+  else
+    todo "開啟瀏覽器登入 GitHub…"; run gh auth login --hostname github.com --git-protocol https --web
+  fi
+fi
+
+# --- 步驟 5：啟用 git hooks ------------------------------------------------
+echo "5. 啟用 git hooks（AGENTS.md commit 時自動同步）"
 if [ "$SKIP_HOOKS" = 1 ]; then
   skip "依 --skip-hooks 跳過"
 else
