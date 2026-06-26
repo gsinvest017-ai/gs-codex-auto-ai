@@ -181,11 +181,16 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.setup", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      copyFramework(extPath, root); // 非破壞性：補齊缺漏的框架檔（含 setup.ps1/sh），跳過已存在
       const t = termInRoot(root, "CodexAutoAI Setup");
       t.show();
-      // PowerShell/cmd 不會從目前目錄載入指令，必須 .\ 前綴；Git Bash/Linux 用 bash。
-      t.sendText(process.platform === "win32" ? ".\\setup.cmd" : "bash setup.sh");
+      // 用絕對路徑直接跑 setup.ps1（-NoProfile）：避免使用者 PowerShell profile 把 cwd 切到家目錄，
+      // 也不依賴終端目前目錄；雙引號在 PowerShell 與 cmd host 都成立，setup.ps1 已是 UTF-8 BOM 故 5.1 也可跑。
+      if (process.platform === "win32") {
+        t.sendText(`powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(root, "setup.ps1")}"`);
+      } else {
+        t.sendText(`bash "${path.join(root, "setup.sh")}"`);
+      }
     })
   );
 
@@ -219,6 +224,9 @@ function activate(context) {
 
       const t = termInRoot(root, "CodexAutoAI");
       t.show();
+      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）。
+      // PowerShell：Set-Location 成功 cd 回專案；cmd host 會出現一行無害的「不認得」訊息，claude 仍在 root 執行。
+      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
       t.sendText(inner);
     })
   );
