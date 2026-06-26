@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "gsinvest",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other", "AI"],

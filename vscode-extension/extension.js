@@ -22,8 +22,11 @@ function hasFramework(root) {
          fs.existsSync(path.join(root, ".claude"));
 }
 
-// 把 extension 自帶的 framework/ 快照複製進 workspace（已存在的不覆蓋）
-function copyFramework(extPath, root) {
+// 把 extension 自帶的 framework/ 快照複製進 workspace。
+// 預設「已存在不覆蓋」（保護使用者既有檔）；opts.force 列出的頂層項目一律以 bundled 版覆蓋。
+// 「設定/修復」用 force 帶 launcher（setup.ps1/cmd/sh），確保舊專案的過期/壞掉 launcher 會被修到最新。
+function copyFramework(extPath, root, opts = {}) {
+  const force = new Set(opts.force || []);
   const src = path.join(extPath, "framework");
   if (!fs.existsSync(src)) {
     vscode.window.showErrorMessage("CodexAutoAI: 找不到內建框架快照，請用 build-vsix 重新打包。");
@@ -31,8 +34,8 @@ function copyFramework(extPath, root) {
   }
   for (const entry of fs.readdirSync(src)) {
     const s = path.join(src, entry), d = path.join(root, entry);
-    if (fs.existsSync(d)) continue; // 不覆蓋使用者既有檔
-    fs.cpSync(s, d, { recursive: true });
+    if (fs.existsSync(d) && !force.has(entry)) continue; // 不覆蓋使用者既有檔（force 清單除外）
+    fs.cpSync(s, d, { recursive: true, force: true });
   }
   return true;
 }
@@ -181,7 +184,8 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.setup", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      copyFramework(extPath, root); // 非破壞性：補齊缺漏的框架檔（含 setup.ps1/sh），跳過已存在
+      // 修復：缺漏框架檔照補；launcher（setup.ps1/cmd/sh）一律覆蓋成最新，避免舊專案留著沒 BOM/過期的壞檔。
+      copyFramework(extPath, root, { force: ["setup.ps1", "setup.cmd", "setup.sh"] });
       const t = termInRoot(root, "CodexAutoAI Setup");
       t.show();
       // 用絕對路徑直接跑 setup.ps1（-NoProfile）：避免使用者 PowerShell profile 把 cwd 切到家目錄，
