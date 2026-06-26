@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" font-family="'Segoe UI','Microsoft JhengHei',-apple-system,sans-serif">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8d39a"/><stop offset="1" stop-color="#c79a3e"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 Z" fill="url(#gold)"/></marker>
+  </defs>
+  <rect width="760" height="470" fill="#100e0a"/>
+  <rect x="30" y="22" width="120" height="30" rx="15" fill="url(#gold)"/>
+  <text x="90" y="42" fill="#1a1408" font-size="15" font-weight="700" text-anchor="middle">STEP 3 / 4</text>
+  <text x="166" y="43" fill="#e8d39a" font-size="17" font-weight="600">啟動 — 直接用白話打需求</text>
+
+  <rect x="30" y="70" width="700" height="372" rx="10" fill="#1e1c17" stroke="#3a352a" stroke-width="1.5"/>
+  <rect x="30" y="70" width="700" height="34" rx="10" fill="#252219"/>
+  <circle cx="50" cy="87" r="5" fill="#e06c5b"/><circle cx="68" cy="87" r="5" fill="#e0b54a"/><circle cx="86" cy="87" r="5" fill="#6fae5f"/>
+  <text x="380" y="92" fill="#8a857c" font-size="13" text-anchor="middle">my-project — Visual Studio Code</text>
+
+  <text x="380" y="136" fill="#b8b2a6" font-size="14" text-anchor="middle">選「啟動」後，上方會彈出輸入框 —— 不必懂指令，講人話就行</text>
+
+  <!-- input box (showInputBox) -->
+  <rect x="170" y="158" width="420" height="74" rx="7" fill="#252219" stroke="#4a4434" stroke-width="1.5" filter="drop-shadow(0 8px 18px rgba(0,0,0,.5))"/>
+  <text x="184" y="180" fill="#b8b2a6" font-size="13">描述你想做的功能（按 Enter 確認）</text>
+  <!-- highlighted input field -->
+  <rect x="184" y="190" width="392" height="32" rx="4" fill="#1a1813" stroke="url(#gold)" stroke-width="2.5"/>
+  <text x="195" y="211" fill="#f1e7c8" font-size="14">做一個待辦清單 REST API，含新增/查詢/刪除<tspan fill="#c79a3e">▎</tspan></text>
+
+  <path d="M662 206 L594 206" stroke="url(#gold)" stroke-width="2.5" fill="none" marker-end="url(#ah)"/>
+  <rect x="600" y="191" width="130" height="30" rx="6" fill="#2c2920" stroke="url(#gold)"/>
+  <text x="665" y="211" fill="#e8d39a" font-size="12" text-anchor="middle" font-weight="600">在這裡打需求 ③</text>
+
+  <!-- next: quickpick 一般 / 非停 -->
+  <text x="184" y="276" fill="#8a857c" font-size="13">接著選執行模式：</text>
+  <rect x="184" y="288" width="200" height="36" rx="5" fill="#2a2519" stroke="#5a5240"/>
+  <text x="198" y="311" fill="#e6dcc4" font-size="14">一般</text>
+  <text x="300" y="311" fill="#8a857c" font-size="12" text-anchor="end">逐步可確認</text>
+  <rect x="184" y="330" width="200" height="36" rx="5" fill="#2a2519" stroke="#5a5240"/>
+  <text x="198" y="353" fill="#e6dcc4" font-size="14">非停 (autopilot)</text>
+  <text x="372" y="353" fill="#8a857c" font-size="12" text-anchor="end">一路跑到交付</text>
+
+  <text x="184" y="398" fill="#6f6a5e" font-size="13">之後開終端機自動跑 claude，pipeline 從需求 → 架構 → 寫碼 → 測試 → 交付</text>
+</svg>

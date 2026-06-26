@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" font-family="'Segoe UI','Microsoft JhengHei',-apple-system,sans-serif">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8d39a"/><stop offset="1" stop-color="#c79a3e"/>
+    </linearGradient>
+    <marker id="ah" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 Z" fill="url(#gold)"/></marker>
+  </defs>
+  <rect width="760" height="470" fill="#100e0a"/>
+  <rect x="30" y="22" width="120" height="30" rx="15" fill="url(#gold)"/>
+  <text x="90" y="42" fill="#1a1408" font-size="15" font-weight="700" text-anchor="middle">STEP 4 / 4</text>
+  <text x="166" y="43" fill="#e8d39a" font-size="17" font-weight="600">檢查更新 — 比對 GitHub Release 最新版</text>
+
+  <rect x="30" y="70" width="700" height="372" rx="10" fill="#1e1c17" stroke="#3a352a" stroke-width="1.5"/>
+  <rect x="30" y="70" width="700" height="34" rx="10" fill="#252219"/>
+  <circle cx="50" cy="87" r="5" fill="#e06c5b"/><circle cx="68" cy="87" r="5" fill="#e0b54a"/><circle cx="86" cy="87" r="5" fill="#6fae5f"/>
+  <text x="380" y="92" fill="#8a857c" font-size="13" text-anchor="middle">my-project — Visual Studio Code</text>
+
+  <text x="380" y="138" fill="#b8b2a6" font-size="14" text-anchor="middle">想手動查新版時用；啟動時預設每天也會自動查一次（可在設定關閉）</text>
+
+  <rect x="180" y="166" width="400" height="232" rx="7" fill="#252219" stroke="#4a4434" stroke-width="1.5" filter="drop-shadow(0 8px 18px rgba(0,0,0,.5))"/>
+  <rect x="192" y="178" width="376" height="32" rx="4" fill="#1a1813" stroke="#5a5240"/>
+  <text x="202" y="199" fill="#cfc9bb" font-size="14">&gt; CodexAutoAI<tspan fill="#6f6a5e">▎</tspan></text>
+
+  <text x="202" y="242" fill="#cfc9bb" font-size="14">CodexAutoAI: 初始化</text>
+  <text x="202" y="280" fill="#cfc9bb" font-size="14">CodexAutoAI: 設定 / 修復</text>
+  <text x="202" y="318" fill="#cfc9bb" font-size="14">CodexAutoAI: 啟動</text>
+  <!-- row4 highlighted -->
+  <rect x="186" y="334" width="388" height="34" rx="5" fill="#322b18" stroke="url(#gold)" stroke-width="2.5"/>
+  <text x="202" y="356" fill="#f1e7c8" font-size="14" font-weight="600">CodexAutoAI: 檢查更新</text>
+  <text x="558" y="356" fill="#c79a3e" font-size="12" text-anchor="end">▶</text>
+
+  <path d="M662 351 L584 351" stroke="url(#gold)" stroke-width="2.5" fill="none" marker-end="url(#ah)"/>
+  <rect x="600" y="336" width="118" height="30" rx="6" fill="#2c2920" stroke="url(#gold)"/>
+  <text x="659" y="356" fill="#e8d39a" font-size="12" text-anchor="middle" font-weight="600">點這個 ④</text>
+</svg>

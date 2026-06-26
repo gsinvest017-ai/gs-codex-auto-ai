@@ -16,10 +16,11 @@ __pycache__/
 # 環境初始化紀錄（每人不同）
 init.md
 
-# docs 下的任務產出（每次不同），只保留 templates 與 codexAutoAI 框架文件
+# docs 下的任務產出（每次不同），只保留 templates、codexAutoAI 框架文件與 guide 教學圖
 docs/*
 !docs/templates/
 !docs/codexAutoAI-*.md
+!docs/guide/
 
 # 系統檔案
 .DS_Store

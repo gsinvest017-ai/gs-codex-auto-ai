@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" font-family="'Segoe UI','Microsoft JhengHei',-apple-system,sans-serif">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8d39a"/><stop offset="1" stop-color="#c79a3e"/>
+    </linearGradient>
+  </defs>
+  <rect width="760" height="470" fill="#100e0a"/>
+  <!-- step badge -->
+  <rect x="30" y="22" width="120" height="30" rx="15" fill="url(#gold)"/>
+  <text x="90" y="42" fill="#1a1408" font-size="15" font-weight="700" text-anchor="middle">STEP 1 / 4</text>
+  <text x="166" y="43" fill="#e8d39a" font-size="17" font-weight="600">CodexAutoAI: 初始化 — 把框架放進資料夾</text>
+
+  <!-- VS Code window -->
+  <rect x="30" y="70" width="700" height="372" rx="10" fill="#1e1c17" stroke="#3a352a" stroke-width="1.5"/>
+  <rect x="30" y="70" width="700" height="34" rx="10" fill="#252219"/>
+  <circle cx="50" cy="87" r="5" fill="#e06c5b"/><circle cx="68" cy="87" r="5" fill="#e0b54a"/><circle cx="86" cy="87" r="5" fill="#6fae5f"/>
+  <text x="380" y="92" fill="#8a857c" font-size="13" text-anchor="middle">my-project — Visual Studio Code</text>
+
+  <!-- hotkey hint -->
+  <text x="210" y="138" fill="#b8b2a6" font-size="14" text-anchor="end">先按</text>
+  <g>
+    <rect x="222" y="122" width="46" height="26" rx="5" fill="#2c2920" stroke="url(#gold)" stroke-width="2"/>
+    <text x="245" y="140" fill="#e8d39a" font-size="13" text-anchor="middle" font-weight="600">Ctrl</text>
+    <text x="276" y="140" fill="#8a857c" font-size="14" text-anchor="middle">+</text>
+    <rect x="288" y="122" width="54" height="26" rx="5" fill="#2c2920" stroke="url(#gold)" stroke-width="2"/>
+    <text x="315" y="140" fill="#e8d39a" font-size="13" text-anchor="middle" font-weight="600">Shift</text>
+    <text x="350" y="140" fill="#8a857c" font-size="14" text-anchor="middle">+</text>
+    <rect x="362" y="122" width="30" height="26" rx="5" fill="#2c2920" stroke="url(#gold)" stroke-width="2"/>
+    <text x="377" y="140" fill="#e8d39a" font-size="13" text-anchor="middle" font-weight="600">P</text>
+  </g>
+  <text x="406" y="138" fill="#b8b2a6" font-size="14">打開指令面板</text>
+
+  <!-- command palette -->
+  <rect x="180" y="166" width="400" height="232" rx="7" fill="#252219" stroke="#4a4434" stroke-width="1.5" filter="drop-shadow(0 8px 18px rgba(0,0,0,.5))"/>
+  <rect x="192" y="178" width="376" height="32" rx="4" fill="#1a1813" stroke="#5a5240"/>
+  <text x="202" y="199" fill="#cfc9bb" font-size="14">&gt; CodexAutoAI<tspan fill="#6f6a5e">▎</tspan></text>
+
+  <!-- rows -->
+  <!-- row1 highlighted -->
+  <rect x="186" y="220" width="388" height="34" rx="5" fill="#322b18" stroke="url(#gold)" stroke-width="2.5"/>
+  <text x="202" y="242" fill="#f1e7c8" font-size="14" font-weight="600">CodexAutoAI: 初始化</text>
+  <text x="540" y="242" fill="#c79a3e" font-size="12" text-anchor="end">▶</text>
+  <text x="202" y="280" fill="#cfc9bb" font-size="14">CodexAutoAI: 設定 / 修復</text>
+  <text x="202" y="312" fill="#cfc9bb" font-size="14">CodexAutoAI: 啟動</text>
+  <text x="202" y="344" fill="#cfc9bb" font-size="14">CodexAutoAI: 檢查更新</text>
+  <text x="202" y="378" fill="#6f6a5e" font-size="13">在輸入框打 CodexAutoAI 就會列出這四個指令</text>
+
+  <!-- callout arrow -->
+  <path d="M662 237 L584 237" stroke="url(#gold)" stroke-width="2.5" fill="none" marker-end="url(#ah)"/>
+  <defs><marker id="ah" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6 Z" fill="url(#gold)"/></marker></defs>
+  <rect x="600" y="222" width="118" height="30" rx="6" fill="#2c2920" stroke="url(#gold)"/>
+  <text x="659" y="242" fill="#e8d39a" font-size="12" text-anchor="middle" font-weight="600">點這個 ①</text>
+</svg>
