@@ -6,6 +6,10 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const { execFile } = require("child_process");
+const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
+
+// 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
+let overlayToken = null;
 
 // extension 以 .vsix 發佈（非 Marketplace），更新來源為 GitHub Release（tag 前綴 ext-v）。
 const REPO = process.env.CODEXAUTOAI_UPDATE_REPO || "gsinvest017-ai/gs-codex-auto-ai";
@@ -166,6 +170,15 @@ async function checkForUpdate(context, { manual = false } = {}) {
 function activate(context) {
   const extPath = context.extensionPath;
 
+  // 啟動：把 full-auto 友善設定暫時套到全域 Claude/Codex；deactivate 時還原。
+  // 預設開啟，可用設定 codexautoai.applyGlobalSettings 關掉。
+  try {
+    if (vscode.workspace.getConfiguration("codexautoai").get("applyGlobalSettings", true)) {
+      overlayToken = `vscode:${process.pid}`;
+      globalOverlay.acquire(overlayToken);
+    }
+  } catch (e) { console.warn("CodexAutoAI: 套用全域設定失敗：", e && e.message); }
+
   context.subscriptions.push(
     vscode.commands.registerCommand("codexautoai.init", async () => {
       const root = workspaceRoot();
@@ -244,6 +257,11 @@ function activate(context) {
   checkForUpdate(context).catch(() => {});
 }
 
-function deactivate() {}
+function deactivate() {
+  // 關閉：還原啟動時暫套的全域 Claude/Codex 設定（最後一個 owner 才真的還原）。
+  try {
+    if (overlayToken) { globalOverlay.release(overlayToken); overlayToken = null; }
+  } catch (e) { console.warn("CodexAutoAI: 還原全域設定失敗：", e && e.message); }
+}
 
 module.exports = { activate, deactivate };
