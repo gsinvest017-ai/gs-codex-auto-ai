@@ -5,6 +5,7 @@ tests/*
 !tests/codexautoai_v2/
 !tests/tools/
 !tests/test_updater.py
+!tests/test_global_overlay.py
 log/
 
 # 環境與依賴
