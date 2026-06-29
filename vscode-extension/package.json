@@ -31,6 +31,11 @@
           "type": "boolean",
           "default": true,
           "description": "啟動時自動檢查 GitHub Release 是否有新版 extension（每天最多一次）。"
+        },
+        "codexautoai.applyGlobalSettings": {
+          "type": "boolean",
+          "default": true,
+          "description": "啟動 extension 時把 full-auto 友善設定暫時套到全域 Claude (~/.claude/settings.json 的 permissions) 與 Codex (~/.codex/config.toml)，關閉 VS Code 時自動還原。"
         }
       }
     }

@@ -27,6 +27,11 @@ try:
 except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
     updater = None
 
+try:
+    import global_overlay  # 啟動套用 / 關閉還原全域 Claude/Codex 設定（sibling module）
+except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
+    global_overlay = None
+
 # ── GS 暗金主題 ──────────────────────────────────────────────────────────────
 BG = "#0f1115"          # warm-black
 CARD = "#171a21"
@@ -317,10 +322,43 @@ class LauncherUI:
             self.status.config(text="更新失敗：" + str(res.get("error")), fg=RED)
 
 
+def _overlay_token() -> str:
+    return f"desktop:{os.getpid()}"
+
+
 def main() -> int:
+    # 啟動：套用全域 Claude/Codex 設定；關閉（正常關 / atexit）一定還原。
+    released = {"done": False}
+
+    def release_overlay() -> None:
+        if released["done"] or global_overlay is None:
+            return
+        released["done"] = True
+        try:
+            global_overlay.release(_overlay_token())
+        except Exception:  # noqa: BLE001 — 還原失敗不該擋住關閉
+            pass
+
+    if global_overlay is not None:
+        try:
+            global_overlay.acquire(_overlay_token())
+        except Exception:  # noqa: BLE001 — 套用失敗不該擋住啟動
+            pass
+        import atexit
+        atexit.register(release_overlay)
+
     root = tk.Tk()
+
+    def on_close() -> None:
+        release_overlay()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     LauncherUI(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        release_overlay()
     return 0
 
 
