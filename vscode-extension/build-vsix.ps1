@@ -33,6 +33,25 @@ New-Item -ItemType Directory -Force $dist | Out-Null
 $ver = (Get-Content (Join-Path $ext "package.json") | ConvertFrom-Json).version
 $out = Join-Path $dist "codexautoai-$ver.vsix"
 Write-Host "[vsix] 打包 → $out" -ForegroundColor Cyan
-& npx --yes @vscode/vsce package --no-dependencies -o $out
+
+# vsce 禁止 README.md 內嵌 SVG（安全限制）。GitHub 版 README 用 SVG 教學圖沒問題，
+# 但打包進 .vsix 前暫時換成「去 SVG 圖」版（VS Code 擴充頁本來也不渲染這些 SVG），
+# 打包完還原，repo 內的 README 一字不動。
+$readme = Join-Path $ext "README.md"
+$readmeBak = $null
+if (Test-Path $readme) {
+  $readmeBak = "$readme.release-bak"
+  Copy-Item $readme $readmeBak -Force
+  $clean = foreach ($ln in (Get-Content $readme)) {
+    if ($ln -match '^\s*!\[[^\]]*\]\([^)]*\.svg[^)]*\)\s*$') { continue }  # 整行 SVG 圖 → 丟掉
+    ($ln -replace '<img[^>]*\.svg[^>]*>\s*', '')                          # 行內 SVG <img> → 拿掉
+  }
+  Set-Content $readme -Value $clean -Encoding UTF8
+}
+try {
+  & npx --yes @vscode/vsce package --no-dependencies -o $out
+} finally {
+  if ($readmeBak) { Move-Item $readmeBak $readme -Force }  # 一定還原（含打包失敗時）
+}
 if (-not (Test-Path $out)) { throw "vsce 打包失敗" }
 Write-Host "[vsix] ✓ 完成：$out" -ForegroundColor Green
