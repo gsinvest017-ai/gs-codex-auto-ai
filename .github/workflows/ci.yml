@@ -24,8 +24,8 @@ jobs:
       - name: Check AGENTS.md is in sync with CLAUDE.md
         run: python tools/sync_agents_md.py --check
 
-      # v2 框架測試（純標準庫，無第三方依賴）
-      - name: Run v2 test suite
-        run: python -m pytest tests/codexautoai_v2 -q
+      # 全測試套件（純標準庫 + pytest，無第三方依賴）：v2 引擎、工具、overlay、enforcement…
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
         env:
           PYTHONPATH: .
