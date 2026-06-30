@@ -3,9 +3,10 @@
 // 純 vscode API + Node 內建模組（fs / path / https / child_process），無第三方依賴。
 const vscode = require("vscode");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const https = require("https");
-const { execFile } = require("child_process");
+const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
@@ -46,6 +47,39 @@ function copyFramework(extPath, root, opts = {}) {
 
 function termInRoot(root, name) {
   return vscode.window.createTerminal({ name, cwd: root });
+}
+
+// ── 環境 pre-check（已安裝+登入就跳過「設定/修復」，不開終端機）──────────────
+// claude / codex 在 Windows 是 .cmd 蓋子，需要 shell；用 exec(字串) 避開 execFile 對 .cmd
+// 的 FileNotFoundError，也避開 shell:true + args 陣列的 DEP0190 警告。回傳 Promise<bool>。
+function runOk(cmd, timeout = 8000) {
+  return new Promise((resolve) => {
+    exec(cmd, { timeout, windowsHide: true }, (err) => resolve(!err));
+  });
+}
+
+// 各回傳 { ok, name, msg }；ok=true 代表「已安裝且已登入」，毋須設定。
+async function checkClaude() {
+  if (!(await runOk("claude --version"))) return { ok: false, name: "Claude Code", msg: "未安裝" };
+  // 登入判斷與桌面 App 一致：~/.claude/.credentials.json 是否存在。
+  const cred = path.join(os.homedir(), ".claude", ".credentials.json");
+  return fs.existsSync(cred)
+    ? { ok: true, name: "Claude Code" }
+    : { ok: false, name: "Claude Code", msg: "未登入" };
+}
+
+async function checkCodex() {
+  if (!(await runOk("codex --version"))) return { ok: false, name: "Codex", msg: "未安裝" };
+  return (await runOk("codex login status"))
+    ? { ok: true, name: "Codex" }
+    : { ok: false, name: "Codex", msg: "未登入" };
+}
+
+async function checkGh() {
+  if (!(await runOk("gh --version"))) return { ok: false, name: "GitHub CLI", msg: "未安裝" };
+  return (await runOk("gh auth status"))
+    ? { ok: true, name: "GitHub CLI" }
+    : { ok: false, name: "GitHub CLI", msg: "未登入" };
 }
 
 // ── 版本檢查（借鏡 autogo updater：private repo 需 token、永不 throw）─────────────
@@ -199,6 +233,23 @@ function activate(context) {
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
       // 修復：缺漏框架檔照補；launcher（setup.ps1/cmd/sh）一律覆蓋成最新，避免舊專案留著沒 BOM/過期的壞檔。
       copyFramework(extPath, root, { force: ["setup.ps1", "setup.cmd", "setup.sh"] });
+
+      // pre-check：本機若已安裝+登入 Claude / Codex / gh，就不重跑 setup（連終端機都不開）。
+      // 可用設定 codexautoai.skipSetupWhenReady=false 關閉此偵測，永遠開終端機跑完整 setup。
+      if (vscode.workspace.getConfiguration("codexautoai").get("skipSetupWhenReady", true)) {
+        const checks = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: "CodexAutoAI：偵測環境…" },
+          () => Promise.all([checkClaude(), checkCodex(), checkGh()]));
+        const missing = checks.filter((c) => !c.ok);
+        if (missing.length === 0) {
+          vscode.window.showInformationMessage(
+            "✓ 環境已就緒：Claude / Codex / GitHub CLI 都已安裝並登入，無需重跑設定。");
+          return;
+        }
+        vscode.window.showInformationMessage(
+          "需要設定：" + missing.map((m) => `${m.name}（${m.msg}）`).join("、") + "；開啟終端機執行…");
+      }
+
       const t = termInRoot(root, "CodexAutoAI Setup");
       t.show();
       // 用絕對路徑直接跑 setup.ps1（-NoProfile）：避免使用者 PowerShell profile 把 cwd 切到家目錄，

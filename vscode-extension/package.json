@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "gsinvest",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other", "AI"],
@@ -36,6 +36,11 @@
           "type": "boolean",
           "default": true,
           "description": "啟動 extension 時把 full-auto 友善設定暫時套到全域 Claude (~/.claude/settings.json 的 permissions) 與 Codex (~/.codex/config.toml)，關閉 VS Code 時自動還原。"
+        },
+        "codexautoai.skipSetupWhenReady": {
+          "type": "boolean",
+          "default": true,
+          "description": "執行「設定 / 修復」時，若偵測到 Claude / Codex / GitHub CLI 都已安裝並登入，就跳過、不開終端機重跑 setup。關閉則永遠開終端機執行完整 setup。"
         }
       }
     }
