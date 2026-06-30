@@ -47,6 +47,7 @@
 - **進度可見**：每進入新 Phase，先印一行狀態給使用者，格式：
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
 - **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
+- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 5（build）進行中**（`log/state.json` phase=phase5 且未 `phase5-end`）擋下 Claude 對 `src/` 的直接 `Edit/Write/MultiEdit`——src/ 實作一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他 phase / build 結束 / 非 src/ 不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
 
 ## 開發此框架的工作慣例（維護者 / Claude 自身改動）
 
