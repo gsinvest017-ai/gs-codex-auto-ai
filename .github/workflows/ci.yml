@@ -16,6 +16,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      # v2 測試本身純標準庫，但 pytest 是執行器，需先裝（否則 python -m pytest 會 No module named pytest）
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
       # AGENTS.md 必須與 CLAUDE.md 同步（SSOT 把關，漂移則 fail）
       - name: Check AGENTS.md is in sync with CLAUDE.md
         run: python tools/sync_agents_md.py --check
