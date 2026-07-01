@@ -18,6 +18,12 @@ if str(_DESKTOP) not in sys.path:
 import updater  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_manifest(monkeypatch):
+    """預設停用 raw manifest（避免測試打真網路）；測 manifest 的 test 自行覆寫。"""
+    monkeypatch.setattr(updater, "_fetch_manifest", lambda: None)
+
+
 # ---- version parsing / compare ---- #
 
 
@@ -152,3 +158,55 @@ def test_apply_up_to_date(monkeypatch):
                         lambda: {"auth_ok": True, "update_available": False,
                                  "current": "0.2.0"})
     assert updater.apply_update()["status"] == "up-to-date"
+
+
+# ---- raw manifest 優先路徑 ---- #
+
+
+def _fake_manifest(app_ver):
+    return {"app": {"version": app_ver, "tag": f"app-v{app_ver}",
+                    "exe": f"https://github.com/x/y/releases/download/app-v{app_ver}/CodexAutoAI-setup-{app_ver}.exe"}}
+
+
+def test_manifest_path_new_version(monkeypatch):
+    monkeypatch.setattr(updater, "local_version", lambda: "0.2.0")
+    monkeypatch.setattr(updater, "_fetch_manifest", lambda: _fake_manifest("0.2.3"))
+    # manifest 命中就不該碰 API：若被呼叫直接讓測試失敗
+    monkeypatch.setattr(updater, "_latest_release",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不應走 API")))
+    r = updater.check_update()
+    assert r["auth_ok"] is True
+    assert r["latest"] == "0.2.3" and r["update_available"] is True
+    assert r["asset_name"] == "CodexAutoAI-setup-0.2.3.exe"
+    assert r["asset_url"].endswith("CodexAutoAI-setup-0.2.3.exe")
+
+
+def test_manifest_path_up_to_date(monkeypatch):
+    monkeypatch.setattr(updater, "local_version", lambda: "0.2.3")
+    monkeypatch.setattr(updater, "_fetch_manifest", lambda: _fake_manifest("0.2.3"))
+    r = updater.check_update()
+    assert r["update_available"] is False and r["latest"] == "0.2.3"
+
+
+def test_apply_prefers_manifest_asset_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater, "is_installed", lambda: True)
+    monkeypatch.setattr(updater, "check_update", lambda: {
+        "auth_ok": True, "update_available": True, "current": "0.2.0",
+        "latest": "0.2.3", "tag": "app-v0.2.3",
+        "asset_name": "CodexAutoAI-setup-0.2.3.exe",
+        "asset_url": "https://example/CodexAutoAI-setup-0.2.3.exe"})
+    calls = {"url": None, "asset": False}
+
+    def fake_url(url, dest):
+        calls["url"] = url
+        dest.write_bytes(b"x")
+        return True
+    monkeypatch.setattr(updater, "_download_url", fake_url)
+    monkeypatch.setattr(updater, "_download_asset",
+                        lambda *a, **k: calls.__setitem__("asset", True) or True)
+    monkeypatch.setattr(updater.os, "startfile", lambda p: None, raising=False)
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *a, **k: None)
+    res = updater.apply_update()
+    assert res["status"] == "updating"
+    assert calls["url"] == "https://example/CodexAutoAI-setup-0.2.3.exe"
+    assert calls["asset"] is False  # 直連成功就不該退回 gh/asset API
