@@ -26,7 +26,9 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPO = "gsinvest017-ai/gs-codex-auto-ai"
+# PUBLIC 發行鏡像 repo（原始碼私有於 gs-codex-auto-ai）：公開 repo 讀 releases 免 token，
+# 任何使用者都能檢查更新；token 只在需要提高 API rate limit 時才用（非必需）。
+DEFAULT_REPO = "gsinvest017-ai/gs-codex-auto-ai-releases"
 TAG_PREFIX = "app-v"  # 桌面 App 的 release tag 命名（與 VS Code extension 的 ext-v* 區隔）
 _VER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 

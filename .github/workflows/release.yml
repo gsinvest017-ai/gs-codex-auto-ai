@@ -36,19 +36,22 @@ jobs:
           $ver = "${{ github.ref_name }}".Substring(5)
           pwsh installer/build-installer.ps1 -Version $ver
 
+      # 發佈到 PUBLIC 鏡像 repo（免 token 供使用者自動更新）。需 RELEASES_TOKEN（對鏡像有 contents:write 的 PAT）；
+      # 未設時 fallback 回本私有 repo（舊行為，不 break），但更新來源指向鏡像故建議設定 PAT。
       - name: Publish release
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ secrets.RELEASES_TOKEN != '' && 'gsinvest017-ai/gs-codex-auto-ai-releases' || github.repository }}
         run: |
           $tag = "${{ github.ref_name }}"
           $ver = $tag.Substring(5)
           $asset = "dist/CodexAutoAI-setup-$ver.exe"
           if (-not (Test-Path $asset)) { throw "找不到安裝檔：$asset" }
           $notes = "桌面 App $ver：點圖示啟用 CodexAutoAI，內建自動檢查更新。"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) { gh release upload $tag $asset --clobber }
-          else { gh release create $tag $asset --title "CodexAutoAI 桌面 App $ver" --notes $notes }
+          gh release view $tag --repo $env:TARGET_REPO 2>$null
+          if ($LASTEXITCODE -eq 0) { gh release upload $tag $asset --repo $env:TARGET_REPO --clobber }
+          else { gh release create $tag $asset --repo $env:TARGET_REPO --target main --title "CodexAutoAI 桌面 App $ver" --notes $notes }
 
   extension:
     if: startsWith(github.ref, 'refs/tags/ext-v')
@@ -64,16 +67,18 @@ jobs:
         shell: pwsh
         run: pwsh vscode-extension/build-vsix.ps1
 
+      # 發佈到 PUBLIC 鏡像 repo（同桌面 App）。需 RELEASES_TOKEN，未設時 fallback 回本私有 repo。
       - name: Publish release
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ secrets.RELEASES_TOKEN != '' && 'gsinvest017-ai/gs-codex-auto-ai-releases' || github.repository }}
         run: |
           $tag = "${{ github.ref_name }}"
           $ver = $tag.Substring(5)  # 去掉 "ext-v" 前綴（5 字元）
           $asset = "dist/codexautoai-$ver.vsix"
           if (-not (Test-Path $asset)) { throw "找不到 .vsix：$asset" }
           $notes = "VS Code extension $ver：自帶框架快照 + 自動檢查更新。"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) { gh release upload $tag $asset --clobber }
-          else { gh release create $tag $asset --title "CodexAutoAI VS Code extension $ver" --notes $notes }
+          gh release view $tag --repo $env:TARGET_REPO 2>$null
+          if ($LASTEXITCODE -eq 0) { gh release upload $tag $asset --repo $env:TARGET_REPO --clobber }
+          else { gh release create $tag $asset --repo $env:TARGET_REPO --target main --title "CodexAutoAI VS Code extension $ver" --notes $notes }

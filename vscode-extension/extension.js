@@ -13,7 +13,8 @@ const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原
 let overlayToken = null;
 
 // extension 以 .vsix 發佈（非 Marketplace），更新來源為 GitHub Release（tag 前綴 ext-v）。
-const REPO = process.env.CODEXAUTOAI_UPDATE_REPO || "gsinvest017-ai/gs-codex-auto-ai";
+// 指向 PUBLIC 發行鏡像 repo（原始碼私有）：公開 repo 讀 releases 免 token，任何使用者都能檢查更新。
+const REPO = process.env.CODEXAUTOAI_UPDATE_REPO || "gsinvest017-ai/gs-codex-auto-ai-releases";
 const TAG_PREFIX = "ext-v";
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 每天最多自動查一次
 
@@ -95,20 +96,46 @@ function isNewer(latest, current) {
   return false;
 }
 
-// token 解析：環境變數 → gh CLI（與桌面 App updater 同策略）。回傳 Promise<string|null>。
+// 找得到就用的 gh 可執行檔清單：PATH 上的 gh(.exe) + 常見絕對安裝路徑。
+// 修「終端機打 gh 可以，但 GUI 開的 VS Code extension host PATH 抓不到 gh」的情況。
+function ghCandidates() {
+  const list = [process.platform === "win32" ? "gh.exe" : "gh"];
+  if (process.platform === "win32") {
+    const home = os.homedir();
+    list.push(
+      "C:\\Program Files\\GitHub CLI\\gh.exe",
+      "C:\\Program Files (x86)\\GitHub CLI\\gh.exe",
+      path.join(home, "scoop", "shims", "gh.exe"),
+      path.join(home, "AppData", "Local", "Microsoft", "WinGet", "Links", "gh.exe"),
+      path.join(home, ".local", "bin", "gh.exe"),
+    );
+  } else {
+    list.push("/usr/bin/gh", "/usr/local/bin/gh", "/opt/homebrew/bin/gh",
+      path.join(os.homedir(), ".local", "bin", "gh"));
+  }
+  return list;
+}
+
+// 依序試 gh 候選路徑跑 `gh auth token`，第一個成功的回傳 token。全失敗回 null。
+function ghTokenFromCli(cands, i = 0) {
+  if (i >= cands.length) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    // execFile 免 shell（gh 是真 exe，非 .cmd 蓋子），也避開 shell:true + args 的 DEP0190 警告。
+    execFile(cands[i], ["auth", "token"], { timeout: 6000 }, (err, stdout) => {
+      const tok = err ? null : (stdout || "").trim() || null;
+      resolve(tok);
+    });
+  }).then((tok) => tok || ghTokenFromCli(cands, i + 1));
+}
+
+// token 解析：環境變數 → gh CLI（多路徑）。回傳 Promise<string|null>。
+// 注意：更新來源已改為 PUBLIC 鏡像 repo，token 只用來提高 API rate limit，**非必需**。
 function ghToken() {
   for (const k of ["CODEXAUTOAI_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
     const v = (process.env[k] || "").trim();
     if (v) return Promise.resolve(v);
   }
-  return new Promise((resolve) => {
-    // gh 在 Windows 是真正的 gh.exe（非 .cmd 蓋子），execFile 免 shell 即可，
-    // 也避開 shell:true + args 的 DEP0190 警告。
-    const cmd = process.platform === "win32" ? "gh.exe" : "gh";
-    execFile(cmd, ["auth", "token"], { timeout: 6000 }, (err, stdout) => {
-      resolve(err ? null : (stdout || "").trim() || null);
-    });
-  });
+  return ghTokenFromCli(ghCandidates());
 }
 
 // GET https://api.github.com<path>，帶 auth。回傳 Promise<parsed|null>，永不 reject。
@@ -167,13 +194,12 @@ async function checkForUpdate(context, { manual = false } = {}) {
     context.globalState.update("lastUpdateCheck", Date.now());
   }
 
-  const token = await ghToken();
+  const token = await ghToken(); // 公開鏡像 repo 免 token；有 token 只是提高 rate limit
   const rel = await latestExtRelease(token);
   if (!rel) {
     if (manual) {
       vscode.window.showWarningMessage(
-        token ? "CodexAutoAI: 查不到 extension release（尚未發佈或網路問題）。"
-              : "CodexAutoAI: 無法讀取 Release（repo 為 private，請先 `gh auth login` 或設定 GH_TOKEN）。");
+        `CodexAutoAI: 讀不到更新資訊（尚未發佈，或網路 / GitHub 連線問題）。更新來源：${REPO}。稍後再試。`);
     }
     return;
   }
