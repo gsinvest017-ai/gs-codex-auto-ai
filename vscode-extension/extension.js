@@ -163,6 +163,27 @@ function apiGet(apiPath, token) {
   });
 }
 
+// 從 raw.githubusercontent 抓 latest.json（靜態檔，**不吃 api.github.com 的 60/hr 匿名限額**）。
+// 對「沒裝 gh / 公司 NAT 多人共用對外 IP」的使用者更可靠——那些情境走 API 常被 403 rate-limit。
+// 回傳 Promise<parsed|null>，永不 reject。
+function fetchManifest() {
+  return new Promise((resolve) => {
+    const req = https.request(
+      { host: "raw.githubusercontent.com", path: `/${REPO}/main/latest.json`,
+        method: "GET", timeout: 8000,
+        headers: { "User-Agent": "codexautoai-vsix-updater", "Accept": "application/json" } },
+      (res) => {
+        let buf = "";
+        res.on("data", (c) => (buf += c));
+        res.on("end", () => { try { resolve(res.statusCode < 300 ? JSON.parse(buf) : null); } catch { resolve(null); } });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
 // 取最新的 extension release（tag 以 ext-v 開頭），與桌面 app-v* 區隔。
 async function latestExtRelease(token) {
   const list = await apiGet(`/repos/${REPO}/releases?per_page=30`, token);
@@ -194,24 +215,36 @@ async function checkForUpdate(context, { manual = false } = {}) {
     context.globalState.update("lastUpdateCheck", Date.now());
   }
 
-  const token = await ghToken(); // 公開鏡像 repo 免 token；有 token 只是提高 rate limit
-  const rel = await latestExtRelease(token);
-  if (!rel) {
-    if (manual) {
-      vscode.window.showWarningMessage(
-        `CodexAutoAI: 讀不到更新資訊（尚未發佈，或網路 / GitHub 連線問題）。更新來源：${REPO}。稍後再試。`);
+  // 先試 raw 靜態 manifest（免 API 限額，最可靠）；抓不到再退回 releases API。
+  let latest = null, dlUrl = null, htmlUrl = null;
+  const manifest = await fetchManifest();
+  if (manifest && manifest.ext && manifest.ext.version) {
+    latest = String(manifest.ext.version);
+    dlUrl = manifest.ext.vsix || null;
+    htmlUrl = `https://github.com/${REPO}/releases/tag/${manifest.ext.tag || (TAG_PREFIX + latest)}`;
+  } else {
+    const token = await ghToken(); // 公開鏡像免 token；有 token 只是提高 API rate limit
+    const rel = await latestExtRelease(token);
+    if (!rel) {
+      if (manual) {
+        vscode.window.showWarningMessage(
+          `CodexAutoAI: 讀不到更新資訊（網路 / GitHub 連線問題，或 API 流量限制）。更新來源：${REPO}。稍後再試。`);
+      }
+      return;
     }
-    return;
+    const tag = rel.tag_name || "";
+    latest = tag.startsWith(TAG_PREFIX) ? tag.slice(TAG_PREFIX.length) : tag.replace(/^v/, "");
+    const vsix = (rel.assets || []).find((a) => /\.vsix$/i.test(a.name || ""));
+    dlUrl = (vsix && vsix.browser_download_url) || rel.html_url;
+    htmlUrl = rel.html_url;
   }
-  const tag = rel.tag_name || "";
-  const latest = tag.startsWith(TAG_PREFIX) ? tag.slice(TAG_PREFIX.length) : tag.replace(/^v/, "");
+
   if (!isNewer(latest, current)) {
     if (manual) vscode.window.showInformationMessage(`CodexAutoAI: 已是最新版 v${current}。`);
     return;
   }
 
-  const vsix = (rel.assets || []).find((a) => /\.vsix$/i.test(a.name || ""));
-  const dlUrl = (vsix && vsix.browser_download_url) || rel.html_url;
+  if (!dlUrl) dlUrl = htmlUrl;
   const picks = ["下載 .vsix", "查看 Release", "不再提醒"];
   const choice = await vscode.window.showInformationMessage(
     `🎉 CodexAutoAI 有新版本 v${latest}（目前 v${current}）`, ...picks);
@@ -220,7 +253,7 @@ async function checkForUpdate(context, { manual = false } = {}) {
     vscode.window.showInformationMessage(
       "下載 .vsix 後，在命令面板執行「Extensions: Install from VSIX…」或 `code --install-extension <檔>` 安裝。");
   } else if (choice === "查看 Release") {
-    vscode.env.openExternal(vscode.Uri.parse(rel.html_url));
+    vscode.env.openExternal(vscode.Uri.parse(htmlUrl));
   } else if (choice === "不再提醒") {
     vscode.workspace.getConfiguration("codexautoai").update(
       "checkForUpdates", false, vscode.ConfigurationTarget.Global);

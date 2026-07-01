@@ -124,6 +124,23 @@ def is_installed() -> bool:
 # ---- release query ---- #
 
 
+def _fetch_manifest() -> Optional[dict]:
+    """從 raw.githubusercontent 抓 latest.json（靜態檔，**不吃 api.github.com 的 60/hr 匿名限額**）。
+
+    對「沒裝 gh / 公司 NAT 多人共用對外 IP」的使用者更可靠——那些情境走 API 常被 403 rate-limit。
+    永不 raise。
+    """
+    url = f"https://raw.githubusercontent.com/{repo()}/main/latest.json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "codexautoai-updater"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+            return data if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        logger.info("manifest fetch failed: %s", exc)
+        return None
+
+
 def _api_get(path: str, token: Optional[str], timeout: float = 8.0):
     url = f"https://api.github.com{path}"
     req = urllib.request.Request(url)
@@ -184,11 +201,32 @@ def check_update() -> dict:
         "html_url": None,
         "asset_id": None,
         "asset_name": None,
+        "asset_url": None,
         "auth_ok": False,
         "installed": is_installed(),
         "repo": repo(),
         "error": None,
     }
+
+    # 先試 raw 靜態 manifest（免 API 限額，最可靠）；抓不到再退回 releases API。
+    manifest = _fetch_manifest()
+    app = manifest.get("app") if isinstance(manifest, dict) else None
+    if isinstance(app, dict) and app.get("version"):
+        latest = str(app["version"])
+        tag = app.get("tag") or (TAG_PREFIX + latest)
+        exe_url = app.get("exe") or ""
+        result.update({
+            "auth_ok": True,
+            "latest": latest,
+            "tag": tag,
+            "notes": "",
+            "html_url": f"https://github.com/{repo()}/releases/tag/{tag}",
+            "update_available": is_newer(latest, current),
+            "asset_name": exe_url.rsplit("/", 1)[-1] if exe_url else None,
+            "asset_url": exe_url or None,
+        })
+        return result
+
     rel = _latest_release(token)
     if rel is None:
         result["error"] = (
@@ -272,6 +310,23 @@ def _download_asset(tag: str, asset_name: str, token: Optional[str],
         return False
 
 
+def _download_url(url: str, dest: Path) -> bool:
+    """直接從公開 URL 下載（免 auth）——公開鏡像的 release 資產人人可下載。成功回 True。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "codexautoai-updater"})
+        with urllib.request.urlopen(req, timeout=600) as resp, open(dest, "wb") as fh:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        return dest.exists() and dest.stat().st_size > 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("direct url download failed: %s", exc)
+        return False
+
+
 def apply_update(asset_name: Optional[str] = None) -> dict:
     """下載最新安裝檔並啟動它（Inno Setup 精靈，相同 AppId 就地升級）。
 
@@ -292,8 +347,14 @@ def apply_update(asset_name: Optional[str] = None) -> dict:
     import tempfile
     tmp = Path(tempfile.gettempdir())
     setup = tmp / f"CodexAutoAI-update-{info['latest']}.exe"
-    if not _download_asset(info["tag"], name, gh_token(), setup):
-        return {"status": "error", "error": "下載安裝檔失敗（檢查 token / 網路）"}
+    # 優先：manifest 提供的公開直連 URL（免 auth，人人可下載）；退回：gh release download / asset API。
+    ok = False
+    if info.get("asset_url"):
+        ok = _download_url(info["asset_url"], setup)
+    if not ok:
+        ok = _download_asset(info["tag"], name, gh_token(), setup)
+    if not ok:
+        return {"status": "error", "error": "下載安裝檔失敗（網路問題）"}
 
     # 啟動安裝程式（顯示精靈；per-user Inno Setup，相同 AppId 覆蓋升級）。
     try:
