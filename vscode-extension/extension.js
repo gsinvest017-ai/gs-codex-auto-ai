@@ -358,6 +358,50 @@ function activate(context) {
     })
   );
 
+  // ── 從 spec 開始開發（gs-spec-forge 整合，純附加）─────────────────────────
+  // 先跑 `spec-forge seed "<意圖>"` 產出 spec.md（帶 gs-rag 檢索引用），再把該 spec 路徑
+  // 當需求丟進「既有」start 流程的同一條 pipeline。不改動 codexautoai.start 的行為。
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.seedFromSpec", async () => {
+      const root = workspaceRoot();
+      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      if (!hasFramework(root)) { copyFramework(extPath, root); }
+
+      const cfg = vscode.workspace.getConfiguration("codexautoai");
+      const intent = await vscode.window.showInputBox({
+        prompt: "描述要開發的功能意圖（先產 spec 再跑 pipeline）",
+        value: cfg.get("defaultRequirement", ""),
+        ignoreFocusOut: true,
+      });
+      if (intent === undefined) return; // 取消
+
+      // spec 產在 workspace 下的 vault/，讓 spec 與專案同處、可被 pipeline 讀到。
+      const specCmd = cfg.get("specForgeCmd", "spec-forge");
+      const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
+      const safeIntent = (intent || "").replace(/"/g, "'");
+      const specPath = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "gs-spec-forge：產生 spec…" },
+        () => new Promise((resolve) => {
+          exec(`${specCmd} seed "${safeIntent}"`, { cwd: root, env, timeout: 60000, windowsHide: true },
+            (err, stdout) => resolve(err ? null : (stdout || "").trim()));
+        }));
+
+      if (!specPath) {
+        vscode.window.showErrorMessage(
+          `gs-spec-forge: 產生 spec 失敗。請確認已安裝 spec-forge（設定 codexautoai.specForgeCmd）。`);
+        return;
+      }
+
+      // 交回既有 pipeline：以 spec 檔為依據跑七階段（沿用 start 的終端啟動慣例）。
+      const inner = `claude "依照規格檔 ${specPath.replace(/"/g, "'")} 開發，跑完整七階段"`;
+      const t = termInRoot(root, "CodexAutoAI (from spec)");
+      t.show();
+      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
+      t.sendText(inner);
+      vscode.window.showInformationMessage(`✓ 已產生 spec：${specPath}，開始跑 pipeline。`);
+    })
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand("codexautoai.checkUpdate", () =>
       checkForUpdate(context, { manual: true }))

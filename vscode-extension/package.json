@@ -16,6 +16,7 @@
     "commands": [
       { "command": "codexautoai.init", "title": "CodexAutoAI: 初始化（把框架放進這個資料夾）" },
       { "command": "codexautoai.start", "title": "CodexAutoAI: 啟動（輸入需求跑 pipeline）" },
+      { "command": "codexautoai.seedFromSpec", "title": "CodexAutoAI: ▶ 從 spec 開始開發（gs-spec-forge）" },
       { "command": "codexautoai.setup", "title": "CodexAutoAI: 設定 / 修復（登入 + 啟用 hooks）" },
       { "command": "codexautoai.checkUpdate", "title": "CodexAutoAI: 檢查更新" }
     ],
@@ -41,6 +42,11 @@
           "type": "boolean",
           "default": true,
           "description": "執行「設定 / 修復」時，若偵測到 Claude / Codex / GitHub CLI 都已安裝並登入，就跳過、不開終端機重跑 setup。關閉則永遠開終端機執行完整 setup。"
+        },
+        "codexautoai.specForgeCmd": {
+          "type": "string",
+          "default": "spec-forge",
+          "description": "「從 spec 開始開發」呼叫的 gs-spec-forge CLI 指令（PATH 上的 spec-forge，或填絕對路徑的 python 入口）。需另裝 gs-spec-forge。"
         }
       }
     }
