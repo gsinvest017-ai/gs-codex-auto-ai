@@ -121,6 +121,44 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
+def seed_from_spec(intent: str) -> bool:
+    """先用 gs-spec-forge 產 spec，再把 spec 當需求丟進既有 launch_claude（純附加）。
+
+    需另裝 gs-spec-forge（見其 install-spec-forge.ps1）；可用環境變數 SPECFORGE_CMD 指定
+    spec-forge 路徑、SPEC_VAULT 指定 vault（預設 ~/gs-vault，否則 App 目錄下 vault/）。
+    """
+    cmd = os.environ.get("SPECFORGE_CMD", "spec-forge")
+    if not _which(cmd) and not Path(cmd).exists():
+        messagebox.showerror(
+            "CodexAutoAI",
+            "找不到 spec-forge。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
+            "或設環境變數 SPECFORGE_CMD 指到 spec-forge 執行檔。")
+        return False
+    env = dict(os.environ)
+    vault = os.environ.get("SPEC_VAULT")
+    if not vault:
+        home_vault = Path.home() / "gs-vault"
+        vault = str(home_vault) if home_vault.exists() else str(APP_DIR / "vault")
+    env["SPEC_VAULT"] = vault
+    safe = (intent or "").strip().replace('"', "'")
+    if not safe:
+        messagebox.showerror("CodexAutoAI", "請先在需求框輸入要開發的功能意圖。")
+        return False
+    try:
+        p = subprocess.run(f'{cmd} seed "{safe}"', shell=True, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", env=env, timeout=90)
+    except Exception as exc:  # noqa: BLE001
+        messagebox.showerror("CodexAutoAI", f"spec-forge 執行失敗：{exc}")
+        return False
+    out = (p.stdout or "").strip()
+    spec_path = out.splitlines()[-1] if out else ""
+    if p.returncode != 0 or not spec_path:
+        detail = (p.stderr or p.stdout or "").strip()[:300]
+        messagebox.showerror("CodexAutoAI", f"產生 spec 失敗：{detail}")
+        return False
+    return launch_claude(f"依照規格檔 {spec_path} 開發，跑完整七階段")
+
+
 def launch_claude(requirement: str) -> bool:
     """開新終端機在 app 目錄跑互動式 claude，需求當初始 prompt。"""
     if not _which("claude"):
@@ -155,8 +193,8 @@ class LauncherUI:
         self.root = root
         root.title("CodexAutoAI")
         root.configure(bg=BG)
-        root.geometry("560x560")
-        root.minsize(520, 520)
+        root.geometry("560x620")
+        root.minsize(520, 560)
         ico = APP_DIR / "desktop" / "codexautoai.ico"
         if not ico.exists():
             ico = APP_DIR / "codexautoai.ico"
@@ -223,7 +261,13 @@ class LauncherUI:
 
         self.launch_btn = tk.Button(self.root, text="🚀 啟動 CodexAutoAI", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
-        self.launch_btn.pack(fill="x", padx=22, pady=18)
+        self.launch_btn.pack(fill="x", padx=22, pady=(18, 6))
+
+        # 從 spec 開始開發（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
+        self.seed_btn = tk.Button(self.root, text="▶ 從 spec 開始開發（gs-spec-forge）",
+                                  command=self.on_seed_from_spec, font=self.h2,
+                                  bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
+        self.seed_btn.pack(fill="x", padx=22, pady=(0, 14))
 
         self.status = tk.Label(self.root, text="", font=self.mono, fg=MUTED, bg=BG)
         self.status.pack()
@@ -251,6 +295,13 @@ class LauncherUI:
         req = self.req.get("1.0", "end").strip()
         if launch_claude(req):
             self.status.config(text="已開啟終端機，CodexAutoAI 在新視窗執行中…", fg=GREEN)
+
+    def on_seed_from_spec(self) -> None:
+        intent = self.req.get("1.0", "end").strip()
+        self.status.config(text="spec-forge 產生 spec 中…", fg=GOLD)
+        self.root.update_idletasks()
+        if seed_from_spec(intent):
+            self.status.config(text="已產 spec 並開啟終端機跑 pipeline…", fg=GREEN)
 
     # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
     def start_update_check(self) -> None:
