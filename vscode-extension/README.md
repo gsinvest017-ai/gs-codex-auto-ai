@@ -21,7 +21,14 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/rocket.svg?raw=true" width="22" align="top"> 用法（指令面板 <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd>）
 
-按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出四個指令。
+按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出五個指令。
+
+### ⓪ 開啟控制台（免終端機 GUI）— 非開發者建議只用這個
+不想碰 CLI/TUI？執行「**CodexAutoAI: 開啟控制台**」：在 VS Code 內嵌面板輸入需求 → 按
+「🚀 啟動新任務」或「▶ 從 spec 開始」→ terminal **隱藏在背景跑**（預設非停模式全程不問）。
+面板即時顯示：七階段進度條、**分工證據**（Claude 規劃呼叫/tokens vs Codex 實作呼叫——
+進入 phase5 卻沒有 Codex 呼叫會亮紅色警示，確保不是只在 Claude 燒 token）、累計成本與迭代。
+「顯示背景終端機」按鈕是除錯逃生口。
 
 ### ① 安裝設定（一鍵）— 初始化 + 登入修復合一，可安全重跑
 把框架放進目前開啟的資料夾（自帶快照，不必先 clone），並自動裝 + 登入 Claude / Codex / gh、
