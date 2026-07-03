@@ -47,7 +47,8 @@
 - **進度可見**：每進入新 Phase，先印一行狀態給使用者，格式：
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
 - **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
-- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 5（build）進行中**（`log/state.json` phase=phase5 且未 `phase5-end`）擋下 Claude 對 `src/` 的直接 `Edit/Write/MultiEdit`——src/ 實作一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他 phase / build 結束 / 非 src/ 不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
+- **Codex-first 硬分工（用量原則）**：Claude 只負責**最前期 high-level planning（Phase 0–2）與各 phase 的調度/gate 驗收**；**Phase 3 起所有「內容產出」一律 `codex exec --full-auto` 產生**——架構文件與 fn-manifest（P3）、審查報告（P4）、src/tests 實作（P5）、測試失敗的修復（P6）、交付文件（P7）。Claude 的驗收**只回 PASS/FAIL + 短理由**（≤10 行），不通過就把 findings 丟回 codex exec 修，**絕不自己改寫內容**。Why：Claude 額度貴且有限、Codex 額度大——重工作全搬 Codex。
+- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 3–7 進行中**擋下 Claude 對 `src/`、`tests/`、`docs/` 的直接 `Edit/Write/MultiEdit`（白名單：`docs/requirements-spec.md` 屬 Phase 2 規劃產物）——內容一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他情境不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
 
 ## 開發此框架的工作慣例（維護者 / Claude 自身改動）
 
