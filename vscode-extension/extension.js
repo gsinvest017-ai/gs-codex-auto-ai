@@ -11,6 +11,37 @@ const https = require("https");
 const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
 const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗試（含內建快照 fallback）
+const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
+
+// 最近一次背景啟動的 terminal（控制台「顯示終端機」逃生口用）。
+let lastTerminal = null;
+
+// 在 root 開 terminal 跑 claude；hidden=true 時不搶焦點（控制台走這條，非開發者不用看 CLI）。
+function runClaudeInTerminal(root, inner, { hidden = false } = {}) {
+  const t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden });
+  lastTerminal = t;
+  if (!hidden) t.show();
+  if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
+  t.sendText(inner);
+  return t;
+}
+
+// 需求 → claude 啟動指令（與 start 命令同語意；autopilot=true 走非停模式）。
+function buildInner(requirement, autopilot) {
+  const safe = (requirement || "").replace(/"/g, "'").trim();
+  if (autopilot) return `claude "/autopilot on ${safe}"`;
+  return safe ? `claude "${safe}"` : "claude";
+}
+
+// 產 spec 再啟動（start 與控制台共用）。回傳 Promise<{ok, specPath?, error?}>。
+function seedThenBuildInner(root, intent, cfg) {
+  const cands = specforge.candidates(cfg.get("specForgeCmd", "spec-forge"),
+    __dirname);
+  const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
+  const safeIntent = (intent || "").replace(/"/g, "'").trim();
+  return specforge.trySeed(cands, safeIntent,
+    { cwd: root, env, timeout: 60000, windowsHide: true }, exec);
+}
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
 let overlayToken = null;
@@ -351,17 +382,44 @@ function activate(context) {
       );
       if (!mode) return;
 
-      const safe = (req || "").replace(/"/g, "'");
-      const inner = mode.label.startsWith("非停")
-        ? `claude "/autopilot on ${safe}"`
-        : (safe ? `claude "${safe}"` : "claude");
+      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）——
+      // runClaudeInTerminal 內建 Set-Location 處理。
+      runClaudeInTerminal(root, buildInner(req, mode.label.startsWith("非停")));
+    })
+  );
 
-      const t = termInRoot(root, "CodexAutoAI");
-      t.show();
-      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）。
-      // PowerShell：Set-Location 成功 cd 回專案；cmd host 會出現一行無害的「不認得」訊息，claude 仍在 root 執行。
-      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
-      t.sendText(inner);
+  // ── 控制台（webview 內嵌 GUI）：給不想碰 CLI/TUI 的使用者 ─────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.dashboard", () => {
+      const root = workspaceRoot();
+      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      const cfg = vscode.workspace.getConfiguration("codexautoai");
+      dashboard.openDashboard({
+        vscode, root,
+        defaultReq: cfg.get("defaultRequirement", ""),
+        onStart: (requirement, autopilot, reply) => {
+          if (!(requirement || "").trim()) { reply("請先輸入需求。"); return; }
+          runClaudeInTerminal(root, buildInner(requirement, autopilot), { hidden: true });
+          reply("✓ 已在背景啟動，下方進度會自動更新（terminal 隱藏，可按「顯示背景終端機」查看）。");
+        },
+        onSeed: (intent, autopilot, reply) => {
+          if (!(intent || "").trim()) { reply("請先輸入要開發的功能意圖。"); return; }
+          reply("產生 spec 中…");
+          seedThenBuildInner(root, intent, cfg).then((r) => {
+            if (!r.ok) {
+              const tail = r.errors.length ? r.errors[r.errors.length - 1].detail : "";
+              reply(`產生 spec 失敗：${tail.slice(0, 160)}`);
+              return;
+            }
+            const safePath = r.specPath.replace(/"/g, "'");
+            runClaudeInTerminal(root,
+              buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot), { hidden: true });
+            reply(`✓ 已產生 spec（${r.specPath}）並在背景啟動。`);
+          });
+        },
+        onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
+      });
     })
   );
 
@@ -405,11 +463,8 @@ function activate(context) {
       const specPath = result.specPath;
 
       // 交回既有 pipeline：以 spec 檔為依據跑七階段（沿用 start 的終端啟動慣例）。
-      const inner = `claude "依照規格檔 ${specPath.replace(/"/g, "'")} 開發，跑完整七階段"`;
-      const t = termInRoot(root, "CodexAutoAI (from spec)");
-      t.show();
-      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
-      t.sendText(inner);
+      runClaudeInTerminal(root,
+        `claude "依照規格檔 ${specPath.replace(/"/g, "'")} 開發，跑完整七階段"`);
       vscode.window.showInformationMessage(`✓ 已產生 spec：${specPath}，開始跑 pipeline。`);
     })
   );
