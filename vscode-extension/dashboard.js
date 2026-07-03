@@ -102,6 +102,7 @@ function summarizeTranscript(lines) {
     claude: { calls: 0, inTok: 0, outTok: 0, cacheTok: 0 },
     codex: { calls: 0 },
     codexInPhase5: 0,
+    buildersInPhase5: 0, // phase5 內派遣的 Task/Agent 子代理數（builders 的 codex 在 subagents/）
     current: null,
     started: [],
     lastTs: null,
@@ -129,6 +130,8 @@ function summarizeTranscript(lines) {
           s.codex.calls += 1;
           if (s.current === 5) s.codexInPhase5 += 1;
         }
+      } else if (c.name === "Task" || c.name === "Agent") {
+        if (s.current === 5) s.buildersInPhase5 += 1;
       } else if (c.name === "Bash" || c.name === "PowerShell") {
         const cmd = String((c.input || {}).command || "");
         if (/codex\s+exec/i.test(cmd)) {
@@ -143,8 +146,44 @@ function summarizeTranscript(lines) {
   return s;
 }
 
-// 合併兩個資料源（transcript 為主、events.jsonl 為輔）成 webview 要的狀態。
-function combineSummaries(ev, tr) {
+// 子代理 transcripts：phase5 builders 的 codex exec 不在主 transcript，而在
+// <session>/subagents/agent-*.jsonl（主檔同名去掉 .jsonl 的目錄下）。每次 poll 全讀
+// （單檔通常 <100KB），統計 codex 呼叫與 tokens。
+function readSubagentStats(transcriptFile) {
+  const out = { agents: 0, codexCalls: 0, inTok: 0, outTok: 0, cacheTok: 0 };
+  if (!transcriptFile) return out;
+  const dir = path.join(transcriptFile.replace(/\.jsonl$/i, ""), "subagents");
+  if (!fs.existsSync(dir)) return out;
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith(".jsonl")) continue;
+    out.agents += 1;
+    let text;
+    try { text = fs.readFileSync(path.join(dir, name), "utf-8"); } catch { continue; }
+    for (const line of text.split(/\r?\n/)) {
+      if (!line) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      const m = d.message || {};
+      const u = m.usage;
+      if (u && (u.input_tokens || u.output_tokens)) {
+        out.inTok += u.input_tokens || 0;
+        out.outTok += u.output_tokens || 0;
+        out.cacheTok += u.cache_read_input_tokens || 0;
+      }
+      for (const c of (Array.isArray(m.content) ? m.content : [])) {
+        if (c && c.type === "tool_use" && (c.name === "Bash" || c.name === "PowerShell")
+            && /codex\s+exec/i.test(String((c.input || {}).command || ""))) {
+          out.codexCalls += 1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// 合併資料源（transcript 為主、events.jsonl 為輔、subagents 補 builders 的 codex）。
+function combineSummaries(ev, tr, sub) {
+  sub = sub || { agents: 0, codexCalls: 0, inTok: 0, outTok: 0, cacheTok: 0 };
   const s = {
     current: tr && tr.current !== null ? tr.current : ev.current,
     completed: ev.completed,
@@ -154,20 +193,26 @@ function combineSummaries(ev, tr) {
     failed: ev.failed,
     claude: {
       calls: ev.claude.calls + (tr ? tr.claude.calls : 0),
-      inTok: ev.claude.inTok + (tr ? tr.claude.inTok : 0),
-      outTok: ev.claude.outTok + (tr ? tr.claude.outTok : 0),
-      cacheTok: tr ? tr.claude.cacheTok : 0,
+      inTok: ev.claude.inTok + (tr ? tr.claude.inTok : 0) + sub.inTok,
+      outTok: ev.claude.outTok + (tr ? tr.claude.outTok : 0) + sub.outTok,
+      cacheTok: (tr ? tr.claude.cacheTok : 0) + sub.cacheTok,
     },
-    codex: { calls: ev.codex.calls + (tr ? tr.codex.calls : 0) },
-    codexInPhase5: ev.codexInPhase5 + (tr ? tr.codexInPhase5 : 0),
+    codex: { calls: ev.codex.calls + (tr ? tr.codex.calls : 0) + sub.codexCalls },
+    builders: (tr ? tr.buildersInPhase5 : 0) || sub.agents,
     lastTs: (tr && tr.lastTs) || ev.lastTs,
   };
   const marker = Math.max(
     s.current !== null && s.current !== undefined ? s.current : 0,
     s.completed.length ? Math.max(...s.completed) : 0,
     s.started.length ? Math.max(...s.started) : 0);
+  // builders 是 phase5 派的子代理，其 codex 呼叫視為 phase5 的實作證據。
+  s.codexInPhase5 = ev.codexInPhase5 + (tr ? tr.codexInPhase5 : 0)
+    + (marker >= 5 ? sub.codexCalls : 0);
+  // 分級：紅=進 phase5 後既沒派 builders 也沒 codex（真異常）；
+  //       黃=已派 builders 但還沒看到 codex 紀錄（正常延遲，等待中）。
   const reached5 = marker >= 5;
-  s.divisionWarning = reached5 && s.codexInPhase5 === 0;
+  s.divisionWarning = reached5 && s.codexInPhase5 === 0 && s.builders === 0;
+  s.divisionWaiting = reached5 && s.codexInPhase5 === 0 && s.builders > 0;
   s.marker = marker;
   return s;
 }
@@ -194,7 +239,7 @@ function makeTranscriptReader() {
         state.lines.push(...parts.filter(Boolean));
       } finally { fs.closeSync(fd); }
     }
-    return state.lines;
+    return { lines: state.lines, file: f };
   };
 }
 
@@ -224,6 +269,8 @@ function html(defaultReq) {
   .ok { color:var(--green); } .bad { color:var(--red); }
   .warn { background:#2a1515; border:1px solid var(--red); border-radius:6px; padding:8px 10px;
           color:var(--red); font-size:12px; margin-top:8px; display:none; }
+  .wait { background:#2a2410; border:1px solid var(--gold); border-radius:6px; padding:8px 10px;
+          color:var(--gold); font-size:12px; margin-top:8px; display:none; }
   label { font-size:12px; color:var(--muted); }
   #status { min-height:16px; }
 </style></head><body>
@@ -250,7 +297,8 @@ function html(defaultReq) {
     <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">0</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
     <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> 次呼叫<div class="muted" id="codexP5">phase5 內 0 次</div></div>
   </div>
-  <div class="warn" id="divWarn">⚠ 已進入並行開發（phase5）但偵測不到任何 Codex 呼叫——疑似只在 Claude 上花 token、未走 Codex 實作，請檢查。</div>
+  <div class="wait" id="divWait">⏳ 已派遣 builder 子代理，等待第一筆 Codex 呼叫紀錄……（builders 的 codex exec 會稍晚出現在子代理 transcript）</div>
+  <div class="warn" id="divWarn">⚠ 已進入並行開發（phase5）但既沒派遣 builder 也偵測不到任何 Codex 呼叫——疑似只在 Claude 上花 token、未走 Codex 實作，請檢查。</div>
   <div class="row muted"><span id="cost">累計成本 $0.0000</span><span id="iter"></span><span id="ts"></span></div>
 </div>
 
@@ -280,8 +328,10 @@ function html(defaultReq) {
     $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
       + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
     $("codexCalls").textContent = s.codex.calls;
-    $("codexP5").textContent = "phase5 內 " + s.codexInPhase5 + " 次";
+    $("codexP5").textContent = "phase5 內 " + s.codexInPhase5 + " 次"
+      + (s.builders ? "・builders " + s.builders + " 個" : "");
     $("divWarn").style.display = s.divisionWarning ? "block" : "none";
+    $("divWait").style.display = s.divisionWaiting ? "block" : "none";
     $("cost").textContent = "累計成本 $" + (s.cost || 0).toFixed(4);
     $("iter").textContent = s.iteration ? "第 " + s.iteration + " 輪迭代" : "";
     $("ts").textContent = s.lastTs ? "最後事件 " + s.lastTs.replace("T", " ").slice(0, 19) : "";
@@ -301,10 +351,12 @@ function openDashboard(deps) {
   const readTranscript = makeTranscriptReader();
   const push = () => {
     const { exists, lines } = readEventsFile(root);
-    const trLines = readTranscript(root);
+    const tr = readTranscript(root);
     const summary = combineSummaries(
-      summarizeEvents(lines), trLines ? summarizeTranscript(trLines) : null);
-    panel.webview.postMessage({ type: "state", exists: exists || !!trLines, summary });
+      summarizeEvents(lines),
+      tr ? summarizeTranscript(tr.lines) : null,
+      tr ? readSubagentStats(tr.file) : null);
+    panel.webview.postMessage({ type: "state", exists: exists || !!tr, summary });
   };
   const timer = setInterval(push, 2000);
   push();
@@ -321,5 +373,6 @@ function openDashboard(deps) {
 
 module.exports = {
   openDashboard, summarizeEvents, readEventsFile,
-  summarizeTranscript, combineSummaries, projectSlug, findTranscript, makeTranscriptReader,
+  summarizeTranscript, combineSummaries, projectSlug, findTranscript,
+  makeTranscriptReader, readSubagentStats,
 };
