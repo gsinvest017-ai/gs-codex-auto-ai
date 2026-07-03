@@ -63,6 +63,141 @@ function readEventsFile(root) {
   } catch { return { exists: true, lines: [] }; }
 }
 
+// ── Claude Code session transcript 資料源 ────────────────────────────────────
+// events.jsonl 只有 v2 Python orchestrator 會寫；實際 pipeline 是 Claude Code 跑 skills，
+// 真實證據在 ~/.claude/projects/<slug>/*.jsonl（ccusage 同源）：assistant 訊息帶
+// usage tokens、tool_use 有 Skill(phaseN-…) 與 Bash(codex exec …)。
+
+const os = require("os");
+
+// Claude Code 專案目錄命名規則：路徑的 [:\/] 換成 '-'（實測 C:\Users\User\test-repo →
+// C--Users-User-test-repo）。
+function projectSlug(root) {
+  return String(root).replace(/[:\\/]/g, "-");
+}
+
+function findTranscript(root) {
+  const dir = path.join(os.homedir(), ".claude", "projects", projectSlug(root));
+  if (!fs.existsSync(dir)) return null;
+  let best = null;
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith(".jsonl")) continue;
+    const f = path.join(dir, name);
+    const mt = fs.statSync(f).mtimeMs;
+    if (!best || mt > best.mtimeMs) best = { file: f, mtimeMs: mt };
+  }
+  return best ? best.file : null;
+}
+
+// skill 名稱 → 七階段編號（CLAUDE.md 的 phase 表）
+const SKILL_PHASE = {
+  "phase0-init": 0, "codex-env-check": 1, "phase2-requirements": 2,
+  "phase3-architecture": 3, "phase4-review": 4, "phase5-build": 5,
+  "phase6-test": 6, "phase7-delivery": 7,
+};
+
+// 純函式：transcript 各行 → 分工/進度統計（可單元測試）。
+function summarizeTranscript(lines) {
+  const s = {
+    claude: { calls: 0, inTok: 0, outTok: 0, cacheTok: 0 },
+    codex: { calls: 0 },
+    codexInPhase5: 0,
+    current: null,
+    started: [],
+    lastTs: null,
+  };
+  const started = new Set();
+  for (const line of lines) {
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    const m = d.message || {};
+    const u = m.usage;
+    if (u && (u.input_tokens || u.output_tokens)) {
+      s.claude.calls += 1;
+      s.claude.inTok += u.input_tokens || 0;
+      s.claude.outTok += u.output_tokens || 0;
+      s.claude.cacheTok += u.cache_read_input_tokens || 0;
+    }
+    const content = Array.isArray(m.content) ? m.content : [];
+    for (const c of content) {
+      if (!c || c.type !== "tool_use") continue;
+      if (c.name === "Skill") {
+        const skill = (c.input || {}).skill || "";
+        const p = SKILL_PHASE[skill];
+        if (p !== undefined) { s.current = p; started.add(p); }
+        if (skill === "codex-run") {
+          s.codex.calls += 1;
+          if (s.current === 5) s.codexInPhase5 += 1;
+        }
+      } else if (c.name === "Bash" || c.name === "PowerShell") {
+        const cmd = String((c.input || {}).command || "");
+        if (/codex\s+exec/i.test(cmd)) {
+          s.codex.calls += 1;
+          if (s.current === 5) s.codexInPhase5 += 1;
+        }
+      }
+    }
+    if (d.timestamp) s.lastTs = d.timestamp;
+  }
+  s.started = [...started].sort((a, b) => a - b);
+  return s;
+}
+
+// 合併兩個資料源（transcript 為主、events.jsonl 為輔）成 webview 要的狀態。
+function combineSummaries(ev, tr) {
+  const s = {
+    current: tr && tr.current !== null ? tr.current : ev.current,
+    completed: ev.completed,
+    started: tr ? tr.started : [],
+    iteration: ev.iteration,
+    cost: ev.cost,
+    failed: ev.failed,
+    claude: {
+      calls: ev.claude.calls + (tr ? tr.claude.calls : 0),
+      inTok: ev.claude.inTok + (tr ? tr.claude.inTok : 0),
+      outTok: ev.claude.outTok + (tr ? tr.claude.outTok : 0),
+      cacheTok: tr ? tr.claude.cacheTok : 0,
+    },
+    codex: { calls: ev.codex.calls + (tr ? tr.codex.calls : 0) },
+    codexInPhase5: ev.codexInPhase5 + (tr ? tr.codexInPhase5 : 0),
+    lastTs: (tr && tr.lastTs) || ev.lastTs,
+  };
+  const marker = Math.max(
+    s.current !== null && s.current !== undefined ? s.current : 0,
+    s.completed.length ? Math.max(...s.completed) : 0,
+    s.started.length ? Math.max(...s.started) : 0);
+  const reached5 = marker >= 5;
+  s.divisionWarning = reached5 && s.codexInPhase5 === 0;
+  s.marker = marker;
+  return s;
+}
+
+// 增量讀 transcript（session 可長到數十 MB；只讀新增 bytes，換檔即重讀）。
+function makeTranscriptReader() {
+  const state = { file: null, offset: 0, remainder: "", lines: [] };
+  return (root) => {
+    const f = findTranscript(root);
+    if (!f) { state.file = null; state.lines = []; return null; }
+    const size = fs.statSync(f).size;
+    if (state.file !== f || size < state.offset) {
+      state.file = f; state.offset = 0; state.remainder = ""; state.lines = [];
+    }
+    if (size > state.offset) {
+      const fd = fs.openSync(f, "r");
+      try {
+        const buf = Buffer.alloc(size - state.offset);
+        fs.readSync(fd, buf, 0, buf.length, state.offset);
+        state.offset = size;
+        const chunk = state.remainder + buf.toString("utf-8");
+        const parts = chunk.split(/\r?\n/);
+        state.remainder = parts.pop() || "";
+        state.lines.push(...parts.filter(Boolean));
+      } finally { fs.closeSync(fd); }
+    }
+    return state.lines;
+  };
+}
+
 // GS gold 主題 webview（自足 inline，無外部資源）。
 function html(defaultReq) {
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -135,14 +270,15 @@ function html(defaultReq) {
     if (m.type !== "state") return;
     const s = m.summary;
     if (!m.exists) { $("phaseText").textContent = "尚未開始——按上方「🚀 啟動新任務」。"; return; }
-    const marker = Math.max(s.current ?? 0, s.completed.length ? Math.max(...s.completed) : 0);
+    const marker = s.marker || 0;
     $("bar").textContent = Array.from({length:8}, (_,i) => i <= marker ? "▓" : "░").join("");
     const names = ${JSON.stringify(PHASES)};
     let state = s.failed ? "✗ 失敗/升級" : "● 進行中";
-    if (marker === 7 && s.completed.includes(7)) state = "✓ 完成";
+    if (marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
     $("phaseText").innerHTML = "Phase " + marker + "/7 " + names[marker] + "　<span class='" + (s.failed ? "bad" : "ok") + "'>" + state + "</span>";
     $("claudeCalls").textContent = s.claude.calls;
-    $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok;
+    $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
+      + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
     $("codexCalls").textContent = s.codex.calls;
     $("codexP5").textContent = "phase5 內 " + s.codexInPhase5 + " 次";
     $("divWarn").style.display = s.divisionWarning ? "block" : "none";
@@ -162,9 +298,13 @@ function openDashboard(deps) {
     vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
   panel.webview.html = html(deps.defaultReq);
 
+  const readTranscript = makeTranscriptReader();
   const push = () => {
     const { exists, lines } = readEventsFile(root);
-    panel.webview.postMessage({ type: "state", exists, summary: summarizeEvents(lines) });
+    const trLines = readTranscript(root);
+    const summary = combineSummaries(
+      summarizeEvents(lines), trLines ? summarizeTranscript(trLines) : null);
+    panel.webview.postMessage({ type: "state", exists: exists || !!trLines, summary });
   };
   const timer = setInterval(push, 2000);
   push();
@@ -179,4 +319,7 @@ function openDashboard(deps) {
   return panel;
 }
 
-module.exports = { openDashboard, summarizeEvents, readEventsFile };
+module.exports = {
+  openDashboard, summarizeEvents, readEventsFile,
+  summarizeTranscript, combineSummaries, projectSlug, findTranscript, makeTranscriptReader,
+};
