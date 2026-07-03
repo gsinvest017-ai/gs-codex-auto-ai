@@ -42,6 +42,46 @@ function guessServerUrl(root) {
   return m ? `http://127.0.0.1:${m[1]}` : "http://127.0.0.1:8000";
 }
 
+// 偵測 server 型專案的啟動入口（依序偏好；純函式可測）。回傳 { cmd, label } 或 null。
+function detectLauncher(root) {
+  const has = (f) => fs.existsSync(path.join(root, f));
+  if (process.platform === "win32" && has("run.ps1")) {
+    return { cmd: `powershell -NoProfile -ExecutionPolicy Bypass -File .\\run.ps1`, label: "run.ps1" };
+  }
+  if (process.platform !== "win32" && has("run.sh")) {
+    return { cmd: "bash ./run.sh", label: "run.sh" };
+  }
+  if (has("package.json")) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8"));
+      const scripts = pkg.scripts || {};
+      if (scripts.dev) return { cmd: "npm run dev", label: "npm run dev" };
+      if (scripts.start) return { cmd: "npm start", label: "npm start" };
+    } catch { /* 壞 package.json 略過 */ }
+  }
+  if (has("manage.py")) return { cmd: "python manage.py runserver", label: "manage.py runserver" };
+  if (has("app.py")) return { cmd: "python app.py", label: "python app.py" };
+  if (has("main.py")) return { cmd: "python main.py", label: "python main.py" };
+  return null;
+}
+
+function isPortOpen(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ port, host: "127.0.0.1" }, () => { sock.destroy(); resolve(true); });
+    sock.on("error", () => resolve(false));
+    sock.setTimeout(300, () => { sock.destroy(); resolve(false); });
+  });
+}
+
+async function waitForPort(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortOpen(port)) return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
 function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -103,11 +143,31 @@ async function openPreview(root, vscodeApi, { pickIndex = 0, urlOverride = null 
     await vscodeApi.simpleBrowser(url);
     return { mode: "staticServer", detail: url };
   }
-  // 沒有靜態頁：server 型專案 → 問 URL（預設帶偵測值）
-  const url = await vscodeApi.askUrl(guessServerUrl(root));
-  if (!url) return { mode: "cancelled", detail: "" };
-  await vscodeApi.simpleBrowser(url);
-  return { mode: "url", detail: url };
+  // 沒有靜態頁：server 型專案。① server 已在跑（port 開著）→ 直接內嵌預覽；
+  // ② 有啟動入口（run.ps1 / npm dev / app.py…）→ 背景一鍵啟動、等 port 開再預覽；
+  // ③ 都不行 → 問 URL（預設帶偵測值）。
+  const url = guessServerUrl(root);
+  const port = parseInt(url.split(":").pop(), 10);
+  if (await isPortOpen(port)) {
+    await vscodeApi.simpleBrowser(url);
+    return { mode: "urlLive", detail: url };
+  }
+  const launcher = detectLauncher(root);
+  if (launcher && vscodeApi.runServer) {
+    vscodeApi.runServer(launcher.cmd, launcher.label);
+    if (await waitForPort(port, 45000)) {
+      await vscodeApi.simpleBrowser(url);
+      return { mode: "serverStarted", detail: `${launcher.label} → ${url}` };
+    }
+    // 起了但偵測埠一直沒開（埠猜錯/啟動慢）→ 落到問 URL
+  }
+  const asked = await vscodeApi.askUrl(url);
+  if (!asked) return { mode: "cancelled", detail: "" };
+  await vscodeApi.simpleBrowser(asked);
+  return { mode: "url", detail: asked };
 }
 
-module.exports = { findWebRoots, guessServerUrl, getFreePort, ensureStaticServer, killAllServers, openPreview };
+module.exports = {
+  findWebRoots, guessServerUrl, getFreePort, ensureStaticServer, killAllServers,
+  openPreview, detectLauncher, isPortOpen, waitForPort,
+};
