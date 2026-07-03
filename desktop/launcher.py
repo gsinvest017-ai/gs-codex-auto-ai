@@ -121,55 +121,72 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
-def _resolve_spec_forge() -> str | None:
-    """解析 spec-forge：明確 SPECFORGE_CMD > 標準 venv 位置（install 產物）> PATH。找不到回 None。
-    讓沒設環境變數的使用者也能開箱即用。"""
+def _spec_forge_candidates() -> list[tuple[str, dict]]:
+    """依序嘗試的 (命令模板, 額外 env) 候選：SPECFORGE_CMD > ~/gs-spec-forge venv > PATH >
+    內建快照（python -m，stdlib-first 核心）。前者失敗自動落到下一個——venv 斷根、沒裝
+    gs-spec-forge、沒 gh / 沒 private repo 權限的使用者都能靠快照開箱即用。"""
+    cands: list[tuple[str, dict]] = []
     env_cmd = os.environ.get("SPECFORGE_CMD")
     if env_cmd and (_which(env_cmd) or Path(env_cmd).exists()):
-        return env_cmd
+        cands.append((f'"{env_cmd}"', {}))
     venv = Path.home() / "gs-spec-forge" / ".venv" / (
         "Scripts/spec-forge.exe" if IS_WIN else "bin/spec-forge")
     if venv.exists():
-        return str(venv)
-    return "spec-forge" if _which("spec-forge") else None
+        cands.append((f'"{venv}"', {}))
+    if _which("spec-forge"):
+        cands.append(("spec-forge", {}))
+    # 內建快照：凍結版放 exe 旁、開發版在 vscode-extension/（build-vsix 產物）
+    for snap in (APP_DIR / "spec_forge_snapshot",
+                 APP_DIR / "vscode-extension" / "spec_forge_snapshot"):
+        if (snap / "gs_spec_forge" / "cli.py").exists():
+            env = {"PYTHONPATH": str(snap) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                   "PYTHONIOENCODING": "utf-8"}
+            cands.append(("python -m gs_spec_forge.cli", env))
+            break
+    return cands
 
 
 def seed_from_spec(intent: str) -> bool:
     """先用 gs-spec-forge 產 spec，再把 spec 當需求丟進既有 launch_claude（純附加）。
 
-    自動探測 spec-forge（SPECFORGE_CMD > ~/gs-spec-forge venv > PATH）；SPEC_VAULT 指定 vault
-    （預設 ~/gs-vault，否則 App 目錄下 vault/）。
+    候選鏈見 _spec_forge_candidates()；SPEC_VAULT 指定 vault（預設 ~/gs-vault，
+    否則 App 目錄下 vault/）。
     """
-    cmd = _resolve_spec_forge()
-    if not cmd:
+    cands = _spec_forge_candidates()
+    if not cands:
         messagebox.showerror(
             "CodexAutoAI",
-            "找不到 spec-forge。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
+            "找不到 spec-forge 也沒有內建快照。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
             "或設環境變數 SPECFORGE_CMD 指到 spec-forge 執行檔。")
         return False
-    env = dict(os.environ)
     vault = os.environ.get("SPEC_VAULT")
     if not vault:
         home_vault = Path.home() / "gs-vault"
         vault = str(home_vault) if home_vault.exists() else str(APP_DIR / "vault")
-    env["SPEC_VAULT"] = vault
     safe = (intent or "").strip().replace('"', "'")
     if not safe:
         messagebox.showerror("CodexAutoAI", "請先在需求框輸入要開發的功能意圖。")
         return False
-    try:
-        p = subprocess.run(f'"{cmd}" seed "{safe}"', shell=True, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", env=env, timeout=90)
-    except Exception as exc:  # noqa: BLE001
-        messagebox.showerror("CodexAutoAI", f"spec-forge 執行失敗：{exc}")
-        return False
-    out = (p.stdout or "").strip()
-    spec_path = out.splitlines()[-1] if out else ""
-    if p.returncode != 0 or not spec_path:
-        detail = (p.stderr or p.stdout or "").strip()[:300]
-        messagebox.showerror("CodexAutoAI", f"產生 spec 失敗：{detail}")
-        return False
-    return launch_claude(f"依照規格檔 {spec_path} 開發，跑完整七階段")
+    last_detail = ""
+    for cmd, extra_env in cands:
+        env = dict(os.environ)
+        env.update(extra_env)
+        env["SPEC_VAULT"] = vault
+        try:
+            p = subprocess.run(f'{cmd} seed "{safe}"', shell=True, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", env=env, timeout=90)
+        except Exception as exc:  # noqa: BLE001
+            last_detail = str(exc)
+            continue
+        out = (p.stdout or "").strip()
+        spec_path = out.splitlines()[-1].strip() if out else ""
+        if p.returncode == 0 and spec_path.lower().endswith(".md"):
+            return launch_claude(f"依照規格檔 {spec_path} 開發，跑完整七階段")
+        last_detail = (p.stderr or p.stdout or "").strip()[:300]
+    hint = ("疑似找不到 Python——請先按「設定 / 修復」。" if "python" in last_detail.lower()
+            else "")
+    messagebox.showerror("CodexAutoAI", f"產生 spec 失敗。{hint}{last_detail}")
+    return False
 
 
 def launch_claude(requirement: str) -> bool:
