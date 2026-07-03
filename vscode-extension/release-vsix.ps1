@@ -32,7 +32,7 @@ gh release create $tag $asset --repo gsinvest017-ai/gs-codex-auto-ai-releases --
 VS Code extension（.vsix）：在 VS Code 命令面板執行「Extensions: Install from VSIX…」選此檔，或
 ``code --install-extension codexautoai-$Version.vsix``。
 
-- 四個指令：初始化 / 啟動 / 設定·修復 / 檢查更新
+- 五個指令：初始化 / 啟動 / 從 spec 開始開發（gs-spec-forge）/ 設定·修復 / 檢查更新
 - 啟動時自動檢查 GitHub Release 是否有新版（可在設定 codexautoai.checkForUpdates 關閉）
 "@
 Write-Host "[release] ✓ 已發佈 $tag" -ForegroundColor Green

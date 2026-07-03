@@ -1,5 +1,6 @@
 // CodexAutoAI VS Code extension — 啟動器（自帶框架快照）。
-// 四個指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復、檢查更新。
+// 五個指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、從 spec 開始開發
+// （gs-spec-forge 產 spec 再跑 pipeline）、設定/修復、檢查更新。
 // 純 vscode API + Node 內建模組（fs / path / https / child_process），無第三方依賴。
 const vscode = require("vscode");
 const fs = require("fs");
