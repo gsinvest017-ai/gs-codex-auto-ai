@@ -303,6 +303,7 @@ function html(defaultReq) {
 </div>
 
 <div class="row">
+  <button class="ghost" id="btnPreview">🌐 即時預覽網頁 UI（內嵌）</button>
   <button class="ghost" id="btnTerm">🖥 顯示背景終端機（除錯用）</button>
 </div>
 
@@ -312,6 +313,7 @@ function html(defaultReq) {
   $("btnStart").onclick = () => { vscode.postMessage({ type:"start", requirement:$("req").value, autopilot:$("autopilot").checked }); };
   $("btnSeed").onclick  = () => { vscode.postMessage({ type:"seed",  intent:$("req").value, autopilot:$("autopilot").checked }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
+  $("btnPreview").onclick = () => { vscode.postMessage({ type:"preview" }); };
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (m.type === "status") { $("status").textContent = m.text; return; }
@@ -366,6 +368,7 @@ function openDashboard(deps) {
     if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
     else if (m.type === "showTerminal") deps.onShowTerminal();
+    else if (m.type === "preview" && deps.onPreview) deps.onPreview(reply);
   });
   panel.onDidDispose(() => clearInterval(timer));
   return panel;

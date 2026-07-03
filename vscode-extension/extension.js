@@ -12,6 +12,21 @@ const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
 const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗試（含內建快照 fallback）
 const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
+const preview = require("./preview"); // 前端網頁 UI 內嵌即時預覽（Live Preview / Simple Browser 三層降級）
+
+// 供 preview.openPreview 使用的 vscode 介面（隔離讓 preview.js 保持純 Node 可測）。
+function previewVsApi() {
+  return {
+    hasLivePreview: () => !!vscode.extensions.getExtension("ms-vscode.live-server"),
+    livePreviewAtFile: (absPath) =>
+      vscode.commands.executeCommand("livePreview.start.preview.atFile", vscode.Uri.file(absPath)),
+    simpleBrowser: (url) => vscode.commands.executeCommand("simpleBrowser.show", url),
+    askUrl: (defaultUrl) => vscode.window.showInputBox({
+      prompt: "找不到靜態網頁（index.html）。若專案是 server 型（Flask/FastAPI…），輸入它的預覽網址",
+      value: defaultUrl, ignoreFocusOut: true,
+    }),
+  };
+}
 
 // 最近一次背景啟動的 terminal（控制台「顯示終端機」逃生口用）。
 let lastTerminal = null;
@@ -419,7 +434,39 @@ function activate(context) {
           });
         },
         onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
+        onPreview: (reply) => {
+          preview.openPreview(root, previewVsApi())
+            .then((r) => {
+              if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
+              else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
+              else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
+            })
+            .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
+        },
       });
+    })
+  );
+
+  // ── 即時預覽（命令面板版；多個候選頁時 QuickPick 選擇）─────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.preview", async () => {
+      const root = workspaceRoot();
+      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      const hits = preview.findWebRoots(root);
+      let pickIndex = 0;
+      if (hits.length > 1) {
+        const picked = await vscode.window.showQuickPick(hits, { placeHolder: "選擇要預覽的網頁進入點" });
+        if (!picked) return;
+        pickIndex = hits.indexOf(picked);
+      }
+      try {
+        const r = await preview.openPreview(root, previewVsApi(), { pickIndex });
+        if (r.mode !== "cancelled") {
+          vscode.window.showInformationMessage(`✓ 預覽已開啟（${r.mode}）：${r.detail}`);
+        }
+      } catch (e) {
+        vscode.window.showErrorMessage(`預覽失敗：${String(e.message || e).slice(0, 200)}`);
+      }
     })
   );
 
@@ -483,6 +530,7 @@ function deactivate() {
   try {
     if (overlayToken) { globalOverlay.release(overlayToken); overlayToken = null; }
   } catch (e) { console.warn("CodexAutoAI: 還原全域設定失敗：", e && e.message); }
+  try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
 module.exports = { activate, deactivate };
