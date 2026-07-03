@@ -38,9 +38,13 @@ fi
 - Web 專案：啟動 server 確認能跑，然後關閉
 - CLI 專案：執行 `--help` 確認入口正常
 
-## Step 2：產出類型專屬報告
+## Step 2：產出類型專屬報告（Codex-first）
 
 根據 `docs/requirements-spec.md` 的專案類型，讀取對應的報告模板，用實際執行結果填入數值。
+
+**硬規則**：報告與交付文件的**撰寫一律 `codex exec --full-auto` 產生**（把模板路徑 +
+Claude 收集到的真實數據放進 prompt，指定寫入 `docs/`）；Claude 只收集執行數據與最後驗收
+（PreToolUse hook 會擋 Claude 直接 Edit/Write docs/）。
 
 | 專案類型 | 模板路徑 | 說明 |
 |---------|---------|------|

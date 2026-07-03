@@ -8,6 +8,10 @@ description: "Phase 6：環境建置 + 根據專案類型並行執行完整測�
 
 **測試不只是 import 驗證，必須實際執行程式，逐一驗證所有功能的輸入與輸出。**
 
+**Codex-first 硬規則**：test-runner 只負責**執行**與**收集結果**；任何檔案「產出」——
+測試檔（tests/）、測試腳本、以及所有修復——一律 `codex exec --full-auto` 產生
+（PreToolUse hook 會擋 Claude 直接 Edit/Write src/、tests/）。
+
 ## Step 1：環境建置（最先執行）
 
 啟動 `test-runner` sub-agent（env 模式）：

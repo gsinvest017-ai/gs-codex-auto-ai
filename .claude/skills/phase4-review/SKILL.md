@@ -14,15 +14,16 @@ description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求�
 
 等待回傳「審查報告」。
 
-## Step 2：中控複審（批判性思維）
+## Step 2：中控 gate 驗收（Codex-first：只回 PASS/FAIL，不重寫）
 
-收到審查報告後，Dispatcher **自行以批判性思維複審**：
+收到審查報告後，Dispatcher 做**輕量 gate**（≤10 行短評，禁止長篇複審、禁止改寫內容）：
 
 1. **不可以變多**：有沒有多餘 function 超出需求範圍？
 2. **不可以變少**：有沒有遺漏需求對應的 function？
-3. **Codex 審查結論是否合理**：有沒有遺漏或誤判？
-4. **介面設計是否合理**：參數與回傳值是否正確
-5. **檔案路徑**：是否都在 `src/` 下
+3. **檔案路徑**：是否都在 `src/` 下
+
+深入重審與所有修正**一律交 Step 3 的雙 Codex 迴圈**；Claude 不得自行 Edit/Write
+`docs/architecture.md`（PreToolUse hook 會擋）。
 
 ## 產出
 
