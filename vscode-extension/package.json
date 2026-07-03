@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "publisher": "gsinvest",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other", "AI"],
@@ -14,10 +14,9 @@
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "commands": [
-      { "command": "codexautoai.init", "title": "CodexAutoAI: 初始化（把框架放進這個資料夾）" },
-      { "command": "codexautoai.start", "title": "CodexAutoAI: 啟動（輸入需求跑 pipeline）" },
-      { "command": "codexautoai.seedFromSpec", "title": "CodexAutoAI: ▶ 從 spec 開始開發（gs-spec-forge）" },
-      { "command": "codexautoai.setup", "title": "CodexAutoAI: 設定 / 修復（登入 + 啟用 hooks）" },
+      { "command": "codexautoai.setup", "title": "CodexAutoAI: 安裝設定（初始化 + 登入修復，一鍵）" },
+      { "command": "codexautoai.start", "title": "CodexAutoAI: 啟動新任務（輸入需求跑 pipeline）" },
+      { "command": "codexautoai.seedFromSpec", "title": "CodexAutoAI: 啟動新任務：從 spec 開始（gs-spec-forge）" },
       { "command": "codexautoai.checkUpdate", "title": "CodexAutoAI: 檢查更新" }
     ],
     "configuration": {

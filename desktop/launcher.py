@@ -272,12 +272,12 @@ class LauncherUI:
         self.req.pack(fill="x", padx=22)
         self.req.insert("1.0", "做一個記帳 CLI 工具，資料存 SQLite")
 
-        self.launch_btn = tk.Button(self.root, text="🚀 啟動 CodexAutoAI", command=self.on_launch,
+        self.launch_btn = tk.Button(self.root, text="🚀 啟動新任務", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=(18, 6))
 
-        # 從 spec 開始開發（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
-        self.seed_btn = tk.Button(self.root, text="▶ 從 spec 開始開發（gs-spec-forge）",
+        # 啟動新任務：從 spec 開始（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
+        self.seed_btn = tk.Button(self.root, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
                                   command=self.on_seed_from_spec, font=self.h2,
                                   bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
         self.seed_btn.pack(fill="x", padx=22, pady=(0, 14))
