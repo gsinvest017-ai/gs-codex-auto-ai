@@ -44,7 +44,13 @@ seed 自動開發。**開箱即用**：extension 內建 gs-spec-forge 輕量核�
 不必有 repo 權限；若另裝完整版 gs-spec-forge（`install-spec-forge.ps1`，帶 gs-rag 語意檢索與引用）
 會自動優先使用，也可用設定 `codexautoai.specForgeCmd` 明確指定。
 
-### ④ 檢查更新 — 比對 GitHub Release 最新 `ext-v*` 版本
+### ④ 即時預覽網頁 UI（內嵌）— pipeline 產出有前端的專案一鍵看結果
+執行「CodexAutoAI: 即時預覽網頁 UI」（或控制台的 🌐 按鈕），三層自動降級、全在 VS Code 內嵌：
+1. 有裝 [Live Preview](https://marketplace.visualstudio.com/items?itemName=ms-vscode.live-server)（`ms-vscode.live-server`）→ 用它（hot reload 最佳體驗）
+2. 沒裝 → 自動起本機 static server（`python -m http.server`）+ VS Code 內建 Simple Browser（零安裝）
+3. 沒有靜態頁（Flask/FastAPI 這類 server 專案）→ 自動偵測埠號、輸入網址走 Simple Browser
+
+### ⑤ 檢查更新 — 比對 GitHub Release 最新 `ext-v*` 版本
 ![Step 4 檢查更新](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step4-update.svg?raw=true)
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/settings.svg?raw=true" width="22" align="top"> 前提
