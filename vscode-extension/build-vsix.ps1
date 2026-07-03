@@ -24,10 +24,26 @@ New-Item -ItemType Directory -Force (Join-Path $fw "docs") | Out-Null
 if (Test-Path (Join-Path $root "docs/templates")) { Copy-Item (Join-Path $root "docs/templates") -Destination (Join-Path $fw "docs") -Recurse -Force }
 Get-ChildItem $fw -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# 2. icon（重用桌面 App 圖示）
+# 2. 內建 gs-spec-forge 快照 —— stdlib-first 核心（vault/spec/cli，MIT），讓「啟動新任務：
+#    從 spec 開始」對沒裝 gh / 沒 private repo 權限 / 沒裝 gs-spec-forge 的使用者開箱即用
+#    （extension 以 `python -m gs_spec_forge.cli` 執行，唯一前置是 Python）。
+#    來源：sibling clone；建置機沒有時警告並跳過（該 fallback 不可用，其餘功能不受影響）。
+$sfSrc = Join-Path (Split-Path -Parent $root) "gs-spec-forge/src/gs_spec_forge"
+$sfSnap = Join-Path $ext "spec_forge_snapshot"
+if (Test-Path $sfSnap) { Remove-Item $sfSnap -Recurse -Force }
+if (Test-Path $sfSrc) {
+  New-Item -ItemType Directory -Force (Join-Path $sfSnap "gs_spec_forge") | Out-Null
+  Copy-Item (Join-Path $sfSrc "*") -Destination (Join-Path $sfSnap "gs_spec_forge") -Recurse -Force
+  Get-ChildItem $sfSnap -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Host "[vsix] 已內建 gs-spec-forge 快照（bundled fallback）" -ForegroundColor Cyan
+} else {
+  Write-Host "[vsix] 警告：找不到 sibling gs-spec-forge，跳過內建快照——「從 spec 開始」的開箱 fallback 將不可用" -ForegroundColor Yellow
+}
+
+# 3. icon（重用桌面 App 圖示）
 Copy-Item (Join-Path $root "desktop/codexautoai.png") -Destination (Join-Path $ext "icon.png") -Force
 
-# 3. 打包
+# 4. 打包
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
 $ver = (Get-Content (Join-Path $ext "package.json") | ConvertFrom-Json).version

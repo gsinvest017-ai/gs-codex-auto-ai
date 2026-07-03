@@ -32,9 +32,10 @@ code --install-extension codexautoai-x.y.z.vsix
 ![Step 3 啟動](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step3-launch.svg?raw=true)
 
 ### ③ 啟動新任務：從 spec 開始 — 先用 [gs-spec-forge](https://github.com/gsinvest017-ai/gs-spec-forge) 產規格再跑七階段
-在需求框打意圖 → 執行「CodexAutoAI: 啟動新任務：從 spec 開始」→ 背景 `spec-forge seed` 產出帶引用的
-spec.md（存進集中 vault）→ 當七階段 seed 自動開發。需另裝 gs-spec-forge（見其 `install-spec-forge.ps1`），
-可用設定 `codexautoai.specForgeCmd` 指定其路徑。
+在需求框打意圖 → 執行「CodexAutoAI: 啟動新任務：從 spec 開始」→ 背景產出 spec.md → 當七階段
+seed 自動開發。**開箱即用**：extension 內建 gs-spec-forge 輕量核心（只需 Python），不必裝 gh、
+不必有 repo 權限；若另裝完整版 gs-spec-forge（`install-spec-forge.ps1`，帶 gs-rag 語意檢索與引用）
+會自動優先使用，也可用設定 `codexautoai.specForgeCmd` 明確指定。
 
 ### ④ 檢查更新 — 比對 GitHub Release 最新 `ext-v*` 版本
 ![Step 4 檢查更新](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step4-update.svg?raw=true)

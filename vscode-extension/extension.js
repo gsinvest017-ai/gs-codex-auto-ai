@@ -10,6 +10,7 @@ const path = require("path");
 const https = require("https");
 const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
+const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗試（含內建快照 fallback）
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
 let overlayToken = null;
@@ -25,17 +26,9 @@ function workspaceRoot() {
   return f && f.length ? f[0].uri.fsPath : null;
 }
 
-// 解析 spec-forge 執行檔：明確設定 > 標準 venv 位置（install-spec-forge 產物）> PATH 上的裸名。
-// 讓直接裝 .vsix、沒跑 install 腳本設 codexautoai.specForgeCmd 的使用者也能開箱即用。
-function resolveSpecForge(configured) {
-  if (configured && configured !== "spec-forge") return configured; // 使用者明確指定優先
-  const home = os.homedir();
-  const venv = process.platform === "win32"
-    ? path.join(home, "gs-spec-forge", ".venv", "Scripts", "spec-forge.exe")
-    : path.join(home, "gs-spec-forge", ".venv", "bin", "spec-forge");
-  if (fs.existsSync(venv)) return venv;
-  return configured || "spec-forge"; // 退回 PATH 上的 spec-forge
-}
+// spec-forge 解析與執行已抽到 specforge.js（候選鏈：明確設定 > venv > PATH > 內建快照），
+// 前面候選失敗會自動落到下一個——venv 斷根（Python 升級）、沒裝 gs-spec-forge、沒 gh、
+// 沒 private repo 權限的使用者都能靠內建快照開箱即用（唯一前置：Python）。
 
 function hasFramework(root) {
   return fs.existsSync(path.join(root, "CLAUDE.md")) &&
@@ -390,21 +383,26 @@ function activate(context) {
       if (intent === undefined) return; // 取消
 
       // spec 產在 workspace 下的 vault/，讓 spec 與專案同處、可被 pipeline 讀到。
-      const specCmd = resolveSpecForge(cfg.get("specForgeCmd", "spec-forge"));
+      const cands = specforge.candidates(cfg.get("specForgeCmd", "spec-forge"), extPath);
       const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
       const safeIntent = (intent || "").replace(/"/g, "'");
-      const specPath = await vscode.window.withProgress(
+      const result = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: "gs-spec-forge：產生 spec…" },
-        () => new Promise((resolve) => {
-          exec(`"${specCmd}" seed "${safeIntent}"`, { cwd: root, env, timeout: 60000, windowsHide: true },
-            (err, stdout) => resolve(err ? null : (stdout || "").trim()));
-        }));
+        () => specforge.trySeed(cands, safeIntent,
+          { cwd: root, env, timeout: 60000, windowsHide: true }, exec));
 
-      if (!specPath) {
+      if (!result.ok) {
+        // 全部候選都失敗：附上實際錯誤尾巴讓問題可診斷，並依情況給指引。
+        const tail = result.errors.length
+          ? result.errors[result.errors.length - 1].detail : "";
+        const hint = result.errors.some((e) => /python/i.test(e.detail))
+          ? "疑似找不到 Python——請先執行「CodexAutoAI: 安裝設定」。"
+          : "內建輕量版應可直接用；若持續失敗請回報以下錯誤。";
         vscode.window.showErrorMessage(
-          `gs-spec-forge: 產生 spec 失敗。請確認已安裝 spec-forge（設定 codexautoai.specForgeCmd）。`);
+          `gs-spec-forge: 產生 spec 失敗。${hint}${tail ? `（${tail.slice(0, 160)}）` : ""}`);
         return;
       }
+      const specPath = result.specPath;
 
       // 交回既有 pipeline：以 spec 檔為依據跑七階段（沿用 start 的終端啟動慣例）。
       const inner = `claude "依照規格檔 ${specPath.replace(/"/g, "'")} 開發，跑完整七階段"`;
