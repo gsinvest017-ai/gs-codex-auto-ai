@@ -21,7 +21,7 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/rocket.svg?raw=true" width="22" align="top"> 用法（指令面板 <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd>）
 
-按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出四個指令。
+按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出五個指令。
 
 ### ① 初始化 — 把框架放進目前開啟的資料夾（自帶快照，不必先 clone）
 ![Step 1 初始化](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step1-palette.svg?raw=true)
@@ -34,6 +34,11 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ### ④ 檢查更新 — 比對 GitHub Release 最新 `ext-v*` 版本
 ![Step 4 檢查更新](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step4-update.svg?raw=true)
+
+### ⑤ 從 spec 開始開發 — 先用 [gs-spec-forge](https://github.com/gsinvest017-ai/gs-spec-forge) 產規格再跑七階段
+在需求框打意圖 → 執行「CodexAutoAI: ▶ 從 spec 開始開發」→ 背景 `spec-forge seed` 產出帶引用的
+spec.md（存進集中 vault）→ 當七階段 seed 自動開發。需另裝 gs-spec-forge（見其 `install-spec-forge.ps1`），
+可用設定 `codexautoai.specForgeCmd` 指定其路徑。
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/settings.svg?raw=true" width="22" align="top"> 前提
 
