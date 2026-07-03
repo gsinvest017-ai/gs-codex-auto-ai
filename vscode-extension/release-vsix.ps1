@@ -23,9 +23,12 @@ if (-not (Test-Path $asset)) { throw "找不到 .vsix：$asset" }
 
 if ($NoPublish) { Write-Host "[release] -NoPublish：略過 tag/上傳。產物在 $asset" -ForegroundColor Yellow; return }
 
-# git tag（annotated，繁中主體）
+# git tag（annotated，繁中主體）。tag 已存在 = 這版已發過 → 明確失敗，提示 bump，
+# 不再往下跑（原本會繼續執行且 gh 失敗後仍印 ✓，造成「發佈成功」假象）。
+if (git tag -l $tag) { throw "tag $tag 已存在（此版已發佈過）。請 bump package.json 版號後重跑。" }
 git tag -a $tag -m "VS Code extension $Version：自帶框架快照 + 自動檢查更新，裝 .vsix 即可用"
 git push origin $tag
+if ($LASTEXITCODE -ne 0) { throw "git push tag 失敗（exit=$LASTEXITCODE）" }
 
 # GitHub Release（發到 PUBLIC 鏡像 repo，免 token 供使用者自動更新；tag 建在鏡像 main）
 gh release create $tag $asset --repo gsinvest017-ai/gs-codex-auto-ai-releases --target main --title "CodexAutoAI VS Code extension $Version" --notes @"
@@ -35,4 +38,5 @@ VS Code extension（.vsix）：在 VS Code 命令面板執行「Extensions: Inst
 - 五個指令：初始化 / 啟動 / 從 spec 開始開發（gs-spec-forge）/ 設定·修復 / 檢查更新
 - 啟動時自動檢查 GitHub Release 是否有新版（可在設定 codexautoai.checkForUpdates 關閉）
 "@
+if ($LASTEXITCODE -ne 0) { throw "gh release create 失敗（exit=$LASTEXITCODE）——release 未發佈" }
 Write-Host "[release] ✓ 已發佈 $tag" -ForegroundColor Green
