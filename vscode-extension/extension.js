@@ -15,12 +15,20 @@ const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，�
 const preview = require("./preview"); // 前端網頁 UI 內嵌即時預覽（Live Preview / Simple Browser 三層降級）
 
 // 供 preview.openPreview 使用的 vscode 介面（隔離讓 preview.js 保持純 Node 可測）。
-function previewVsApi() {
+function previewVsApi(root) {
   return {
     hasLivePreview: () => !!vscode.extensions.getExtension("ms-vscode.live-server"),
     livePreviewAtFile: (absPath) =>
       vscode.commands.executeCommand("livePreview.start.preview.atFile", vscode.Uri.file(absPath)),
     simpleBrowser: (url) => vscode.commands.executeCommand("simpleBrowser.show", url),
+    // server 型專案一鍵啟動：隱藏 terminal 跑 launcher（run.ps1 / npm dev / app.py…），
+    // 「顯示背景終端機」逃生口可查看；不 kill——server 生命週期屬於專案本身。
+    runServer: (cmd, label) => {
+      const t = vscode.window.createTerminal({ name: `CodexAutoAI Server (${label})`, cwd: root, hideFromUser: true });
+      lastTerminal = t;
+      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
+      t.sendText(cmd);
+    },
     askUrl: (defaultUrl) => vscode.window.showInputBox({
       prompt: "找不到靜態網頁（index.html）。若專案是 server 型（Flask/FastAPI…），輸入它的預覽網址",
       value: defaultUrl, ignoreFocusOut: true,
@@ -435,10 +443,13 @@ function activate(context) {
         },
         onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
         onPreview: (reply) => {
-          preview.openPreview(root, previewVsApi())
+          reply("偵測網頁 UI / 啟動 server 中…");
+          preview.openPreview(root, previewVsApi(root))
             .then((r) => {
               if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
               else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
+              else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
+              else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
               else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
             })
             .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
@@ -460,7 +471,7 @@ function activate(context) {
         pickIndex = hits.indexOf(picked);
       }
       try {
-        const r = await preview.openPreview(root, previewVsApi(), { pickIndex });
+        const r = await preview.openPreview(root, previewVsApi(root), { pickIndex });
         if (r.mode !== "cancelled") {
           vscode.window.showInformationMessage(`✓ 預覽已開啟（${r.mode}）：${r.detail}`);
         }

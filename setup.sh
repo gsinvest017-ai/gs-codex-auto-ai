@@ -109,8 +109,20 @@ if have gh || [ "$DRY_RUN" = 1 ]; then
   fi
 fi
 
-# --- 步驟 5：啟用 git hooks ------------------------------------------------
-echo "5. 啟用 git hooks（AGENTS.md commit 時自動同步）"
+# --- 步驟 5：VS Code Live Preview（內嵌網頁預覽用，選配） -------------------
+echo "5. VS Code Live Preview（「即時預覽網頁 UI」最佳體驗，選配）"
+if command -v code >/dev/null 2>&1; then
+  if code --list-extensions 2>/dev/null | grep -q '^ms-vscode\.live-server$'; then
+    skip "Live Preview 已安裝"
+  else
+    todo "安裝 ms-vscode.live-server…"; run code --install-extension ms-vscode.live-server
+  fi
+else
+  skip "找不到 code CLI——略過（沒裝也能預覽，會退回內建 Simple Browser）"
+fi
+
+# --- 步驟 6：啟用 git hooks ------------------------------------------------
+echo "6. 啟用 git hooks（AGENTS.md commit 時自動同步）"
 if [ "$SKIP_HOOKS" = 1 ]; then
   skip "依 --skip-hooks 跳過"
 else

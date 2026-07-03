@@ -121,8 +121,18 @@ if ((Have gh) -or $DryRun) {
   Err "gh 仍不可用——請手動安裝 https://cli.github.com 後重跑（沒有 gh 也可改設環境變數 GH_TOKEN）。"
 }
 
-# --- 步驟 5：啟用 git hooks ---
-Write-Host "5. 啟用 git hooks（AGENTS.md commit 時自動同步）"
+# --- 步驟 5：VS Code Live Preview（內嵌網頁預覽用，選配） ---
+Write-Host "5. VS Code Live Preview（「即時預覽網頁 UI」最佳體驗，選配）"
+if (Have code) {
+  $extInstalled = (& code --list-extensions 2>$null) -contains "ms-vscode.live-server"
+  if ($extInstalled) { Skip "Live Preview 已安裝" }
+  else { Todo "安裝 ms-vscode.live-server…"; Run { code --install-extension ms-vscode.live-server } "code --install-extension ms-vscode.live-server" }
+} else {
+  Skip "找不到 code CLI——略過（沒裝也能預覽，會退回內建 Simple Browser）"
+}
+
+# --- 步驟 6：啟用 git hooks ---
+Write-Host "6. 啟用 git hooks（AGENTS.md commit 時自動同步）"
 if ($SkipHooks) { Skip "依 -SkipHooks 跳過" }
 else { Run { & $py tools/install_hooks.py } "python tools/install_hooks.py" }
 
