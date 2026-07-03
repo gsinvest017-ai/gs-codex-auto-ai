@@ -352,7 +352,13 @@ function activate(context) {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
       // 修復：缺漏框架檔照補；launcher（setup.ps1/cmd/sh）一律覆蓋成最新，避免舊專案留著沒 BOM/過期的壞檔。
-      copyFramework(extPath, root, { force: ["setup.ps1", "setup.cmd", "setup.sh"] });
+      // 「修復」語意：框架核心（CLAUDE.md/AGENTS.md/.claude/tools/.githooks）一律更新到
+      // extension 內建版本，否則舊專案吃不到框架演進（如 Codex-first 分工、hook 擴大）。
+      // 使用者資料（src/ docs/ log/ 等）不在 force 清單、永不覆蓋。
+      copyFramework(extPath, root, {
+        force: ["setup.ps1", "setup.cmd", "setup.sh",
+                "CLAUDE.md", "AGENTS.md", ".claude", "tools", ".githooks"],
+      });
 
       // pre-check：本機若已安裝+登入 Claude / Codex / gh，就不重跑 setup（連終端機都不開）。
       // 可用設定 codexautoai.skipSetupWhenReady=false 關閉此偵測，永遠開終端機跑完整 setup。
