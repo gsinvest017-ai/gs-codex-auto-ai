@@ -121,14 +121,27 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
+def _resolve_spec_forge() -> str | None:
+    """解析 spec-forge：明確 SPECFORGE_CMD > 標準 venv 位置（install 產物）> PATH。找不到回 None。
+    讓沒設環境變數的使用者也能開箱即用。"""
+    env_cmd = os.environ.get("SPECFORGE_CMD")
+    if env_cmd and (_which(env_cmd) or Path(env_cmd).exists()):
+        return env_cmd
+    venv = Path.home() / "gs-spec-forge" / ".venv" / (
+        "Scripts/spec-forge.exe" if IS_WIN else "bin/spec-forge")
+    if venv.exists():
+        return str(venv)
+    return "spec-forge" if _which("spec-forge") else None
+
+
 def seed_from_spec(intent: str) -> bool:
     """先用 gs-spec-forge 產 spec，再把 spec 當需求丟進既有 launch_claude（純附加）。
 
-    需另裝 gs-spec-forge（見其 install-spec-forge.ps1）；可用環境變數 SPECFORGE_CMD 指定
-    spec-forge 路徑、SPEC_VAULT 指定 vault（預設 ~/gs-vault，否則 App 目錄下 vault/）。
+    自動探測 spec-forge（SPECFORGE_CMD > ~/gs-spec-forge venv > PATH）；SPEC_VAULT 指定 vault
+    （預設 ~/gs-vault，否則 App 目錄下 vault/）。
     """
-    cmd = os.environ.get("SPECFORGE_CMD", "spec-forge")
-    if not _which(cmd) and not Path(cmd).exists():
+    cmd = _resolve_spec_forge()
+    if not cmd:
         messagebox.showerror(
             "CodexAutoAI",
             "找不到 spec-forge。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
@@ -145,7 +158,7 @@ def seed_from_spec(intent: str) -> bool:
         messagebox.showerror("CodexAutoAI", "請先在需求框輸入要開發的功能意圖。")
         return False
     try:
-        p = subprocess.run(f'{cmd} seed "{safe}"', shell=True, capture_output=True,
+        p = subprocess.run(f'"{cmd}" seed "{safe}"', shell=True, capture_output=True,
                            text=True, encoding="utf-8", errors="replace", env=env, timeout=90)
     except Exception as exc:  # noqa: BLE001
         messagebox.showerror("CodexAutoAI", f"spec-forge 執行失敗：{exc}")
