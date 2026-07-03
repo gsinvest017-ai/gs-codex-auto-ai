@@ -24,6 +24,18 @@ function workspaceRoot() {
   return f && f.length ? f[0].uri.fsPath : null;
 }
 
+// 解析 spec-forge 執行檔：明確設定 > 標準 venv 位置（install-spec-forge 產物）> PATH 上的裸名。
+// 讓直接裝 .vsix、沒跑 install 腳本設 codexautoai.specForgeCmd 的使用者也能開箱即用。
+function resolveSpecForge(configured) {
+  if (configured && configured !== "spec-forge") return configured; // 使用者明確指定優先
+  const home = os.homedir();
+  const venv = process.platform === "win32"
+    ? path.join(home, "gs-spec-forge", ".venv", "Scripts", "spec-forge.exe")
+    : path.join(home, "gs-spec-forge", ".venv", "bin", "spec-forge");
+  if (fs.existsSync(venv)) return venv;
+  return configured || "spec-forge"; // 退回 PATH 上的 spec-forge
+}
+
 function hasFramework(root) {
   return fs.existsSync(path.join(root, "CLAUDE.md")) &&
          fs.existsSync(path.join(root, ".claude"));
@@ -377,13 +389,13 @@ function activate(context) {
       if (intent === undefined) return; // 取消
 
       // spec 產在 workspace 下的 vault/，讓 spec 與專案同處、可被 pipeline 讀到。
-      const specCmd = cfg.get("specForgeCmd", "spec-forge");
+      const specCmd = resolveSpecForge(cfg.get("specForgeCmd", "spec-forge"));
       const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
       const safeIntent = (intent || "").replace(/"/g, "'");
       const specPath = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: "gs-spec-forge：產生 spec…" },
         () => new Promise((resolve) => {
-          exec(`${specCmd} seed "${safeIntent}"`, { cwd: root, env, timeout: 60000, windowsHide: true },
+          exec(`"${specCmd}" seed "${safeIntent}"`, { cwd: root, env, timeout: 60000, windowsHide: true },
             (err, stdout) => resolve(err ? null : (stdout || "").trim()));
         }));
 
