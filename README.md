@@ -41,12 +41,14 @@ code --install-extension codexautoai-x.y.z.vsix
 
 或 VS Code 左側「擴充功能」面板 → 右上 `…` → **Install from VSIX…** → 選該檔。
 
-裝好後用指令面板（`Ctrl/Cmd+Shift+P`）執行：
+裝好後用指令面板（`Ctrl/Cmd+Shift+P`）執行（六個指令）：
 
-1. **CodexAutoAI: 初始化** — 把框架放進目前開啟的資料夾（extension **自帶框架快照，不必先 clone**）。
-2. **CodexAutoAI: 設定 / 修復** — 開終端機跑 `setup`（登入 Claude / Codex、啟用 hooks）。
-3. **CodexAutoAI: 啟動** — 輸入需求 → 選「一般 / 非停」→ 開終端機跑 `claude`，pipeline 開始。
-4. **CodexAutoAI: 檢查更新** — 手動比對 GitHub Release 的最新 `ext-v*` 版本；啟動時也會自動查（每天一次，可在設定 `codexautoai.checkForUpdates` 關閉）。有新版會跳通知，按 **下載 .vsix** 取得新版重裝。
+1. **CodexAutoAI: 開啟控制台（免終端機 GUI）** — 非開發者建議只用這個：面板內輸入需求、看七階段進度與 Claude/Codex 分工證據，terminal 隱藏背景跑。
+2. **CodexAutoAI: 安裝設定（初始化 + 登入修復，一鍵）** — 把框架放進資料夾（**自帶快照，不必先 clone**；既有專案會更新框架核心到最新）＋ 自動裝/登入 Claude、Codex、gh、Live Preview、啟用 hooks；環境都就緒時直接回報。
+3. **CodexAutoAI: 啟動新任務** — 輸入需求 → 選「一般 / 非停」→ 開終端機跑 `claude`，pipeline 開始。
+4. **CodexAutoAI: 啟動新任務：從 spec 開始** — 先用 gs-spec-forge 產規格（內建輕量核心，開箱即用）再跑七階段。
+5. **CodexAutoAI: 即時預覽網頁 UI（內嵌）** — 產出有前端的專案一鍵在 VS Code 內預覽（Live Preview / Simple Browser / server 自動啟動三層降級）。
+6. **CodexAutoAI: 檢查更新** — 手動比對 GitHub Release 的最新 `ext-v*` 版本；啟動時也會自動查（每天一次，可在設定 `codexautoai.checkForUpdates` 關閉）。
 
 > 同樣仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**。
 > 想自己 build：`pwsh vscode-extension/build-vsix.ps1`（產出 `dist/codexautoai-<ver>.vsix`）。
