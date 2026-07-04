@@ -15,16 +15,11 @@
       "TodoWrite(*)",
       "WebFetch(*)",
       "WebSearch(*)",
-      "Skill(*)"
-    ],
-    "ask": [
+      "Skill(*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean:*)",
-      "Bash(rm -rf:*)",
-      "Bash(*deploy*)"
+      "Bash(git push:*)"
     ],
+    "ask": [],
     "deny": [
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~*)",
@@ -32,7 +27,11 @@
       "Bash(curl * | bash)",
       "Bash(wget * | bash)",
       "Bash(mkfs*)",
-      "Bash(dd if=*)"
+      "Bash(dd if=*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(rm -rf:*)",
+      "Bash(*deploy*)"
     ]
   },
   "hooks": {

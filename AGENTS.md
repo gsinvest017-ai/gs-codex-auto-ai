@@ -46,7 +46,7 @@
 - **最小權責**：不擅自擴充需求，不多做不少做
 - **進度可見**：每進入新 Phase，先印一行狀態給使用者，格式：
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
-- **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
+- **非停模式（零 permission 卡停）**：`.claude/settings.json` 預設 `bypassPermissions` 且 **`ask` 清單為空**——無人值守下 ask=必卡死。可逆操作（`git commit`/`git push`）直接 allow；毀滅性操作（`reset --hard`/`clean`/`rm -rf`/deploy）改 **deny**（fail-fast，被擋時換安全做法而不是停等使用者）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
 - **Codex-first 硬分工（用量原則）**：Claude 只負責**最前期 high-level planning（Phase 0–2）與各 phase 的調度/gate 驗收**；**Phase 3 起所有「內容產出」一律 `codex exec --full-auto` 產生**——架構文件與 fn-manifest（P3）、審查報告（P4）、src/tests 實作（P5）、測試失敗的修復（P6）、交付文件（P7）。Claude 的驗收**只回 PASS/FAIL + 短理由**（≤10 行），不通過就把 findings 丟回 codex exec 修，**絕不自己改寫內容**。Why：Claude 額度貴且有限、Codex 額度大——重工作全搬 Codex。
 - **codex 一律經防掛外殼**：呼叫 Codex **不可**裸跑 `codex exec`，一律
   `python tools/codex_runner.py --prompt "…" [--expect 產出檔…] [--model m]`——它以
