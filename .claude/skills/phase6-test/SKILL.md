@@ -9,7 +9,7 @@ description: "Phase 6：環境建置 + 根據專案類型並行執行完整測�
 **測試不只是 import 驗證，必須實際執行程式，逐一驗證所有功能的輸入與輸出。**
 
 **Codex-first 硬規則**：test-runner 只負責**執行**與**收集結果**；任何檔案「產出」——
-測試檔（tests/）、測試腳本、以及所有修復——一律 `codex exec --full-auto` 產生
+測試檔（tests/）、測試腳本、以及所有修復——一律經 `python tools/codex_runner.py --prompt …` 產生（防掛外殼，勿裸跑 codex exec）
 （PreToolUse hook 會擋 Claude 直接 Edit/Write src/、tests/）。
 
 ## Step 1：環境建置（最先執行）
@@ -78,7 +78,7 @@ description: "Phase 6：環境建置 + 根據專案類型並行執行完整測�
 PY=$( [ -x .venv/Scripts/python ] && echo .venv/Scripts/python || command -v python )
 python tools/run_loop.py --mode test --phase 6 --run-id <id> --max-iters 3 --patience 2 \
   --review-cmd "$PY -m pytest -q" \
-  --fix-cmd 'codex exec --full-auto "下列測試失敗，請修正 src/ 下程式碼（禁止改 tests/），只寫入 src/：\n$(cat {defects_file})"'
+  --fix-cmd 'python tools/codex_runner.py --prompt "下列測試失敗，請修正 src/ 下程式碼（禁止改 tests/），只寫入 src/：\n$(cat {defects_file})"'
 ```
 
 （可選旗標：`--fix-retries 2` 便宜地重試 Codex；`--compile-cmd "<語法/編譯檢查>"` 編譯失敗時跳過測試直接 fix，省成本——REVIEW-R2-S2。）

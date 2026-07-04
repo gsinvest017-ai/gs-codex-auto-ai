@@ -38,8 +38,8 @@ description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求�
 ```bash
 python tools/run_loop.py --mode review --phase 4 --run-id <id> --max-iters 3 --patience 2 \
   --reviewer-model <模型A> --fixer-model <模型B> --available <A,B> \
-  --review-cmd 'codex exec -m <A> --full-auto "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把每個問題以 TYPE:ID 寫到 {review_out}（TYPE∈MISSING/EXTRA/MISMATCH，ID 用 FN 編號）。"' \
-  --fix-cmd 'codex exec -m <B> --full-auto "依 {review_out} 的問題清單修正 docs/architecture.md。"'
+  --review-cmd 'python tools/codex_runner.py --model <A> --prompt "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把每個問題以 TYPE:ID 寫到 {review_out}（TYPE∈MISSING/EXTRA/MISMATCH，ID 用 FN 編號）。"' \
+  --fix-cmd 'python tools/codex_runner.py --model <B> --prompt "依 {review_out} 的問題清單修正 docs/architecture.md。"'
 ```
 
 讀 stdout JSON `status`：`resolved*` → 通過 → **進入 Phase 5**；`escalated`/`error` → 升級終態通知使用者。

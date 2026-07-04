@@ -6,7 +6,7 @@
 
 你的 Claude tokens 只該花在「組 codex prompt、驗收結果、回報一行」三件事：
 - **不要**逐段解釋你要做什麼、**不要**重述規格內容、**不要**貼 Codex 產出的程式碼回對話。
-- 每個 FN 目標一次 `codex exec` 完成；驗收只跑編譯/靜態檢查，失敗把錯誤原文丟回 codex 修。
+- 每個 FN 目標一次 `python tools/codex_runner.py --prompt … --expect <目標檔>` 完成（防掛外殼：stdin=DEVNULL＋心跳看門狗＋自動重派，**勿裸跑 codex exec**）；驗收只跑編譯/靜態檢查，失敗把錯誤原文丟回 codex 修。
 - 完成回報**恰好一行**：`FN-xxx done|failed <一句原因>`。
 
 
@@ -82,7 +82,7 @@
 在 worktree 內執行：
 
 ```bash
-codex exec --full-auto "根據以下規格實現 function：
+python tools/codex_runner.py --expect <目標檔> --prompt "根據以下規格實現 function：
 
 【Function 編號】{FN-xxx}
 【Function 名稱】{function_name}

@@ -23,7 +23,7 @@ description: "Phase 3：Claude 給 high-level 架構綱要，架構文件與 fn-
 把綱要 + requirements-spec 交給 Codex 寫完整文件：
 
 ```bash
-codex exec --full-auto "你是系統架構師。根據以下 high-level 綱要與 docs/requirements-spec.md，撰寫：
+python tools/codex_runner.py --expect docs/architecture.md --expect docs/fn-manifest.json --prompt "你是系統架構師。根據以下 high-level 綱要與 docs/requirements-spec.md，撰寫：
 1. docs/architecture.md —— 完整系統架構文件：每個 function 的職責、介面（參數名稱/型別/回傳值）、依賴關係、並行分批計畫、每個 function 的測試方式。檔案路徑一律在 src/ 下。
 2. docs/fn-manifest.json —— 機器可讀清單，格式：
    [{\"id\":\"FN-001\",\"file\":\"src/xxx.py\",\"deps\":[\"FN-002\"],\"signature\":\"def f(...)->...\",\"ears\":[\"FN-001-S1\"]}]
@@ -38,7 +38,7 @@ codex exec --full-auto "你是系統架構師。根據以下 high-level 綱要�
 3. 每個 function 介面完整、路徑都在 `src/` 下、附測試方式
 4. `docs/fn-manifest.json` 可被 JSON 解析、拓樸無循環
 
-**FAIL → 把 findings 原文丟回 `codex exec` 修**（最多 3 輪），Claude 不得自行 Edit/Write
+**FAIL → 把 findings 原文丟回 codex_runner 修**（最多 3 輪），Claude 不得自行 Edit/Write
 `docs/architecture.md` 或 `fn-manifest.json`（PreToolUse hook 會擋）。
 
 ## 產出
