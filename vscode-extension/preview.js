@@ -125,12 +125,14 @@ function detectLauncher(root) {
 }
 
 // pipeline 狀態（log/state.json）：回傳 { active, phase }。讀不到 = 非 pipeline 專案。
+// active 的判準是「整條 run 未交付」（未見 phase7-end）——不能用「當前 phase 未 end」，
+// 否則 phase2-end 已寫、phase3 尚未 start 的間隙會誤判結束（實測踩過）。
 function pipelineState(root) {
   try {
     const st = JSON.parse(fs.readFileSync(path.join(root, "log", "state.json"), "utf-8"));
     const phase = String(st.phase || "");
     const completed = st.completed_actions || [];
-    return { active: !!phase && !completed.includes(`${phase}-end`), phase };
+    return { active: !!phase && !completed.includes("phase7-end"), phase };
   } catch { return { active: false, phase: "" }; }
 }
 
