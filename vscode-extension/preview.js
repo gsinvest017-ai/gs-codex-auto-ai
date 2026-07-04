@@ -40,10 +40,20 @@ function findWebRoots(root) {
 // 偵測常見 server 專案的預設 URL（給第 3 層當提示，不自動啟動 server——那是 pipeline 的事）。
 function guessServerUrl(root) {
   const reads = (f) => { try { return fs.readFileSync(path.join(root, f), "utf-8"); } catch { return ""; } };
-  const texts = ["run.ps1", "run.sh", "README.md", "app.py", "main.py",
+  const files = ["run.ps1", "run.sh", "README.md", "app.py", "main.py",
     path.join("src", "app.py"), path.join("src", "main.py"),
     path.join("src", "backend", "main.py"), path.join("src", "backend", "app.py"),
-    path.join("backend", "main.py")].map(reads).join("\n");
+    path.join("backend", "main.py")];
+  // module 型套件（src/<pkg>/）的 cli/webapp 也讀（port 預設常寫在 cli 的 argparse）
+  try {
+    for (const ent of fs.readdirSync(path.join(root, "src"), { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      for (const f of ["cli.py", "webapp.py", "__main__.py", "app.py"]) {
+        files.push(path.join("src", ent.name, f));
+      }
+    }
+  } catch { /* 無 src/ */ }
+  const texts = files.map(reads).join("\n");
   // 兩種常見寫法：URL 相鄰（localhost:8080）與 Flask/uvicorn 風格（port=8123 / --port 8123）
   const m = texts.match(/(?:https?:\/\/)?(?:localhost|127\.0\.0\.1):(\d{4,5})/)
     || texts.match(/port[\s=:]+["']?(\d{4,5})/i);
@@ -86,6 +96,28 @@ function detectLauncher(root) {
   }
   for (const f of ["app.py", "main.py", path.join("src", "app.py"), path.join("src", "main.py")]) {
     if (has(f)) return { cmd: `${py} ${f}`, label: `python ${f}` };
+  }
+  // module 型入口（CodexAutoAI CLI+web 交付慣例）：src/<pkg>/__main__.py，
+  // 且套件內任一檔含 "serve" 子命令 → `python -m <pkg> serve`（PYTHONPATH=src）。
+  const srcDir = path.join(root, "src");
+  if (fs.existsSync(srcDir)) {
+    let pkgs;
+    try { pkgs = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { pkgs = []; }
+    for (const ent of pkgs) {
+      if (!ent.isDirectory()) continue;
+      const pkgDir = path.join(srcDir, ent.name);
+      if (!fs.existsSync(path.join(pkgDir, "__main__.py"))) continue;
+      let hasServe = false;
+      for (const f of ["cli.py", "__main__.py", "webapp.py", "app.py"]) {
+        try {
+          if (/\bserve\b/.test(fs.readFileSync(path.join(pkgDir, f), "utf-8"))) { hasServe = true; break; }
+        } catch { /* 檔不存在 */ }
+      }
+      const sub = hasServe ? " serve" : "";
+      const env = process.platform === "win32"
+        ? `$env:PYTHONPATH='src'; ` : `PYTHONPATH=src `;
+      return { cmd: `${env}${py} -m ${ent.name}${sub}`, label: `python -m ${ent.name}${sub}` };
+    }
   }
   return null;
 }
