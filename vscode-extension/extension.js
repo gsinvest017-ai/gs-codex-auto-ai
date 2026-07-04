@@ -111,6 +111,16 @@ function termInRoot(root, name) {
   return vscode.window.createTerminal({ name, cwd: root });
 }
 
+// 框架核心清單：這些是 pipeline 的 SSOT（extension 快照為準），啟動時一律刷新到最新——
+// 使用者不必記得「更新後要重跑安裝設定」（0.9.5→0.9.6 的 permission 修正就因此沒生效過）。
+// 使用者資料（src/ docs/ log/ vault/…）永不在此清單。
+const FRAMEWORK_CORE = ["setup.ps1", "setup.cmd", "setup.sh",
+  "CLAUDE.md", "AGENTS.md", ".claude", "tools", ".githooks"];
+
+function refreshFrameworkCore(extPath, root) {
+  return copyFramework(extPath, root, { force: FRAMEWORK_CORE });
+}
+
 // ── 環境 pre-check（已安裝+登入就跳過「設定/修復」，不開終端機）──────────────
 // claude / codex 在 Windows 是 .cmd 蓋子，需要 shell；用 exec(字串) 避開 execFile 對 .cmd
 // 的 FileNotFoundError，也避開 shell:true + args 陣列的 DEP0190 警告。回傳 Promise<bool>。
@@ -355,10 +365,7 @@ function activate(context) {
       // 「修復」語意：框架核心（CLAUDE.md/AGENTS.md/.claude/tools/.githooks）一律更新到
       // extension 內建版本，否則舊專案吃不到框架演進（如 Codex-first 分工、hook 擴大）。
       // 使用者資料（src/ docs/ log/ 等）不在 force 清單、永不覆蓋。
-      copyFramework(extPath, root, {
-        force: ["setup.ps1", "setup.cmd", "setup.sh",
-                "CLAUDE.md", "AGENTS.md", ".claude", "tools", ".githooks"],
-      });
+      copyFramework(extPath, root, { force: FRAMEWORK_CORE });
 
       // pre-check：本機若已安裝+登入 Claude / Codex / gh，就不重跑 setup（連終端機都不開）。
       // 可用設定 codexautoai.skipSetupWhenReady=false 關閉此偵測，永遠開終端機跑完整 setup。
@@ -392,7 +399,7 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.start", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
 
       const cfg = vscode.workspace.getConfiguration("codexautoai");
       const req = await vscode.window.showInputBox({
@@ -422,7 +429,7 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.dashboard", () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
       const cfg = vscode.workspace.getConfiguration("codexautoai");
       dashboard.openDashboard({
         vscode, root,
@@ -498,7 +505,7 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.seedFromSpec", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
 
       const cfg = vscode.workspace.getConfiguration("codexautoai");
       const intent = await vscode.window.showInputBox({
