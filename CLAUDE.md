@@ -27,7 +27,7 @@
 |-------|---------|------|
 | 0 | `/phase0-init` | 建立資料夾結構 |
 | 1 | `/codex-env-check` | 確認 Codex 環境可用 |
-| 2 | `/phase2-requirements` | 需求分析（唯一可暫停詢問的 Phase）|
+| 2 | `/phase2-requirements` | 需求分析（不確定處自行做合理假設並記入 spec，不暫停詢問）|
 | 3 | `/phase3-architecture` | 系統架構規劃與 function 拆解 |
 | 4 | `/phase4-review` | Codex 審查 + 中控複審（不通過則循環）|
 | 5 | `/phase5-build` | 並行開發所有 function |
@@ -36,7 +36,7 @@
 
 ## 調度原則
 
-- **自動推進**：Phase 2 待確認事項是唯一暫停理由
+- **自動推進（零詢問）**：pipeline 進行中**不可用 AskUserQuestion**（PreToolUse hook 會擋）——任何不確定處選「最保守、最符合需求規格」的選項，一行理由記到 `log/` 後直接繼續；Phase 2 的需求疑點寫成「假設」段落放進 spec
 - **簡短回報**：每 Phase 完成一句話回報，立即繼續
 - **並行優先**：無依賴任務同時啟動多個 sub-agent
 - **批判性審查**：每階段產出必須審查後才進入下一階段

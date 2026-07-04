@@ -456,6 +456,7 @@ function activate(context) {
               else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
               else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
               else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
+              else if (r.mode === "pending") reply(`⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成（或修復 stall）後再按 🌐。`);
               else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
             })
             .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
@@ -478,7 +479,10 @@ function activate(context) {
       }
       try {
         const r = await preview.openPreview(root, previewVsApi(root), { pickIndex });
-        if (r.mode !== "cancelled") {
+        if (r.mode === "pending") {
+          vscode.window.showWarningMessage(
+            `⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成後再預覽。`);
+        } else if (r.mode !== "cancelled") {
           vscode.window.showInformationMessage(`✓ 預覽已開啟（${r.mode}）：${r.detail}`);
         }
       } catch (e) {

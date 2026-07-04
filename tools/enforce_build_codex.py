@@ -43,6 +43,15 @@ _DENY_REASON = (
     "設環境變數 CODEXAUTOAI_NO_BUILD_ENFORCE=1）"
 )
 
+# 非停原則：pipeline 進行中不可把選擇丟回使用者（AskUserQuestion 會卡住等輸入，
+# 控制台/autopilot 的無人值守流程會就此停擺）。
+_DENY_ASK_REASON = (
+    "CodexAutoAI 非停規則：pipeline 進行中不可用 AskUserQuestion 問使用者。\n"
+    "請自行決定：選擇「最保守、最符合 docs/requirements-spec.md」的選項，"
+    "把該決定與理由記到 log/（一行即可），然後直接繼續。\n"
+    "（如需暫時停用：設環境變數 CODEXAUTOAI_NO_BUILD_ENFORCE=1）"
+)
+
 
 def _project_dir() -> Path:
     env = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -61,6 +70,19 @@ def _is_building(root: Path) -> bool:
     phase = str(st.get("phase") or "")
     completed = st.get("completed_actions") or []
     return phase in _ENFORCED_PHASES and f"{phase}-end" not in completed
+
+
+def _run_active(root: Path) -> bool:
+    """任一 phase 進行中（phase 非空且未 *-end）→ pipeline 執行中。讀不到 state 放行。"""
+    try:
+        st = json.loads((root / "log" / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(st, dict):
+        return False
+    phase = str(st.get("phase") or "")
+    completed = st.get("completed_actions") or []
+    return bool(phase) and f"{phase}-end" not in completed
 
 
 def _under_src(root: Path, file_path: str) -> bool:
@@ -88,6 +110,9 @@ def evaluate(payload: dict, root: Path) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
     tool = payload.get("tool_name") or ""
+    # 非停：pipeline 進行中禁止把選擇丟回使用者
+    if tool == "AskUserQuestion":
+        return _DENY_ASK_REASON if _run_active(root) else None
     if tool not in _GUARDED_TOOLS:
         return None
     tin = payload.get("tool_input") or {}
