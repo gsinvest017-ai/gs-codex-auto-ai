@@ -38,7 +38,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "Edit|Write|MultiEdit|AskUserQuestion",
         "hooks": [
           {
             "type": "command",
