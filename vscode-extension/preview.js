@@ -54,9 +54,11 @@ function guessServerUrl(root) {
     }
   } catch { /* 無 src/ */ }
   const texts = files.map(reads).join("\n");
-  // 兩種常見寫法：URL 相鄰（localhost:8080）與 Flask/uvicorn 風格（port=8123 / --port 8123）
+  // 三種常見寫法：URL 相鄰（localhost:8080）、Flask/uvicorn（port=8123 / --port 8123）、
+  // argparse（add_argument('--port', default=8123)）
   const m = texts.match(/(?:https?:\/\/)?(?:localhost|127\.0\.0\.1):(\d{4,5})/)
-    || texts.match(/port[\s=:]+["']?(\d{4,5})/i);
+    || texts.match(/port[\s=:]+["']?(\d{4,5})/i)
+    || texts.match(/port[^\n]{0,40}?default\s*=\s*["']?(\d{4,5})/i);
   return m ? `http://127.0.0.1:${m[1]}` : "http://127.0.0.1:8000";
 }
 
