@@ -5,6 +5,7 @@ tests/*
 !tests/codexautoai_v2/
 !tests/tools/
 !tests/test_updater.py
+!tests/test_codex_runner.py
 !tests/test_global_overlay.py
 log/
 
