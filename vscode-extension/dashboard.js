@@ -140,7 +140,7 @@ function summarizeTranscript(lines) {
         }
       }
     }
-    if (d.timestamp) s.lastTs = d.timestamp;
+    if (d.timestamp) { s.lastTs = d.timestamp; if (!s.firstTs) s.firstTs = d.timestamp; }
   }
   s.started = [...started].sort((a, b) => a - b);
   return s;
@@ -181,9 +181,11 @@ function readSubagentStats(transcriptFile) {
   return out;
 }
 
-// 合併資料源（transcript 為主、events.jsonl 為輔、subagents 補 builders 的 codex）。
-function combineSummaries(ev, tr, sub) {
+// 合併資料源（transcript 為主、events.jsonl 為輔、subagents 補 builders 的 codex、
+// codexUsage 補 Codex 端真實 token 用量）。
+function combineSummaries(ev, tr, sub, codexUsage) {
   sub = sub || { agents: 0, codexCalls: 0, inTok: 0, outTok: 0, cacheTok: 0 };
+  codexUsage = codexUsage || { sessions: 0, inTok: 0, outTok: 0, cacheTok: 0 };
   const s = {
     current: tr && tr.current !== null ? tr.current : ev.current,
     completed: ev.completed,
@@ -197,10 +199,18 @@ function combineSummaries(ev, tr, sub) {
       outTok: ev.claude.outTok + (tr ? tr.claude.outTok : 0) + sub.outTok,
       cacheTok: (tr ? tr.claude.cacheTok : 0) + sub.cacheTok,
     },
-    codex: { calls: ev.codex.calls + (tr ? tr.codex.calls : 0) + sub.codexCalls },
+    codex: {
+      calls: ev.codex.calls + (tr ? tr.codex.calls : 0) + sub.codexCalls,
+      sessions: codexUsage.sessions,
+      inTok: codexUsage.inTok, outTok: codexUsage.outTok, cacheTok: codexUsage.cacheTok,
+    },
     builders: (tr ? tr.buildersInPhase5 : 0) || sub.agents,
     lastTs: (tr && tr.lastTs) || ev.lastTs,
   };
+  // 實作產出佔比（以 output tokens 比較——「誰在產內容」的公平單位，呼叫次數不可比）
+  const codexOut = s.codex.outTok, claudeOut = s.claude.outTok;
+  s.codexShare = (codexOut + claudeOut) > 0
+    ? Math.round((codexOut / (codexOut + claudeOut)) * 100) : null;
   const marker = Math.max(
     s.current !== null && s.current !== undefined ? s.current : 0,
     s.completed.length ? Math.max(...s.completed) : 0,
@@ -215,6 +225,65 @@ function combineSummaries(ev, tr, sub) {
   s.divisionWaiting = reached5 && s.codexInPhase5 === 0 && s.builders > 0;
   s.marker = marker;
   return s;
+}
+
+// ── Codex token 用量（~/.codex/sessions rollout jsonl）──────────────────────
+// Codex CLI 每次 exec 寫一個 rollout 檔：首行 session_meta（含 cwd）、event_msg 裡的
+// token_count.info.total_token_usage 是「該 session 累計」——取最後一筆即總量。
+// 121+ 檔每 2 秒重掃太重 → per-file cache（mtime+size 沒變就用上次解析結果）。
+const _codexCache = new Map(); // file -> { mtimeMs, size, cwd, ts, usage }
+
+function _parseRollout(file) {
+  let cwd = null, usage = null;
+  let text;
+  try { text = fs.readFileSync(file, "utf-8"); } catch { return { cwd, usage }; }
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    const p = d.payload || {};
+    if (d.type === "session_meta") cwd = p.cwd || null;
+    else if (d.type === "event_msg" && p.type === "token_count") {
+      const u = (p.info || {}).total_token_usage;
+      if (u) usage = u; // 累計值，最後一筆為準
+    }
+  }
+  return { cwd, usage };
+}
+
+// 彙總屬於此 workspace（cwd 相符）且 sinceMs 之後有活動的 codex sessions 用量。
+function readCodexUsage(root, sinceMs) {
+  const out = { sessions: 0, inTok: 0, outTok: 0, cacheTok: 0 };
+  const base = path.join(os.homedir(), ".codex", "sessions");
+  if (!fs.existsSync(base)) return out;
+  const rootNorm = path.resolve(root).toLowerCase();
+  const stack = [base];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) { stack.push(full); continue; }
+      if (!ent.name.endsWith(".jsonl")) continue;
+      let st;
+      try { st = fs.statSync(full); } catch { continue; }
+      if (sinceMs && st.mtimeMs < sinceMs) continue; // 只算本次 run 期間的 session
+      let rec = _codexCache.get(full);
+      if (!rec || rec.mtimeMs !== st.mtimeMs || rec.size !== st.size) {
+        const parsed = _parseRollout(full);
+        rec = { mtimeMs: st.mtimeMs, size: st.size, cwd: parsed.cwd, usage: parsed.usage };
+        _codexCache.set(full, rec);
+      }
+      if (!rec.cwd || path.resolve(rec.cwd).toLowerCase() !== rootNorm) continue;
+      if (!rec.usage) continue;
+      out.sessions += 1;
+      out.inTok += rec.usage.input_tokens || 0;
+      out.outTok += (rec.usage.output_tokens || 0) + (rec.usage.reasoning_output_tokens || 0);
+      out.cacheTok += rec.usage.cached_input_tokens || 0;
+    }
+  }
+  return out;
 }
 
 // 增量讀 transcript（session 可長到數十 MB；只讀新增 bytes，換檔即重讀）。
@@ -295,8 +364,9 @@ function html(defaultReq) {
 <div class="card"><h2>分工證據（確保 Claude 規劃、Codex 實作）</h2>
   <div class="grid">
     <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">0</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
-    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> 次呼叫<div class="muted" id="codexP5">phase5 內 0 次</div></div>
+    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> 次呼叫<div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
   </div>
+  <div class="muted" id="share" style="margin-top:8px;"></div>
   <div class="wait" id="divWait">⏳ 已派遣 builder 子代理，等待第一筆 Codex 呼叫紀錄……（builders 的 codex exec 會稍晚出現在子代理 transcript）</div>
   <div class="warn" id="divWarn">⚠ 已進入並行開發（phase5）但既沒派遣 builder 也偵測不到任何 Codex 呼叫——疑似只在 Claude 上花 token、未走 Codex 實作，請檢查。</div>
   <div class="row muted"><span id="cost">累計成本 $0.0000</span><span id="iter"></span><span id="ts"></span></div>
@@ -330,8 +400,15 @@ function html(defaultReq) {
     $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
       + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
     $("codexCalls").textContent = s.codex.calls;
+    $("codexTok").textContent = s.codex.sessions
+      ? "tokens in " + s.codex.inTok + " / out " + s.codex.outTok
+        + (s.codex.cacheTok ? "（cache " + s.codex.cacheTok + "）" : "") + "・" + s.codex.sessions + " sessions"
+      : "tokens —（尚無本次 run 的 codex session）";
     $("codexP5").textContent = "phase5 內 " + s.codexInPhase5 + " 次"
       + (s.builders ? "・builders " + s.builders + " 個" : "");
+    $("share").textContent = s.codexShare === null ? "" :
+      "實作產出佔比（output tokens）：Codex " + s.codexShare + "% vs Claude " + (100 - s.codexShare) + "%"
+      + (s.codexShare < 50 ? "　⚠ Codex 佔比偏低" : "　✓ 符合 Codex-first");
     $("divWarn").style.display = s.divisionWarning ? "block" : "none";
     $("divWait").style.display = s.divisionWaiting ? "block" : "none";
     $("cost").textContent = "累計成本 $" + (s.cost || 0).toFixed(4);
@@ -354,10 +431,13 @@ function openDashboard(deps) {
   const push = () => {
     const { exists, lines } = readEventsFile(root);
     const tr = readTranscript(root);
+    const trSum = tr ? summarizeTranscript(tr.lines) : null;
+    // Codex 用量只算「本次 run 開始後」的 sessions（transcript 首事件時間為界）
+    const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
     const summary = combineSummaries(
-      summarizeEvents(lines),
-      tr ? summarizeTranscript(tr.lines) : null,
-      tr ? readSubagentStats(tr.file) : null);
+      summarizeEvents(lines), trSum,
+      tr ? readSubagentStats(tr.file) : null,
+      readCodexUsage(root, sinceMs));
     panel.webview.postMessage({ type: "state", exists: exists || !!tr, summary });
   };
   const timer = setInterval(push, 2000);
@@ -377,5 +457,5 @@ function openDashboard(deps) {
 module.exports = {
   openDashboard, summarizeEvents, readEventsFile,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript,
-  makeTranscriptReader, readSubagentStats,
+  makeTranscriptReader, readSubagentStats, readCodexUsage,
 };
