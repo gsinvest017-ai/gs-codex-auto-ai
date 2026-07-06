@@ -55,6 +55,18 @@ function summarizeEvents(lines) {
   return s;
 }
 
+// 只保留 timestamp >= sinceMs 的 events.jsonl 行（濾掉舊 run 殘留）。sinceMs=0 時全保留
+// （v2 orchestrator 的 events.jsonl 是當前 run 的、無 transcript 可界定時退回全用）。
+function filterEventsSince(lines, sinceMs) {
+  if (!sinceMs) return lines;
+  return lines.filter((ln) => {
+    try {
+      const ts = JSON.parse(ln).timestamp;
+      return !ts || Date.parse(ts) >= sinceMs;
+    } catch { return false; }
+  });
+}
+
 function readEventsFile(root) {
   const f = path.join(root, "log", "events.jsonl");
   if (!fs.existsSync(f)) return { exists: false, lines: [] };
@@ -286,29 +298,23 @@ function readCodexUsage(root, sinceMs) {
   return out;
 }
 
-// 增量讀 transcript（session 可長到數十 MB；只讀新增 bytes，換檔即重讀）。
+// 讀 transcript。刻意每次「整檔 UTF-8 讀取」而非 byte-offset 增量——
+// 增量版曾在 CJK 密集的 transcript 上於 byte 邊界切斷多位元組字元、並讓面板卡在舊狀態
+// （使用者實測 Phase 0/7 vs 終端 Phase 2 的元凶）。transcript ~1MB、每 2 秒全讀成本可忽略，
+// 換取「面板永遠反映當前完整內容」的正確性。mtime 沒變就重用上次解析結果（省重複解析）。
+let _trCache = { file: null, mtimeMs: 0, lines: [] };
 function makeTranscriptReader() {
-  const state = { file: null, offset: 0, remainder: "", lines: [] };
   return (root) => {
     const f = findTranscript(root);
-    if (!f) { state.file = null; state.lines = []; return null; }
-    const size = fs.statSync(f).size;
-    if (state.file !== f || size < state.offset) {
-      state.file = f; state.offset = 0; state.remainder = ""; state.lines = [];
+    if (!f) { _trCache = { file: null, mtimeMs: 0, lines: [] }; return null; }
+    let mt;
+    try { mt = fs.statSync(f).mtimeMs; } catch { return null; }
+    if (_trCache.file !== f || _trCache.mtimeMs !== mt) {
+      let lines = [];
+      try { lines = fs.readFileSync(f, "utf-8").split(/\r?\n/).filter(Boolean); } catch { /* 讀失敗保留舊 */ }
+      _trCache = { file: f, mtimeMs: mt, lines };
     }
-    if (size > state.offset) {
-      const fd = fs.openSync(f, "r");
-      try {
-        const buf = Buffer.alloc(size - state.offset);
-        fs.readSync(fd, buf, 0, buf.length, state.offset);
-        state.offset = size;
-        const chunk = state.remainder + buf.toString("utf-8");
-        const parts = chunk.split(/\r?\n/);
-        state.remainder = parts.pop() || "";
-        state.lines.push(...parts.filter(Boolean));
-      } finally { fs.closeSync(fd); }
-    }
-    return { lines: state.lines, file: f };
+    return { lines: _trCache.lines, file: f };
   };
 }
 
@@ -434,8 +440,11 @@ function openDashboard(deps) {
     const trSum = tr ? summarizeTranscript(tr.lines) : null;
     // Codex 用量只算「本次 run 開始後」的 sessions（transcript 首事件時間為界）
     const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+    // events.jsonl 是 per-repo 殘留（跨 run 不重置）——只保留本次 run（>= sinceMs）的行，
+    // 否則舊 run 的 phaseN-end 會把新 run 的 phase 進度誤拉高。
+    const evLines = filterEventsSince(lines, sinceMs);
     const summary = combineSummaries(
-      summarizeEvents(lines), trSum,
+      summarizeEvents(evLines), trSum,
       tr ? readSubagentStats(tr.file) : null,
       readCodexUsage(root, sinceMs));
     panel.webview.postMessage({ type: "state", exists: exists || !!tr, summary });
@@ -455,7 +464,7 @@ function openDashboard(deps) {
 }
 
 module.exports = {
-  openDashboard, summarizeEvents, readEventsFile,
+  openDashboard, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };
