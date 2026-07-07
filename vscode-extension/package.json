@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.9.11",
+  "version": "0.10.0",
   "publisher": "gsinvest",
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Other", "AI"],
@@ -23,6 +23,43 @@
         { "id": "codexautoai.dashboardView", "name": "控制台", "type": "webview" }
       ]
     },
+    "walkthroughs": [
+      {
+        "id": "codexautoai.gettingStarted",
+        "title": "CodexAutoAI 快速上手",
+        "description": "免終端機，三步驟做出東西：安裝設定 → 描述需求 → 看成果。",
+        "steps": [
+          {
+            "id": "setup",
+            "title": "安裝設定（一鍵）",
+            "description": "第一次使用先按這個，自動裝好並登入 Claude / Codex / GitHub CLI。\n[▶ 安裝設定](command:codexautoai.setup)",
+            "media": { "markdown": "resources/walkthrough/setup.md" },
+            "completionEvents": ["onCommand:codexautoai.setup"]
+          },
+          {
+            "id": "dashboard",
+            "title": "打開控制台",
+            "description": "點左側活動列的 CodexAutoAI 圖示（或用這個按鈕）開啟常駐控制台。\n[▶ 開啟控制台](command:codexautoai.dashboard)",
+            "media": { "markdown": "resources/walkthrough/dashboard.md" },
+            "completionEvents": ["onCommand:codexautoai.dashboard"]
+          },
+          {
+            "id": "describe",
+            "title": "描述需求 → 啟動",
+            "description": "在控制台用一句白話描述你要的東西，按「🚀 啟動新任務」，全自動跑完七階段。",
+            "media": { "markdown": "resources/walkthrough/describe.md" },
+            "completionEvents": ["onCommand:codexautoai.start"]
+          },
+          {
+            "id": "preview",
+            "title": "看成果（內嵌預覽）",
+            "description": "有網頁畫面的成品，按「🌐 即時預覽網頁 UI」直接在 VS Code 內嵌開啟。\n[▶ 即時預覽](command:codexautoai.preview)",
+            "media": { "markdown": "resources/walkthrough/preview.md" },
+            "completionEvents": ["onCommand:codexautoai.preview"]
+          }
+        ]
+      }
+    ],
     "commands": [
       { "command": "codexautoai.dashboard", "title": "CodexAutoAI: 開啟控制台（免終端機 GUI）" },
       { "command": "codexautoai.preview", "title": "CodexAutoAI: 即時預覽網頁 UI（內嵌）" },
