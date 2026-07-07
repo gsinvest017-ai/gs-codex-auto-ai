@@ -170,7 +170,8 @@ function summarizeTranscript(lines) {
         if (s.current === 5) s.buildersInPhase5 += 1;
       } else if (c.name === "Bash" || c.name === "PowerShell") {
         const cmd = String((c.input || {}).command || "");
-        if (/codex\s+exec/i.test(cmd)) {
+        // codex exec（舊）與 codex_runner.py（0.9.5+ 防掛外殼）都算一次 Codex 呼叫。
+        if (/codex\s+exec|codex_runner/i.test(cmd)) {
           s.codex.calls += 1;
           if (s.current === 5) s.codexInPhase5 += 1;
         }
@@ -208,7 +209,7 @@ function readSubagentStats(transcriptFile) {
       }
       for (const c of (Array.isArray(m.content) ? m.content : [])) {
         if (c && c.type === "tool_use" && (c.name === "Bash" || c.name === "PowerShell")
-            && /codex\s+exec/i.test(String((c.input || {}).command || ""))) {
+            && /codex\s+exec|codex_runner/i.test(String((c.input || {}).command || ""))) {
           out.codexCalls += 1;
         }
       }
@@ -433,7 +434,9 @@ function html(defaultReq) {
     $("claudeCalls").textContent = s.claude.calls;
     $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
       + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
-    $("codexCalls").textContent = s.codex.calls;
+    // 「次呼叫」以 codex sessions（~/.codex/sessions 的實際 codex 執行數）為權威——
+    // 0.9.5 起走 codex_runner，transcript 的 codex exec 字樣抓不到、regex 計數會是 0。
+    $("codexCalls").textContent = s.codex.sessions || s.codex.calls;
     $("codexTok").textContent = s.codex.sessions
       ? "tokens in " + s.codex.inTok + " / out " + s.codex.outTok
         + (s.codex.cacheTok ? "（cache " + s.codex.cacheTok + "）" : "") + "・" + s.codex.sessions + " sessions"
