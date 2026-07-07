@@ -15,6 +15,24 @@ from pathlib import Path
 
 RUNNER = Path(__file__).resolve().parent.parent / "tools" / "codex_runner.py"
 
+import importlib.util as _ilu  # noqa: E402
+
+_spec = _ilu.spec_from_file_location("codex_runner", RUNNER)
+codex_runner = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(codex_runner)
+
+
+def test_resolve_codex_uses_full_path(monkeypatch):
+    """Windows npm shim：解析成完整路徑（裸名 'codex' 會 WinError 2）。"""
+    monkeypatch.setattr(codex_runner.shutil, "which",
+                        lambda e: r"C:\Users\x\AppData\Roaming\npm\codex.CMD")
+    assert codex_runner.resolve_codex() == [r"C:\Users\x\AppData\Roaming\npm\codex.CMD"]
+
+
+def test_resolve_codex_fallback_bare_name(monkeypatch):
+    monkeypatch.setattr(codex_runner.shutil, "which", lambda e: None)
+    assert codex_runner.resolve_codex() == ["codex"]
+
 
 def _fake(tmp: Path, name: str, body: str) -> str:
     p = tmp / name
