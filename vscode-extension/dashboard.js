@@ -464,6 +464,24 @@ function html(defaultReq) {
 </script></body></html>`;
 }
 
+// 一次性計算某 workspace 的當前狀態（供狀態列 poller 用；面板 push() 有自己的增量版）。
+// 純資料、不依賴 vscode——回傳 { exists, summary }（summary 同 combineSummaries）。
+function computeState(root) {
+  const { exists, lines } = readEventsFile(root);
+  const f = findTranscript(root);
+  let trSum = null, sub = null;
+  if (f) {
+    let trLines = [];
+    try { trLines = fs.readFileSync(f, "utf-8").split(/\r?\n/).filter(Boolean); } catch { /* 讀失敗當空 */ }
+    trSum = summarizeTranscript(trLines);
+    sub = readSubagentStats(f);
+  }
+  const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+  const summary = combineSummaries(
+    summarizeEvents(filterEventsSince(lines, sinceMs)), trSum, sub, readCodexUsage(root, sinceMs));
+  return { exists: exists || !!f, summary };
+}
+
 // 開啟控制台面板。deps 由 extension.js 注入（避免此檔依賴 vscode 以外的東西）：
 //   { vscode, root, defaultReq, onStart(requirement, autopilot, reply), onSeed(intent, autopilot, reply), onShowTerminal() }
 function openDashboard(deps) {
@@ -504,7 +522,7 @@ function openDashboard(deps) {
 }
 
 module.exports = {
-  openDashboard, summarizeEvents, readEventsFile, filterEventsSince,
+  openDashboard, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };

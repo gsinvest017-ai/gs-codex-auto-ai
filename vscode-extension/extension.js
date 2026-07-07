@@ -343,6 +343,31 @@ function activate(context) {
     }
   } catch (e) { console.warn("CodexAutoAI: 套用全域設定失敗：", e && e.message); }
 
+  // ── 狀態列指示（像 Claude/Codex：底部一眼看到 pipeline 跑到哪）─────────────
+  // 點一下開控制台。有 run 進行中才顯示；純輪詢既有 transcript，不影響 pipeline。
+  const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusItem.command = "codexautoai.dashboard";
+  context.subscriptions.push(statusItem);
+  const refreshStatus = () => {
+    try {
+      const root = workspaceRoot();
+      if (!root) { statusItem.hide(); return; }
+      const { exists, summary: s } = dashboard.computeState(root);
+      if (!exists) { statusItem.hide(); return; }
+      const marker = s.marker || 0;
+      const name = dashboard.PHASES[marker] || "";
+      const done = marker === 7 && (s.completed.includes(7) || s.started.includes(7));
+      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : "$(sync~spin)");
+      statusItem.text = `${icon} CodexAutoAI ${marker}/7 ${name}`;
+      statusItem.tooltip = s.failed ? "pipeline 失敗/升級——點開控制台查看"
+        : (done ? "已到交付階段——點開控制台" : `並行實作中・Codex ${s.codex.sessions || 0} sessions——點開控制台`);
+      statusItem.show();
+    } catch { statusItem.hide(); }
+  };
+  refreshStatus();
+  const statusTimer = setInterval(refreshStatus, 3000);
+  context.subscriptions.push({ dispose: () => clearInterval(statusTimer) });
+
   context.subscriptions.push(
     vscode.commands.registerCommand("codexautoai.init", async () => {
       const root = workspaceRoot();
