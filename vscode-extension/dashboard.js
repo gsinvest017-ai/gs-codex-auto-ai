@@ -82,15 +82,31 @@ function readEventsFile(root) {
 
 const os = require("os");
 
-// Claude Code 專案目錄命名規則：路徑的 [:\/] 換成 '-'（實測 C:\Users\User\test-repo →
-// C--Users-User-test-repo）。
+// Claude Code 專案目錄命名規則：路徑的 [:\/.] 全換成 '-'（含 . ——實測
+// C:\Users\User\test-repo-0.9.8 → C--Users-User-test-repo-0-9-8；漏換 . 會找不到目錄）。
 function projectSlug(root) {
-  return String(root).replace(/[:\\/]/g, "-");
+  return String(root).replace(/[:\\/.]/g, "-");
+}
+
+// 解析 workspace 對應的 Claude 專案目錄：先試精準 slug，不中則對 projects/ 做
+// case-insensitive 比對（VS Code fsPath 可能給小寫磁碟機代號 c:\ 而目錄是 C--…）。
+function findProjectDir(root) {
+  const base = path.join(os.homedir(), ".claude", "projects");
+  const slug = projectSlug(root);
+  const direct = path.join(base, slug);
+  if (fs.existsSync(direct)) return direct;
+  try {
+    const want = slug.toLowerCase();
+    for (const name of fs.readdirSync(base)) {
+      if (name.toLowerCase() === want) return path.join(base, name);
+    }
+  } catch { /* projects 目錄不存在 */ }
+  return null;
 }
 
 function findTranscript(root) {
-  const dir = path.join(os.homedir(), ".claude", "projects", projectSlug(root));
-  if (!fs.existsSync(dir)) return null;
+  const dir = findProjectDir(root);
+  if (!dir || !fs.existsSync(dir)) return null;
   let best = null;
   for (const name of fs.readdirSync(dir)) {
     if (!name.endsWith(".jsonl")) continue;
@@ -133,7 +149,15 @@ function summarizeTranscript(lines) {
     }
     const content = Array.isArray(m.content) ? m.content : [];
     for (const c of content) {
-      if (!c || c.type !== "tool_use") continue;
+      if (!c) continue;
+      // 與終端機同源的權威 phase 訊號：Claude 印在 assistant 文字的 [CodexAutoAI] Phase N/7
+      // （CLAUDE.md「進度可見」規則）。新版 pipeline / Fable 不一定經 Skill tool，此為主源。
+      if (c.type === "text" && typeof c.text === "string") {
+        const pm = c.text.match(/Phase\s*(\d)\s*\/\s*7/);
+        if (pm) { const p = +pm[1]; if (p >= 0 && p <= 7) { s.current = p; started.add(p); } }
+        continue;
+      }
+      if (c.type !== "tool_use") continue;
       if (c.name === "Skill") {
         const skill = (c.input || {}).skill || "";
         const p = SKILL_PHASE[skill];
@@ -230,11 +254,15 @@ function combineSummaries(ev, tr, sub, codexUsage) {
   // builders 是 phase5 派的子代理，其 codex 呼叫視為 phase5 的實作證據。
   s.codexInPhase5 = ev.codexInPhase5 + (tr ? tr.codexInPhase5 : 0)
     + (marker >= 5 ? sub.codexCalls : 0);
-  // 分級：紅=進 phase5 後既沒派 builders 也沒 codex（真異常）；
-  //       黃=已派 builders 但還沒看到 codex 紀錄（正常延遲，等待中）。
+  // 「Codex 是否真的在做事」的權威訊號＝本次 run 的 codex sessions（readCodexUsage，
+  // 讀 ~/.codex/sessions）。0.9.5 起 codex 走 codex_runner.py，主 transcript 的 Bash
+  // 是 `python tools/codex_runner.py` 而非 `codex exec`，regex 抓不到 → 不能只靠它判警示。
+  const codexActive = s.codexInPhase5 > 0 || s.codex.sessions > 0;
+  // 分級：紅=進 phase5 後既沒派 builders、codex sessions 也是 0（真異常）；
+  //       黃=已派 builders 但還沒看到任何 codex 紀錄（正常延遲，等待中）。
   const reached5 = marker >= 5;
-  s.divisionWarning = reached5 && s.codexInPhase5 === 0 && s.builders === 0;
-  s.divisionWaiting = reached5 && s.codexInPhase5 === 0 && s.builders > 0;
+  s.divisionWarning = reached5 && !codexActive && s.builders === 0;
+  s.divisionWaiting = reached5 && !codexActive && s.builders > 0;
   s.marker = marker;
   return s;
 }
@@ -465,6 +493,6 @@ function openDashboard(deps) {
 
 module.exports = {
   openDashboard, summarizeEvents, readEventsFile, filterEventsSince,
-  summarizeTranscript, combineSummaries, projectSlug, findTranscript,
+  summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };
