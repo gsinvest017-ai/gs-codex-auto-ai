@@ -30,12 +30,25 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 IS_WIN = os.name == "nt"
+
+
+def resolve_codex(exe: str = "codex") -> list[str]:
+    """回傳啟動 codex 的 argv 前綴（不含 exec/子參數）。
+
+    Windows 上 npm 把 codex 裝成 `codex.CMD` shim；Python subprocess.Popen 用**裸名**
+    'codex'（無 shell）不做 PATHEXT 解析 → WinError 2「找不到指定的檔案」（每個新任務都踩）。
+    用 shutil.which 解析成完整路徑（實測完整 .CMD 路徑可被 Popen 直接啟動、且 args 經
+    list2cmdline 正確帶入，不必經 cmd.exe 重新解析而衍生引號問題）。找不到就退回裸名。
+    """
+    resolved = shutil.which(exe)
+    return [resolved] if resolved else [exe]
 
 
 def _sessions_dir() -> Path:
@@ -127,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.codex_cmd:
         cmd = shlex.split(args.codex_cmd) + [args.prompt]
     else:
-        cmd = ["codex", "exec", "--full-auto"]
+        cmd = resolve_codex() + ["exec", "--full-auto"]  # Windows npm shim 解析（見 resolve_codex）
         if args.model:
             cmd += ["-m", args.model]
         cmd += [args.prompt]
