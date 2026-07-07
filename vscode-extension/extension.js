@@ -450,51 +450,72 @@ function activate(context) {
   );
 
   // ── 控制台（webview 內嵌 GUI）：給不想碰 CLI/TUI 的使用者 ─────────────────
+  // 建控制台 deps（面板命令與側欄 view 共用）。root 為當前 workspace，null 時回傳 null。
+  function buildDashboardDeps() {
+    const root = workspaceRoot();
+    if (!root) return null;
+    refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
+    const cfg = vscode.workspace.getConfiguration("codexautoai");
+    return {
+      vscode, root,
+      defaultReq: cfg.get("defaultRequirement", ""),
+      onStart: (requirement, autopilot, reply) => {
+        if (!(requirement || "").trim()) { reply("請先輸入需求。"); return; }
+        runClaudeInTerminal(root, buildInner(requirement, autopilot), { hidden: true });
+        reply("✓ 已在背景啟動，下方進度會自動更新（terminal 隱藏，可按「顯示背景終端機」查看）。");
+      },
+      onSeed: (intent, autopilot, reply) => {
+        if (!(intent || "").trim()) { reply("請先輸入要開發的功能意圖。"); return; }
+        reply("產生 spec 中…");
+        seedThenBuildInner(root, intent, cfg).then((r) => {
+          if (!r.ok) {
+            const tail = r.errors.length ? r.errors[r.errors.length - 1].detail : "";
+            reply(`產生 spec 失敗：${tail.slice(0, 160)}`);
+            return;
+          }
+          const safePath = r.specPath.replace(/"/g, "'");
+          runClaudeInTerminal(root,
+            buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot), { hidden: true });
+          reply(`✓ 已產生 spec（${r.specPath}）並在背景啟動。`);
+        });
+      },
+      onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
+      onPreview: (reply) => {
+        reply("偵測網頁 UI / 啟動 server 中…");
+        preview.openPreview(root, previewVsApi(root))
+          .then((r) => {
+            if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
+            else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "pending") reply(`⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成（或修復 stall）後再按 🌐。`);
+            else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
+          })
+          .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
+      },
+    };
+  }
+
+  // 命令：開控制台「面板」（編輯器分頁）
   context.subscriptions.push(
     vscode.commands.registerCommand("codexautoai.dashboard", () => {
-      const root = workspaceRoot();
-      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
-      const cfg = vscode.workspace.getConfiguration("codexautoai");
-      dashboard.openDashboard({
-        vscode, root,
-        defaultReq: cfg.get("defaultRequirement", ""),
-        onStart: (requirement, autopilot, reply) => {
-          if (!(requirement || "").trim()) { reply("請先輸入需求。"); return; }
-          runClaudeInTerminal(root, buildInner(requirement, autopilot), { hidden: true });
-          reply("✓ 已在背景啟動，下方進度會自動更新（terminal 隱藏，可按「顯示背景終端機」查看）。");
-        },
-        onSeed: (intent, autopilot, reply) => {
-          if (!(intent || "").trim()) { reply("請先輸入要開發的功能意圖。"); return; }
-          reply("產生 spec 中…");
-          seedThenBuildInner(root, intent, cfg).then((r) => {
-            if (!r.ok) {
-              const tail = r.errors.length ? r.errors[r.errors.length - 1].detail : "";
-              reply(`產生 spec 失敗：${tail.slice(0, 160)}`);
-              return;
-            }
-            const safePath = r.specPath.replace(/"/g, "'");
-            runClaudeInTerminal(root,
-              buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot), { hidden: true });
-            reply(`✓ 已產生 spec（${r.specPath}）並在背景啟動。`);
-          });
-        },
-        onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
-        onPreview: (reply) => {
-          reply("偵測網頁 UI / 啟動 server 中…");
-          preview.openPreview(root, previewVsApi(root))
-            .then((r) => {
-              if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
-              else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
-              else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
-              else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
-              else if (r.mode === "pending") reply(`⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成（或修復 stall）後再按 🌐。`);
-              else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
-            })
-            .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
-        },
-      });
+      const deps = buildDashboardDeps();
+      if (!deps) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      dashboard.openDashboard(deps);
     })
+  );
+
+  // 側欄常駐 view（活動列 CodexAutoAI 圖示）：像 Claude/Codex 一樣永遠點得到。
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      "codexautoai.dashboardView",
+      dashboard.makeDashboardViewProvider(() => buildDashboardDeps() || {
+        vscode, root: workspaceRoot() || ".", defaultReq: "",
+        onStart: (_r, _a, reply) => reply("請先開啟一個資料夾。"),
+        onSeed: (_i, _a, reply) => reply("請先開啟一個資料夾。"),
+        onShowTerminal: () => {}, onPreview: (reply) => reply("請先開啟一個資料夾。"),
+      })
+    )
   );
 
   // ── 即時預覽（命令面板版；多個候選頁時 QuickPick 選擇）─────────────────────

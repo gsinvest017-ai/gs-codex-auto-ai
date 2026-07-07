@@ -482,47 +482,51 @@ function computeState(root) {
   return { exists: exists || !!f, summary };
 }
 
-// 開啟控制台面板。deps 由 extension.js 注入（避免此檔依賴 vscode 以外的東西）：
-//   { vscode, root, defaultReq, onStart(requirement, autopilot, reply), onSeed(intent, autopilot, reply), onShowTerminal() }
-function openDashboard(deps) {
-  const { vscode, root } = deps;
-  const panel = vscode.window.createWebviewPanel(
-    "codexautoaiDashboard", "CodexAutoAI 控制台",
-    vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
-  panel.webview.html = html(deps.defaultReq);
-
-  const readTranscript = makeTranscriptReader();
+// 把一個 webview（面板或側欄 view 皆可）接上控制台：設 html、每 2s 推狀態、綁訊息。
+// 回傳 dispose()（清 interval）。deps 由 extension.js 注入。
+function wireDashboard(webview, deps) {
+  const { root } = deps;
+  webview.html = html(deps.defaultReq);
   const push = () => {
-    const { exists, lines } = readEventsFile(root);
-    const tr = readTranscript(root);
-    const trSum = tr ? summarizeTranscript(tr.lines) : null;
-    // Codex 用量只算「本次 run 開始後」的 sessions（transcript 首事件時間為界）
-    const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
-    // events.jsonl 是 per-repo 殘留（跨 run 不重置）——只保留本次 run（>= sinceMs）的行，
-    // 否則舊 run 的 phaseN-end 會把新 run 的 phase 進度誤拉高。
-    const evLines = filterEventsSince(lines, sinceMs);
-    const summary = combineSummaries(
-      summarizeEvents(evLines), trSum,
-      tr ? readSubagentStats(tr.file) : null,
-      readCodexUsage(root, sinceMs));
-    panel.webview.postMessage({ type: "state", exists: exists || !!tr, summary });
+    const { exists, summary } = computeState(root);
+    webview.postMessage({ type: "state", exists, summary });
   };
   const timer = setInterval(push, 2000);
   push();
-
-  panel.webview.onDidReceiveMessage((m) => {
-    const reply = (text) => panel.webview.postMessage({ type: "status", text });
+  const sub = webview.onDidReceiveMessage((m) => {
+    const reply = (text) => webview.postMessage({ type: "status", text });
     if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
     else if (m.type === "showTerminal") deps.onShowTerminal();
     else if (m.type === "preview" && deps.onPreview) deps.onPreview(reply);
   });
-  panel.onDidDispose(() => clearInterval(timer));
+  return () => { clearInterval(timer); try { sub.dispose(); } catch { /* 已釋放 */ } };
+}
+
+// 開啟控制台「面板」（編輯器分頁）。deps 見 wireDashboard。
+function openDashboard(deps) {
+  const { vscode } = deps;
+  const panel = vscode.window.createWebviewPanel(
+    "codexautoaiDashboard", "CodexAutoAI 控制台",
+    vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
+  const dispose = wireDashboard(panel.webview, deps);
+  panel.onDidDispose(dispose);
   return panel;
 }
 
+// 側欄「view」的 WebviewViewProvider（常駐活動列）。makeDeps() 於 view 解析時取當前 root + callbacks。
+function makeDashboardViewProvider(makeDeps) {
+  return {
+    resolveWebviewView(view) {
+      view.webview.options = { enableScripts: true };
+      const dispose = wireDashboard(view.webview, makeDeps());
+      view.onDidDispose(dispose);
+    },
+  };
+}
+
 module.exports = {
-  openDashboard, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
+  openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };

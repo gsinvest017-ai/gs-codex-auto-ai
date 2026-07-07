@@ -13,6 +13,16 @@
   "main": "./extension.js",
   "activationEvents": ["onStartupFinished"],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "codexautoai", "title": "CodexAutoAI", "icon": "resources/codexautoai.svg" }
+      ]
+    },
+    "views": {
+      "codexautoai": [
+        { "id": "codexautoai.dashboardView", "name": "控制台", "type": "webview" }
+      ]
+    },
     "commands": [
       { "command": "codexautoai.dashboard", "title": "CodexAutoAI: 開啟控制台（免終端機 GUI）" },
       { "command": "codexautoai.preview", "title": "CodexAutoAI: 即時預覽網頁 UI（內嵌）" },
