@@ -353,28 +353,37 @@ function html(defaultReq) {
   return `<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --gold:#d4af37; --champ:#e7ddc7; --muted:#8b949e; --green:#3fb950; --red:#f85149; }
-  body { background:var(--bg); color:var(--champ); font-family:"Segoe UI",sans-serif; padding:16px 18px; }
+  /* 全面採用 VS Code 主題變數（--vscode-*），面板自動跟 IDE 亮/暗主題一致；
+     只保留一抹品牌金給標題與進度方塊。每個變數都帶 fallback 值（舊 VS Code / 非 webview 預覽用）。 */
+  :root { --gold:#d4af37;
+    --fg:var(--vscode-foreground,#e7ddc7); --muted:var(--vscode-descriptionForeground,#8b949e);
+    --card:var(--vscode-editorWidget-background,#171a21); --line:var(--vscode-widget-border,#2a2f3a);
+    --green:var(--vscode-charts-green,#3fb950); --red:var(--vscode-charts-red,#f85149); }
+  body { background:var(--vscode-editor-background,#0f1115); color:var(--fg);
+         font-family:var(--vscode-font-family,"Segoe UI",sans-serif); font-size:var(--vscode-font-size,13px); padding:16px 18px; }
   h1 { color:var(--gold); font-size:20px; margin:0 0 2px; }
   .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
-  .card { background:var(--card); border-radius:8px; padding:12px 14px; margin-bottom:12px; }
-  .card h2 { font-size:13px; color:var(--champ); margin:0 0 8px; }
-  textarea { width:100%; box-sizing:border-box; background:#0f1115; color:var(--champ); border:1px solid #2a2f3a;
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+  .card h2 { font-size:13px; color:var(--fg); margin:0 0 8px; }
+  textarea { width:100%; box-sizing:border-box; background:var(--vscode-input-background,#0f1115);
+             color:var(--vscode-input-foreground,#e7ddc7); border:1px solid var(--vscode-input-border,var(--line));
              border-radius:6px; padding:8px; font-size:13px; min-height:56px; resize:vertical; }
   .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; align-items:center; }
   button { border:0; border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; }
-  .primary { background:var(--gold); color:#0f1115; font-weight:600; }
-  .ghost { background:#21262d; color:var(--champ); }
-  .bar { font-family:Consolas,monospace; font-size:15px; letter-spacing:2px; }
+  .primary { background:var(--vscode-button-background,var(--gold)); color:var(--vscode-button-foreground,#0f1115); font-weight:600; }
+  .primary:hover { background:var(--vscode-button-hoverBackground,#c79a3e); }
+  .ghost { background:var(--vscode-button-secondaryBackground,#21262d); color:var(--vscode-button-secondaryForeground,var(--fg)); }
+  .ghost:hover { background:var(--vscode-button-secondaryHoverBackground,#2a3138); }
+  .bar { font-family:var(--vscode-editor-font-family,Consolas,monospace); font-size:15px; letter-spacing:2px; color:var(--gold); }
   .muted { color:var(--muted); font-size:12px; }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .stat { background:#0f1115; border-radius:6px; padding:8px 10px; }
+  .stat { background:var(--vscode-editor-background,#0f1115); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
   .stat b { color:var(--gold); font-size:16px; }
   .ok { color:var(--green); } .bad { color:var(--red); }
-  .warn { background:#2a1515; border:1px solid var(--red); border-radius:6px; padding:8px 10px;
-          color:var(--red); font-size:12px; margin-top:8px; display:none; }
-  .wait { background:#2a2410; border:1px solid var(--gold); border-radius:6px; padding:8px 10px;
-          color:var(--gold); font-size:12px; margin-top:8px; display:none; }
+  .warn { background:var(--vscode-inputValidation-errorBackground,#2a1515); border:1px solid var(--vscode-inputValidation-errorBorder,var(--red));
+          border-radius:6px; padding:8px 10px; color:var(--vscode-inputValidation-errorForeground,var(--red)); font-size:12px; margin-top:8px; display:none; }
+  .wait { background:var(--vscode-inputValidation-warningBackground,#2a2410); border:1px solid var(--vscode-inputValidation-warningBorder,var(--gold));
+          border-radius:6px; padding:8px 10px; color:var(--vscode-inputValidation-warningForeground,var(--gold)); font-size:12px; margin-top:8px; display:none; }
   label { font-size:12px; color:var(--muted); }
   #status { min-height:16px; }
 </style></head><body>
