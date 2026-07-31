@@ -21,7 +21,7 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/rocket.svg?raw=true" width="22" align="top"> 用法（指令面板 <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd>）
 
-按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出五個指令。
+按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出七個指令。
 
 ### ⓪ 開啟控制台（免終端機 GUI）— 非開發者建議只用這個
 不想碰 CLI/TUI？執行「**CodexAutoAI: 開啟控制台**」：在 VS Code 內嵌面板輸入需求 → 按
@@ -53,6 +53,11 @@ seed 自動開發。**開箱即用**：extension 內建 gs-spec-forge 輕量核�
 
 ### ⑤ 檢查更新 — 比對 GitHub Release 最新 `ext-v*` 版本
 ![Step 4 檢查更新](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step4-update.svg?raw=true)
+
+### ⑥ 中止（下一個回合邊界停止）— 停止正在跑的 pipeline
+執行「CodexAutoAI: 中止（下一個回合邊界停止）」會寫入 `log/abort.flag`，讓 `tools/autopilot/cont.py`
+在**下一個回合邊界**停止 autopilot 續跑；**無法立即中斷正在執行的 Codex 子行程**。
+也可從控制台面板標題列的停止圖示觸發。
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/settings.svg?raw=true" width="22" align="top"> 前提
 
