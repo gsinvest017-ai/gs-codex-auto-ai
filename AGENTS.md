@@ -112,6 +112,15 @@ PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直
 - 中止：UI 按「中止」＝寫 `log/abort.flag`，由 `tools/autopilot/cont.py` 的閥 4 在**回合邊界**
   停下。它**殺不掉正在跑的 `codex exec`**，所以 UI 文案一律寫「下一個回合邊界停止」，
   不得寫「立即中止」
-- 用量閘門：`tools/usage_gate.py`（預設關閉；`CODEXAUTOAI_USAGE_GATE=1` 啟用）
+- 用量閘門：`tools/usage_gate.py`，設定在 `usage_gate.toml`（**本專案已啟用**，門檻 60%）。
+  autopilot 續跑、`claude -p`、GitHub Actions 上的 claude-code-action（走
+  `CLAUDE_CODE_OAUTH_TOKEN`）**都從同一份 Pro/Max 訂閱額度扣**——2026-06-15 原訂把
+  Agent SDK 用量拆成獨立 credit 的計畫已取消。沒裝 `ccusage` 的機器 fail-open 照跑。
+  臨時關閉：`CODEXAUTOAI_USAGE_GATE=0`
+- 需求字串清理：`desktop/launcher.py` 的 `_safe_prompt` 與 `vscode-extension/prompt.js`
+  的 `safePrompt` 是**同一套規則的兩個實作**（需求最終會經過一層 shell，`$(...)` /
+  `` ` `` / `&` 必須先失效）。改一邊就要改另一邊，`tests/test_launcher.py` 有 parity 測試把關
+- 新增的專案根設定檔要同時加進三份打包清單（`vscode-extension/build-vsix.{ps1,sh}`、
+  `installer/build-installer.ps1`），否則 clone / vsix / installer 三種安裝方式行為會不一致
 - 日誌格式：時間戳由系統時鐘（`clock.now_iso()` 或 shell `date`）產生，**禁止 LLM 自填**；命名 `{system-timestamp}-{phase}-{描述}.md`（見 `log-writer.md` OBS-R1）
 - 指令同步：只改本檔（SSOT）；`AGENTS.md`（供 Codex 讀取）由 `.githooks/pre-commit` 於 commit 時自動重生，不手動編輯（一次性安裝 `python tools/install_hooks.py`）

@@ -1,0 +1,23 @@
+# usage_gate.toml — autopilot 續跑前的 token 用量閘門設定。
+#
+# 完整說明與判定邏輯見 `tools/usage_gate.py` 的 docstring。
+#
+# 為什麼預設要開：autopilot 的續跑迴圈、`claude -p`、以及 GitHub Actions 上的
+# claude-code-action（走 CLAUDE_CODE_OAUTH_TOKEN）**都從同一份 Pro/Max 訂閱額度扣**
+# ——2026-06-15 原本要把 Agent SDK 用量拆成獨立月度 credit 的計畫已被取消，這些
+# 介面仍舊吃訂閱額度。不設閘門的話，一輪長時間 autopilot 可能把你當天手動工作
+# 要用的額度吃光。
+#
+# 沒裝 ccusage 的機器一律 fail-open（照跑），所以開著不會讓任何人跑不動。
+
+[usage_gate]
+enabled = true
+
+# 當前 5h block 的 totalTokens 超過「歷史峰值 block」的這個百分比就不再續跑，
+# 留 40% 餘裕給手動工作。
+max_block_pct = 60
+
+# 白天保護時段 [起, 迄)。**刻意留空**：autopilot 是使用者自己按下「非停模式」
+# 坐在電腦前等結果的互動情境，按時段擋下來會很反直覺。
+# 排程 / 無人值守跑批次時才建議設成 [9, 18]（gs-harness 的預設）。
+protect_hours = []

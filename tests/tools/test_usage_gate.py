@@ -151,3 +151,24 @@ def test_cli_exit_code_reflects_verdict(monkeypatch, capsys, tmp_path):
     assert '"allowed": false' in capsys.readouterr().out
     monkeypatch.setattr(ug, "check", lambda force=False, root=None: (True, "測試放行"))
     assert ug.main([]) == 0
+
+
+# ── 隨附的 usage_gate.toml（專案預設）────────────────────────────────────────
+def test_shipped_config_enables_the_gate():
+    """repo 根的 usage_gate.toml 是專案預設，被刪掉/改壞會讓 autopilot 不再受保護。"""
+    cfg = ug.load_cfg(ROOT)
+    assert cfg["enabled"] is True, "隨附設定應啟用閘門"
+    assert 0 < cfg["max_block_pct"] <= 100
+    # 刻意留空：autopilot 是互動情境，按時段擋下來反直覺
+    assert cfg["protect_hours"] == []
+
+
+def test_shipped_config_is_in_every_packaging_list():
+    """三種安裝方式（clone / vsix / installer）行為必須一致。"""
+    targets = [
+        ROOT / "vscode-extension" / "build-vsix.ps1",
+        ROOT / "vscode-extension" / "build-vsix.sh",
+        ROOT / "installer" / "build-installer.ps1",
+    ]
+    for t in targets:
+        assert "usage_gate.toml" in t.read_text(encoding="utf-8"), f"{t.name} 沒帶上設定檔"

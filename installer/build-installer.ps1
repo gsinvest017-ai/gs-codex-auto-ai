@@ -36,7 +36,7 @@ if (Test-Path $payload) { Remove-Item $payload -Recurse -Force }
 New-Item -ItemType Directory -Force $payload | Out-Null
 
 $includeDirs  = @(".claude", "tools", "src", "DESIGN", ".githooks")
-$includeFiles = @("CLAUDE.md", "AGENTS.md", "README.md", "setup.cmd", "setup.ps1", "setup.sh", ".gitattributes")
+$includeFiles = @("CLAUDE.md", "AGENTS.md", "README.md", "setup.cmd", "setup.ps1", "setup.sh", ".gitattributes", "usage_gate.toml")
 foreach ($d in $includeDirs) {
   if (Test-Path $d) {
     Copy-Item $d -Destination $payload -Recurse -Force

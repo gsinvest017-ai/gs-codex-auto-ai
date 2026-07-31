@@ -10,6 +10,7 @@ const https = require("https");
 const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
 const progressView = require("./progressView"); // pipeline 進度面板 + 狀態列 + 中止
+const { safePrompt } = require("./prompt");     // 需求清理（與 launcher._safe_prompt 同規則）
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
 let overlayToken = null;
@@ -346,7 +347,9 @@ function activate(context) {
       );
       if (!mode) return;
 
-      const safe = (req || "").replace(/"/g, "'");
+      // sendText 是直接餵給活的 shell，所以需求必須先清掉 shell 語法字元
+      // （原本只換掉 `"` 擋不住 $(...) / `...` / &）。規則與 launcher._safe_prompt 一致。
+      const safe = safePrompt(req);
       const inner = mode.label.startsWith("非停")
         ? `claude "/autopilot on ${safe}"`
         : (safe ? `claude "${safe}"` : "claude");
