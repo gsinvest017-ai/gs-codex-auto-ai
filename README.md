@@ -16,7 +16,11 @@
 
 到 [Releases](https://github.com/gsinvest017-ai/gs-codex-auto-ai/releases) 下載 `CodexAutoAI-setup-x.y.z.exe` → 安裝 → 點桌面**金色圖示**。
 
-App 會：環境檢查（Claude / Codex / Node / git）→ 一鍵「設定 / 修復」（登入、裝 Codex、啟用 hooks）→ 在輸入框打一句需求按 **🚀 啟動** → 自動開終端機跑完整七階段。
+App 會：環境檢查（Claude / Codex / Node / git / **GitHub CLI** / Python 六項）→ 一鍵「設定 / 修復」（登入、裝 Codex、啟用 hooks；已就緒時直接回報、不開終端機）→ 在輸入框打一句需求 → 可勾 **非停模式（autopilot）** → 按 **🚀 啟動新任務** → 自動開終端機跑完整七階段。
+
+啟動後 App 內的 **Pipeline 進度卡** 每 2 秒更新（Phase 進度條、已完成階段、當前迭代、累計成本），旁邊的 **■ 中止** 會在下一個回合邊界停止 pipeline。另有 **▶ 從 spec 開始** 按鈕，先產規格再跑同一條 pipeline。
+
+> **完整操作教學與畫面逐項導覽**：[docs/guide/USAGE.md](docs/guide/USAGE.md)
 
 > **自動檢查更新**：App 啟動時會在背景比對 GitHub Release 的最新 `app-v*` 版本，有新版就在上方跳金色橫幅，按 **⬇ 立即更新** 即自動下載安裝檔並啟動更新（私有 repo，需先 `gh auth login` 或設定 `GH_TOKEN`）。
 
@@ -41,7 +45,7 @@ code --install-extension codexautoai-x.y.z.vsix
 
 或 VS Code 左側「擴充功能」面板 → 右上 `…` → **Install from VSIX…** → 選該檔。
 
-裝好後用指令面板（`Ctrl/Cmd+Shift+P`）執行（六個指令）：
+裝好後用指令面板（`Ctrl/Cmd+Shift+P`）執行（七個指令）：
 
 1. **CodexAutoAI: 開啟控制台（免終端機 GUI）** — 非開發者建議只用這個：面板內輸入需求、看七階段進度與 Claude/Codex 分工證據，terminal 隱藏背景跑。
 2. **CodexAutoAI: 安裝設定（初始化 + 登入修復，一鍵）** — 把框架放進資料夾（**自帶快照，不必先 clone**；既有專案會更新框架核心到最新）＋ 自動裝/登入 Claude、Codex、gh、Live Preview、啟用 hooks；環境都就緒時直接回報。
@@ -49,6 +53,9 @@ code --install-extension codexautoai-x.y.z.vsix
 4. **CodexAutoAI: 啟動新任務：從 spec 開始** — 先用 gs-spec-forge 產規格（內建輕量核心，開箱即用）再跑七階段。
 5. **CodexAutoAI: 即時預覽網頁 UI（內嵌）** — 產出有前端的專案一鍵在 VS Code 內預覽（Live Preview / Simple Browser / server 自動啟動三層降級）。
 6. **CodexAutoAI: 檢查更新** — 手動比對 GitHub Release 的最新 `ext-v*` 版本；啟動時也會自動查（每天一次，可在設定 `codexautoai.checkForUpdates` 關閉）。
+7. **CodexAutoAI: 中止（下一個回合邊界停止）** — 寫 `log/abort.flag`，讓 autopilot 在**下一個回合邊界**停下；**殺不掉正在執行的 Codex 子行程**。也可從控制台面板標題列的停止圖示觸發。
+
+> **完整操作教學與控制台逐區塊導覽**：[docs/guide/USAGE.md](docs/guide/USAGE.md)
 
 > 同樣仍需先安裝並登入 **Claude Code** 與 **OpenAI Codex**。
 > 想自己 build：`pwsh vscode-extension/build-vsix.ps1`（產出 `dist/codexautoai-<ver>.vsix`）。
