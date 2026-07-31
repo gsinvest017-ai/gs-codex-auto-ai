@@ -14,7 +14,7 @@ $fw = Join-Path $ext "framework"
 if (Test-Path $fw) { Remove-Item $fw -Recurse -Force }
 New-Item -ItemType Directory -Force $fw | Out-Null
 $dirs  = @(".claude", "tools", "DESIGN", ".githooks")
-$files = @("CLAUDE.md", "AGENTS.md", "setup.cmd", "setup.ps1", "setup.sh", ".gitattributes")
+$files = @("CLAUDE.md", "AGENTS.md", "setup.cmd", "setup.ps1", "setup.sh", ".gitattributes", "usage_gate.toml")
 foreach ($d in $dirs)  { if (Test-Path (Join-Path $root $d)) { Copy-Item (Join-Path $root $d) -Destination $fw -Recurse -Force } }
 foreach ($f in $files) { if (Test-Path (Join-Path $root $f)) { Copy-Item (Join-Path $root $f) -Destination $fw -Force } }
 # src 只帶框架引擎；docs 只帶 templates

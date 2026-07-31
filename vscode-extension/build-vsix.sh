@@ -8,7 +8,7 @@ cd "$EXT"
 FW="$EXT/framework"
 rm -rf "$FW"; mkdir -p "$FW/src" "$FW/docs"
 for d in .claude tools DESIGN .githooks; do [ -e "$ROOT/$d" ] && cp -r "$ROOT/$d" "$FW/"; done
-for f in CLAUDE.md AGENTS.md setup.cmd setup.ps1 setup.sh .gitattributes; do [ -e "$ROOT/$f" ] && cp "$ROOT/$f" "$FW/"; done
+for f in CLAUDE.md AGENTS.md setup.cmd setup.ps1 setup.sh .gitattributes usage_gate.toml; do [ -e "$ROOT/$f" ] && cp "$ROOT/$f" "$FW/"; done
 cp -r "$ROOT/src/codexautoai_v2" "$FW/src/"
 [ -d "$ROOT/docs/templates" ] && cp -r "$ROOT/docs/templates" "$FW/docs/"
 find "$FW" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true

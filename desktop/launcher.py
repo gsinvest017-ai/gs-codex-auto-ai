@@ -157,33 +157,71 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
+# shell / cmd 語法字元 → 安全替代。需求是自由文字（多半是中文），所以在 prose 裡
+# 有意義的字元（`% ! & $ ; < >`）改成**全形等價字**保住語意，純語法字元才刪掉。
+# 為什麼不用「正確地引用」解決：cmd 的 `%VAR%` 展開發生在解析之後，值裡的 `&`
+# 仍會被當成命令分隔符——在 cmd 上不存在能擋住一切的引用方式。
+_META_MAP = {
+    '"': "", "'": "", "`": "", "|": "", "^": "", "\\": "",   # 純語法，刪除
+    "$": "＄", "&": "＆", ";": "；", "<": "＜", ">": "＞",     # prose 常用，轉全形
+    "%": "％", "!": "！",
+    "\n": " ", "\r": " ", "\t": " ",                          # 命令列不能有換行
+}
+_META_TABLE = str.maketrans(_META_MAP)
+
+
+def _safe_prompt(text: str) -> str:
+    """把使用者需求清成「可安全放進命令列的純文字」。
+
+    launcher 會把需求交給終端機執行 `claude "<需求>"`，中間必經一層 shell
+    （Windows 的 `cmd /k`、Linux 的 `bash -lc`）。不清理的話，含
+    ``$(...)`` / `` `...` `` / ``&`` 的需求會被那層 shell 當成指令執行——
+    使用者自己輸入自己的需求，風險低，但這是不必要的執行路徑。
+
+    中文與全形標點（`（）「」`）完全不受影響；`100%` 會變成 `100％`、
+    `A & B` 變成 `A ＆ B`，語意保留但對 shell 失去意義。
+    """
+    return " ".join((text or "").translate(_META_TABLE).split())
+
+
 def launch_claude(requirement: str, autopilot: bool = False) -> bool:
     """開新終端機在 app 目錄跑互動式 claude，需求當初始 prompt。
 
     autopilot=True 時走非停模式：prompt 前綴 ``/autopilot on``（與 extension 的
     「非停」QuickPick 一致），連回合都不停一路跑到交付（commit/push 仍會問）。
+
+    所有 `Popen` 一律傳 **argv list 且不帶 shell=True**，需求先過 `_safe_prompt`。
+    POSIX 分支再多一層保險：需求以 **bash 位置參數**（``"$2"``）傳入，bash 從頭到尾
+    不會把它當程式碼解析。
     """
     if not _which("claude"):
         messagebox.showerror("CodexAutoAI", "找不到 claude，請先按「設定/修復」安裝並登入。")
         return False
-    req = (requirement or "").strip().replace('"', "'")
-    prompt = (f"/autopilot on {req}").strip() if autopilot else req
+    req = _safe_prompt(requirement)
+    prompt = f"/autopilot on {req}".strip() if autopilot else req
     try:
         if IS_WIN:
-            inner = f'claude "{prompt}"' if prompt else "claude"
-            if _which("wt"):   # 優先 Windows Terminal
-                subprocess.Popen(f'wt -d "{APP_DIR}" cmd /k {inner}', shell=True)
+            # claude 在 Windows 是 .cmd 蓋子，必須由 cmd 執行；argv list 交給
+            # Popen 自行加引號，不自己拼字串。
+            tail = ["cmd", "/k", "claude"] + ([prompt] if prompt else [])
+            wt = _which("wt")
+            if wt:             # 優先 Windows Terminal
+                subprocess.Popen([wt, "-d", str(APP_DIR)] + tail)
             else:
-                subprocess.Popen(f'start "CodexAutoAI" cmd /k {inner}',
-                                cwd=str(APP_DIR), shell=True)
+                # `start` 是 cmd 內建，需要 cmd 承載；第二個引數是視窗標題。
+                subprocess.Popen(["cmd", "/c", "start", "CodexAutoAI"] + tail,
+                                cwd=str(APP_DIR))
         else:
-            cmd = f'claude "{prompt}"' if prompt else "claude"
+            # 需求走位置參數 $2，永遠不被 bash 解析成程式碼。
+            script = 'cd "$1" && exec claude ${2:+"$2"}'
+            argv = ["bash", "-lc", script, "bash", str(APP_DIR), prompt]
             for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
-                if _which(term):
-                    subprocess.Popen([term, "-e", "bash", "-lc", f"cd '{APP_DIR}' && {cmd}"])
+                path = _which(term)
+                if path:
+                    subprocess.Popen([path, "-e"] + argv)
                     break
             else:
-                subprocess.Popen(["bash", "-lc", f"cd '{APP_DIR}' && {cmd}"])
+                subprocess.Popen(argv)
         return True
     except Exception as exc:  # noqa: BLE001
         messagebox.showerror("CodexAutoAI", f"啟動失敗：{exc}")
