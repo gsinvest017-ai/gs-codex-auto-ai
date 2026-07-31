@@ -190,6 +190,15 @@ v2 的確定性引擎（`src/codexautoai_v2/`）以前只有規格與測試、�
 
 ---
 
+## 其他運行機制
+
+- **用量閘門**（`usage_gate.toml` / `tools/usage_gate.py`）：autopilot 續跑前檢查 token 用量，預設啟用、門檻 60%，沒裝 `ccusage` 時 fail-open；臨時關閉用 `CODEXAUTOAI_USAGE_GATE=0`。
+- **中止**：桌面進度卡的「■ 中止」與 VS Code 的 `CodexAutoAI: 中止` 指令會寫 `log/abort.flag`，在**回合邊界**停止（無法立即中斷正在執行的 Codex）。
+- **事件解析**（`tools/events_model.py`）：`log/events.jsonl` 的正規解析層，終端機進度條與桌面進度卡共用。
+- **Codex 防掛外殼**（`tools/codex_runner.py`）：呼叫 Codex 一律經過它，取代裸跑 `codex exec`，避免 stdin 導致的沉默掛死，並有心跳看門狗判死自動重派。
+
+---
+
 ## 想更深入
 
 | 想知道 | 看這裡 |
