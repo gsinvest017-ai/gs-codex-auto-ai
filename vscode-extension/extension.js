@@ -1,5 +1,6 @@
 // CodexAutoAI VS Code extension — 啟動器（自帶框架快照）。
-// 四個指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復、檢查更新。
+// 指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復、檢查更新，
+// 外加進度面板相關的 中止 / 重整 / 顯示進度（見 progressView.js）。
 // 純 vscode API + Node 內建模組（fs / path / https / child_process），無第三方依賴。
 const vscode = require("vscode");
 const fs = require("fs");
@@ -8,6 +9,7 @@ const path = require("path");
 const https = require("https");
 const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
+const progressView = require("./progressView"); // pipeline 進度面板 + 狀態列 + 中止
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
 let overlayToken = null;
@@ -362,6 +364,14 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.checkUpdate", () =>
       checkForUpdate(context, { manual: true }))
   );
+
+  // 進度面板 + 狀態列 + 中止：讓 pipeline 跑起來後在 IDE 裡看得到、也停得下來。
+  // 失敗不可擋住 activate（面板是加值，不是必要路徑）。
+  try {
+    progressView.register(context, workspaceRoot());
+  } catch (e) {
+    console.warn("CodexAutoAI: 進度面板初始化失敗：", e && e.message);
+  }
 
   // 啟動時背景檢查（不阻塞 activate；失敗靜默）。
   checkForUpdate(context).catch(() => {});

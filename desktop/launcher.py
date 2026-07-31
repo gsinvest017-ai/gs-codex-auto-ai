@@ -54,6 +54,32 @@ APP_DIR = app_dir()
 IS_WIN = os.name == "nt"
 
 
+def load_progress_model(log_path: Path) -> dict | None:
+    """讀 `log/events.jsonl` 的進度模型（共用 `tools/events_model.py`）。
+
+    刻意**每次呼叫時才解析模組**而非 top-level import：`tools/` 不是套件、
+    且凍結（PyInstaller）後的佈局與 repo 佈局不同，寫死 import 會在其中一種
+    情境下壞掉。找不到模組就回 None，進度卡降級顯示、絕不擋住啟動器。
+
+    VS Code extension 走 `python tools/events_model.py --json` 讀同一份模型，
+    兩邊 UI 因此不會對「跑到哪」有不同說法。
+    """
+    try:
+        import importlib.util
+        mod_path = APP_DIR / "tools" / "events_model.py"
+        if not mod_path.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("events_model", mod_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["events_model"] = mod      # dataclass/typing 解析需要
+        spec.loader.exec_module(mod)
+        return mod.load_model(log_path)
+    except Exception:  # noqa: BLE001 — 進度顯示不該成為新的故障點
+        return None
+
+
 # ── 環境偵測 ────────────────────────────────────────────────────────────────
 def _which(name: str) -> str | None:
     return shutil.which(name)
@@ -170,8 +196,8 @@ class LauncherUI:
         self.root = root
         root.title("CodexAutoAI")
         root.configure(bg=BG)
-        root.geometry("560x628")
-        root.minsize(520, 588)
+        root.geometry("560x760")
+        root.minsize(520, 720)
         ico = APP_DIR / "desktop" / "codexautoai.ico"
         if not ico.exists():
             ico = APP_DIR / "codexautoai.ico"
@@ -188,6 +214,7 @@ class LauncherUI:
         self._update_info: dict | None = None
         self._build()
         self.refresh()
+        self.poll_progress()
         self.start_update_check()
 
     def _build(self) -> None:
@@ -250,6 +277,26 @@ class LauncherUI:
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=18)
 
+        # 進度卡：讀 log/events.jsonl（共用 tools/events_model.py）。
+        # 在這之前，App 按下啟動後就只是「開了一個終端機」——pipeline 跑到哪、
+        # 卡在哪、花了多少，全都只能去終端機看。這張卡把它拉回 App 內。
+        self.prog_card = tk.Frame(self.root, bg=CARD)
+        self.prog_card.pack(fill="x", padx=22, pady=(0, 10))
+        head = tk.Frame(self.prog_card, bg=CARD)
+        head.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Label(head, text="Pipeline 進度", font=self.h2, fg=CHAMPAGNE,
+                 bg=CARD).pack(side="left")
+        self.abort_btn = tk.Button(head, text="■ 中止", command=self.on_abort,
+                                   font=self.mono, bg="#21262d", fg=MUTED,
+                                   relief="flat", padx=10)
+        self.abort_btn.pack(side="right")
+        self.prog_bar = tk.Label(self.prog_card, text="", font=self.mono, fg=GOLD,
+                                 bg=CARD, anchor="w")
+        self.prog_bar.pack(fill="x", padx=14)
+        self.prog_detail = tk.Label(self.prog_card, text="", font=self.mono, fg=MUTED,
+                                    bg=CARD, anchor="w", justify="left")
+        self.prog_detail.pack(fill="x", padx=14, pady=(2, 12))
+
         self.status = tk.Label(self.root, text="", font=self.mono, fg=MUTED, bg=BG)
         self.status.pack()
 
@@ -267,6 +314,58 @@ class LauncherUI:
         else:
             self.launch_btn.config(state="disabled", bg="#3a3a3a")
             self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
+
+    # ── 進度輪詢 ────────────────────────────────────────────────────────────
+    def _events_log(self) -> Path:
+        return APP_DIR / "log" / "events.jsonl"
+
+    def poll_progress(self) -> None:
+        """每 2 秒讀一次 events.jsonl 更新進度卡（唯讀，不干擾 pipeline）。"""
+        try:
+            model = load_progress_model(self._events_log())
+        except Exception:
+            model = None
+
+        if not model or not model.get("log_exists"):
+            self.prog_bar.config(text="尚未開始", fg=MUTED)
+            self.prog_detail.config(text="按上面的按鈕啟動，這裡會顯示 Phase 進度")
+            self.abort_btn.config(state="disabled", fg=MUTED)
+        else:
+            bar = "".join("▓" if i <= model["marker"] else "░"
+                          for i in range(model["total"] + 1))
+            colour = {"escalated": RED, "done": GREEN}.get(model["state"], GOLD)
+            self.prog_bar.config(
+                text=f"Phase {model['marker']}/{model['total']} {bar} {model['current_name']}",
+                fg=colour)
+            bits = [f"已完成：{model['completed'] or '無'}"]
+            if model["iteration"]:
+                bits.append(f"迭代 {model['iteration']}")
+            if model["cost_usd"]:
+                bits.append(f"${model['cost_usd']:.4f}")
+            if model["errors"]:
+                bits.append(f"錯誤：{model['errors'][-1]['reason']}")
+            self.prog_detail.config(text="　".join(bits))
+            running = model["state"] == "running"
+            self.abort_btn.config(state="normal" if running else "disabled",
+                                  fg=CHAMPAGNE if running else MUTED)
+
+        self.root.after(2000, self.poll_progress)
+
+    def on_abort(self) -> None:
+        """放下中止旗標。只在**回合邊界**生效，殺不掉正在跑的 codex 子行程。"""
+        if not messagebox.askyesno(
+            "CodexAutoAI",
+            "要中止目前的 pipeline 嗎？\n\n"
+            "會在下一個回合邊界停止（無法立即中斷正在執行的 Codex）。",
+        ):
+            return
+        try:
+            flag = APP_DIR / "log" / "abort.flag"
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text("", encoding="utf-8")
+            self.status.config(text="已送出中止，將於下一個回合邊界停止", fg=GOLD)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("CodexAutoAI", f"寫入中止旗標失敗：{exc}")
 
     def on_setup(self) -> None:
         # 環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
