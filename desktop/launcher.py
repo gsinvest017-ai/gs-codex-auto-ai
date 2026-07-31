@@ -3,7 +3,9 @@
 launcher.py — CodexAutoAI 桌面啟動器（tkinter，純標準庫）。
 
 給完全不懂指令的人：點桌面圖示 → 看環境是否就緒 → 一鍵「設定/修復」把能自動的跑掉 →
-在輸入框打一句需求按「啟動」→ 自動開新終端機跑互動式 claude，完整七階段開始。
+勾選是否要「非停模式（autopilot）」→ 在輸入框打一句需求按「啟動」→ 自動開新終端機跑互動式
+claude，完整七階段開始。啟動後主視窗顯示 Pipeline 進度卡（讀 `log/events.jsonl`），可按
+「■ 中止」於下一個回合邊界停止 pipeline（寫 `log/abort.flag`）。
 
 App 取代不了 claude / codex / node 這些 CLI 本身（登入要開瀏覽器），所以這裡只做：
 偵測缺什麼、把能自動的自動化（呼叫 repo 的 setup.cmd）、其餘明確引導，全綠才啟用「啟動」。
