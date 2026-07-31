@@ -52,13 +52,17 @@ jobs:
           # 開不了 PR——action 仍回報 success（exit 0），只在 log 裡留
           # permission_denials_count。實測一次 45 次 denial、60 turns、零產出。
           # --max-turns 同時擋住被擋權限後的無效重試 churn。
-          # git 逐動詞列舉而**不用 `Bash(git:*)`**：本 job 帶 contents/issues/PR 寫入權，
-          # 且 prompt 會讀 CI log（比 author-association 把關過的 issue 內容更不可信）。
-          # 萬一 log 裡有注入指令，`git:*` 會連 push --force / reset --hard / clean 一起給。
-          # 同理不給 `Bash(gh api:*)`（任意 API 呼叫），修 bug 開 PR 用不到。
+          # 白名單策略：**寬 allow + 明確 deny 破壞性動詞**（deny 優先於 allow）。
+          # 先前試過逐動詞列舉 git，結果漏掉 fetch/rev-parse/config 等 plumbing，
+          # 仍有 10 次 denial 並跑滿 turn 上限。改成允許 `Bash(git:*)` 但把真正危險的
+          # 動詞列進 --disallowed-tools：本 job 帶 contents/issues/PR 寫入權，且 prompt 會讀
+          # CI log（比 author_association 把關過的 issue 內容更不可信），所以要防的是
+          # force-push / reset / clean / 改 remote / 動 secret 這類不可逆或提權操作，
+          # 而不是普通的 git 讀寫。
           claude_args: |
-            --max-turns 25
-            --allowed-tools "Read,Glob,Grep,Edit,Write,MultiEdit,TodoWrite,Bash(git add:*),Bash(git commit:*),Bash(git checkout:*),Bash(git switch:*),Bash(git branch:*),Bash(git push:*),Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(gh pr:*),Bash(gh issue:*),Bash(gh run:*),Bash(python:*)"
+            --max-turns 50
+            --allowed-tools "Read,Glob,Grep,Edit,Write,MultiEdit,TodoWrite,Bash(git:*),Bash(gh pr:*),Bash(gh issue:*),Bash(gh run:*),Bash(python:*)"
+            --disallowed-tools "Bash(git push --force:*),Bash(git push -f:*),Bash(git reset:*),Bash(git clean:*),Bash(git rebase:*),Bash(git filter-branch:*),Bash(git remote set-url:*),Bash(gh api:*),Bash(gh secret:*),Bash(gh repo delete:*)"
           prompt: |
             An auto-fix request was filed in this repository (${{ github.repository }}). Read the triggering issue or comment, including any linked workflow run logs, and identify the root cause of the failure.
 
