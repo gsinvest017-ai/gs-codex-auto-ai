@@ -31,6 +31,27 @@ description: "Phase 5：根據架構文件並行派遣 function-builder agent �
      `$(python tools/repo_context.py --files <該 FN 的 deps 對應檔...> --max-chars 2000)`，
      讓 Codex 看到介面摘要而非整檔，減少 token 與介面誤配。
 
+4. **每批跑完立刻過語法 gate（零 LLM、零測試成本）**——不要把錯誤累積到 Phase 6：
+
+   ```bash
+   python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N> --run-id <id>
+   ```
+   讀 stdout JSON：
+   - `status=ok` → 進入下一批
+   - `status=syntax_error`（exit 3）→ **就地收斂，不要進下一批**。用有界迴圈修：
+
+     ```bash
+     python tools/run_loop.py --mode test --phase 5 --run-id <id> --max-iters 2 --patience 2 \
+       --compile-cmd "python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N>" \
+       --review-cmd "python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N>" \
+       --fix-cmd 'codex exec --full-auto "下列檔案語法錯誤，請修正（只寫入 src/）：\n$(cat {defects_file})"'
+     ```
+     `status=escalated` → 停止並通知使用者，不得硬進 Phase 6。
+
+   > **為什麼要有這一步**：在此之前 Phase 5 完全沒有修復迴圈，Codex 寫壞的東西要等
+   > 整個 Phase 5 跑完、進 Phase 6 跑測試才第一次拿到訊號——反饋延遲一整個 phase。
+   > 語法/JSON 壞掉是最常見也最好修的一類，當批攔下最便宜。
+
 ## 中控驗證
 
 每個 function 完成後，檢查：

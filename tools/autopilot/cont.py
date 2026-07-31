@@ -5,14 +5,21 @@ cont.py — autopilot 續跑 hook（Stop event）。
 當模型想結束回合時觸發。若本 session 開了 autopilot 且尚未完成，輸出
 {"decision":"block","reason":...} 把模型擋回去繼續做（Claude Code Stop 協定）。
 
-五道安全閥（借鏡 autopilot，per-session 版）：
+七道安全閥（借鏡 autopilot，per-session 版）：
   1. stop_hook_active（Claude 自己的續跑已在跑）→ 放行
   2. 本 session 無 state 檔（沒開 autopilot）→ 放行
   3. <sid>.done 存在（任務完成）→ 清檔放行
-  4. 迭代達上限 → 清檔放行（防無限循環）
-  5. 否則 iterations+1、回寫、block 續跑
+  4. **中止旗標** `log/abort.flag` 存在（使用者從 desktop / VS Code 按了「中止」）
+     → 清旗標與 state、放行。這是 UI 唯一能踩煞車的地方。
+  5. 迭代達上限 → 清檔放行（防無限循環）
+  6. **token 用量閘門**（`tools/usage_gate.py`）擋下 → 放行讓它停，別把使用者的
+     額度吃光。預設關閉且 fail-open，開啟方式見 usage_gate.py 的 docstring。
+  7. 否則 iterations+1、回寫、block 續跑
 
 per-session 檔 → 多 session 各自獨立。一律 exit 0。
+
+注意「中止」的語意邊界：本 hook 只在**回合邊界**生效，無法殺掉正在跑的
+`codex exec` 子行程。UI 文案必須誠實寫「下一個回合邊界停止」，不要寫「立即中止」。
 """
 from __future__ import annotations
 
@@ -78,7 +85,15 @@ def main() -> int:
         done_f.unlink(missing_ok=True)
         return 0
 
-    # 閥 4：迭代上限
+    # 閥 4：使用者從 UI 按了「中止」
+    abort_f = _project_dir() / "log" / "abort.flag"
+    if abort_f.exists():
+        abort_f.unlink(missing_ok=True)
+        state_f.unlink(missing_ok=True)
+        print("[autopilot] 收到中止旗標，於回合邊界停止。", file=sys.stderr)
+        return 0
+
+    # 閥 5：迭代上限
     it = int(st.get("iterations", 0))
     mx = int(st.get("max_iterations", 30))
     if it >= mx:
@@ -86,7 +101,21 @@ def main() -> int:
         print(f"[autopilot] 已達續跑上限 {mx} 次，自動停止。", file=sys.stderr)
         return 0
 
-    # 閥 5：續跑
+    # 閥 6：token 用量閘門——額度快見底時讓它停，別跟使用者搶。
+    # 匯入或執行失敗一律 fail-open（放行續跑），閘門本身不該成為新的故障點。
+    allowed, why = True, ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import usage_gate  # noqa: E402
+        allowed, why = usage_gate.check()
+    except Exception:
+        allowed = True
+    if not allowed:
+        state_f.unlink(missing_ok=True)
+        print(f"[autopilot] 用量閘門擋下續跑，自動停止：{why}", file=sys.stderr)
+        return 0
+
+    # 閥 7：續跑
     st["iterations"] = it + 1
     try:
         state_f.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")

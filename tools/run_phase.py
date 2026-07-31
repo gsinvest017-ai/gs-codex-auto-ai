@@ -107,6 +107,11 @@ def cmd_begin(root: Path, phase: str, run_id: str | None) -> None:
     orch = _build_orch(paths, rid)
     label = _phase_label(phase)
     orch.state.set_phase(label)
+    # Phase 0 = 一輪 run 的起點。發一顆 run_start 當「run 邊界」，讓 events_model
+    # 能把上一輪的狀態（尤其是 escalation）清掉——events.jsonl 是 append-only 且
+    # 跨 run 共用，沒有這顆標記的話 UI 會一直顯示上一輪的失敗。
+    if label == "phase0":
+        orch.events.emit("run_start", phase=label, run_id=rid, status="in_progress")
     orch.events.emit("phase_start", phase=label, status="in_progress")
     orch.audit.append({"event": "phase_start", "phase": label})
     orch.state.checkpoint(paths["state"])
