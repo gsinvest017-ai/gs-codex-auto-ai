@@ -149,12 +149,21 @@ def test_no_local_cmd_means_all_cloud(tmp_path, monkeypatch):
     assert set(out["fixer_tiers"]) == {"cloud"}
 
 
-def test_warns_when_local_attempts_swallow_all_iterations(capsys):
-    """--max-local-attempts >= --max-iters 會讓雲端永遠輪不到，必須警告。"""
+def test_warns_when_local_attempts_swallow_all_iterations(capsys, tmp_path, monkeypatch):
+    """--max-local-attempts >= --max-iters 會讓雲端永遠輪不到，必須警告。
+
+    **必須設 CLAUDE_PROJECT_DIR 並把 workdir 指到 tmp_path**：`main()` 會跑完整迴圈並
+    寫 `log/events.jsonl` 與 `log/state.json`。不隔離的話 `_project_dir()` 會 fallback
+    到 repo 根，把假事件寫進真的 `log/`——結果是進度視圖顯示一個不存在的 run，
+    而且 `enforce_build_codex` 這個 PreToolUse hook 會誤以為正在 build 而擋下對
+    src/tests/docs 的編輯。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     rl.main(["--mode", "test", "--phase", "6", "--review-cmd", OK, "--fix-cmd", OK,
              "--local-fix-cmd", OK, "--max-local-attempts", "3", "--max-iters", "3",
-             "--workdir", "."])
+             "--workdir", str(tmp_path)])
     assert "永遠不會被呼叫" in capsys.readouterr().err
+    assert (tmp_path / "log" / "events.jsonl").exists()   # 確認真的寫在 tmp 而非 repo
 
 
 def test_run_tolerates_namespace_without_new_flags(tmp_path, monkeypatch):
