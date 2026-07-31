@@ -6,6 +6,10 @@ tests/*
 !tests/tools/
 !tests/test_updater.py
 !tests/test_global_overlay.py
+!tests/test_launcher.py
+# ⚠️ 新增 tests/ 底下的**頂層**測試檔時，一定要在這裡加一條 `!tests/<檔名>`。
+# 否則 `git add -A` 會靜默略過它，測試進不了版控也進不了 CI（看起來全綠但根本沒跑）。
+# 子目錄 tests/codexautoai_v2/ 與 tests/tools/ 已整體放行，放那裡不必改本檔。
 log/
 
 # 環境與依賴
