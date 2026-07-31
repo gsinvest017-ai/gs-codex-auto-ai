@@ -1,0 +1,48 @@
+name: Claude auto-fix
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  fix:
+    # Trust model:
+    # - The `auto-fix` label can only be applied by users with issues:write
+    #   (effectively collaborators / the CI bot), so the label-triggered path
+    #   needs no extra guard.
+    # - For @claude mentions in issue bodies or comments, gate on
+    #   author_association so that random drive-by commenters on a public repo
+    #   can't trigger an agent run with contents:write.
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'auto-fix')) ||
+      (github.event_name == 'issues' &&
+        contains(github.event.issue.body, '@claude') &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            An auto-fix request was filed in this repository (${{ github.repository }}). Read the triggering issue or comment, including any linked workflow run logs, and identify the root cause of the failure.
+
+            Implement a minimal fix, run the repo's test suite to verify, and open a pull request from a `claude/fix-<short-slug>` branch. Keep the change focused — do not refactor or expand scope beyond what's needed to make CI green.
