@@ -8,6 +8,12 @@ on:
   pull_request_review_comment:
     types: [created]
 
+# 帶 label 建立 issue 會**同時**觸發 opened 與 labeled 兩個事件，兩個 run 會並行搶同一張
+# issue（實測：一張 issue 跑出兩個 run、各燒一次額度）。同一張 issue 只留最後一個。
+concurrency:
+  group: claude-fix-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   fix:
     # Trust model:
@@ -42,6 +48,13 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # 沒有 --allowed-tools 時，預設權限擋掉 git / gh，Claude 改得了檔卻推不了分支、
+          # 開不了 PR——action 仍回報 success（exit 0），只在 log 裡留
+          # permission_denials_count。實測一次 45 次 denial、60 turns、零產出。
+          # --max-turns 同時擋住被擋權限後的無效重試churn。
+          claude_args: |
+            --max-turns 25
+            --allowed-tools "Read,Glob,Grep,Edit,Write,MultiEdit,TodoWrite,Bash(git:*),Bash(gh pr:*),Bash(gh issue:*),Bash(gh run:*),Bash(gh api:*),Bash(python:*),Bash(python -m pytest:*)"
           prompt: |
             An auto-fix request was filed in this repository (${{ github.repository }}). Read the triggering issue or comment, including any linked workflow run logs, and identify the root cause of the failure.
 
