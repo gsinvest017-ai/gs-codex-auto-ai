@@ -85,6 +85,14 @@ def check_codex() -> tuple[bool, str]:
     return (rc == 0, "已安裝且已登入" if rc == 0 else "已安裝但未登入 — 按「設定/修復」")
 
 
+def check_gh() -> tuple[bool, str]:
+    """GitHub CLI 登入狀態（與 extension checkGh 一致）。自動更新 / private repo 需要，非關鍵。"""
+    if not _which("gh"):
+        return False, "未安裝 — 自動更新需要（選用）"
+    rc, _ = _run("gh auth status")
+    return (rc == 0, "已安裝且已登入" if rc == 0 else "已安裝但未登入 — 按「設定/修復」")
+
+
 def check_simple(name: str, label: str) -> tuple[bool, str]:
     p = _which(name)
     return (bool(p), f"已安裝（{p}）" if p else f"未安裝 — 需要 {label}")
@@ -95,12 +103,14 @@ def gather_checks() -> list[dict]:
     codex_ok, codex_msg = check_codex()
     node_ok, node_msg = check_simple("node", "Node.js（Codex 需要）")
     git_ok, git_msg = check_simple("git", "Git")
+    gh_ok, gh_msg = check_gh()
     py_ok, py_msg = check_simple("python", "Python 3.11+") if not getattr(sys, "frozen", False) else (True, "內建於 App")
     return [
         {"key": "claude", "name": "Claude Code", "ok": claude_ok, "msg": claude_msg, "critical": True},
         {"key": "codex", "name": "OpenAI Codex", "ok": codex_ok, "msg": codex_msg, "critical": True},
         {"key": "node", "name": "Node.js", "ok": node_ok, "msg": node_msg, "critical": False},
         {"key": "git", "name": "Git", "ok": git_ok, "msg": git_msg, "critical": False},
+        {"key": "gh", "name": "GitHub CLI", "ok": gh_ok, "msg": gh_msg, "critical": False},
         {"key": "python", "name": "Python", "ok": py_ok, "msg": py_msg, "critical": False},
     ]
 
@@ -121,22 +131,27 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
-def launch_claude(requirement: str) -> bool:
-    """開新終端機在 app 目錄跑互動式 claude，需求當初始 prompt。"""
+def launch_claude(requirement: str, autopilot: bool = False) -> bool:
+    """開新終端機在 app 目錄跑互動式 claude，需求當初始 prompt。
+
+    autopilot=True 時走非停模式：prompt 前綴 ``/autopilot on``（與 extension 的
+    「非停」QuickPick 一致），連回合都不停一路跑到交付（commit/push 仍會問）。
+    """
     if not _which("claude"):
         messagebox.showerror("CodexAutoAI", "找不到 claude，請先按「設定/修復」安裝並登入。")
         return False
     req = (requirement or "").strip().replace('"', "'")
+    prompt = (f"/autopilot on {req}").strip() if autopilot else req
     try:
         if IS_WIN:
-            inner = f'claude "{req}"' if req else "claude"
+            inner = f'claude "{prompt}"' if prompt else "claude"
             if _which("wt"):   # 優先 Windows Terminal
                 subprocess.Popen(f'wt -d "{APP_DIR}" cmd /k {inner}', shell=True)
             else:
                 subprocess.Popen(f'start "CodexAutoAI" cmd /k {inner}',
                                 cwd=str(APP_DIR), shell=True)
         else:
-            cmd = f'claude "{req}"' if req else "claude"
+            cmd = f'claude "{prompt}"' if prompt else "claude"
             for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
                 if _which(term):
                     subprocess.Popen([term, "-e", "bash", "-lc", f"cd '{APP_DIR}' && {cmd}"])
@@ -155,8 +170,8 @@ class LauncherUI:
         self.root = root
         root.title("CodexAutoAI")
         root.configure(bg=BG)
-        root.geometry("560x560")
-        root.minsize(520, 520)
+        root.geometry("560x628")
+        root.minsize(520, 588)
         ico = APP_DIR / "desktop" / "codexautoai.ico"
         if not ico.exists():
             ico = APP_DIR / "codexautoai.ico"
@@ -221,6 +236,16 @@ class LauncherUI:
         self.req.pack(fill="x", padx=22)
         self.req.insert("1.0", "做一個記帳 CLI 工具，資料存 SQLite")
 
+        # 執行模式：勾選＝非停（autopilot），連回合都不停一路跑到交付（commit/push 仍會問）。
+        self.autopilot_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            self.root,
+            text="非停模式（autopilot）：連回合都不停，一路跑到交付（commit/push 仍會問）",
+            variable=self.autopilot_var, font=self.mono, fg=MUTED, bg=BG,
+            activebackground=BG, activeforeground=CHAMPAGNE, selectcolor=CARD,
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(8, 0))
+
         self.launch_btn = tk.Button(self.root, text="🚀 啟動 CodexAutoAI", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=18)
@@ -244,13 +269,21 @@ class LauncherUI:
             self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
 
     def on_setup(self) -> None:
+        # 環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
+        checks = gather_checks()
+        self.refresh()
+        missing = [c for c in checks if c["critical"] and not c["ok"]]
+        if not missing:
+            self.status.config(text="✓ Claude / Codex 已安裝並登入，無需重跑設定", fg=GREEN)
+            return
         run_setup()
         self.status.config(text="設定視窗已開啟，完成後請按「↻ 重新檢查」", fg=GOLD)
 
     def on_launch(self) -> None:
         req = self.req.get("1.0", "end").strip()
-        if launch_claude(req):
-            self.status.config(text="已開啟終端機，CodexAutoAI 在新視窗執行中…", fg=GREEN)
+        if launch_claude(req, autopilot=self.autopilot_var.get()):
+            mode = "非停（autopilot）" if self.autopilot_var.get() else "一般"
+            self.status.config(text=f"已開啟終端機（{mode}），CodexAutoAI 在新視窗執行中…", fg=GREEN)
 
     # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
     def start_update_check(self) -> None:
