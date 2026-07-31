@@ -44,7 +44,7 @@ description: "Phase 5：根據架構文件並行派遣 function-builder agent �
      python tools/run_loop.py --mode test --phase 5 --run-id <id> --max-iters 2 --patience 2 \
        --compile-cmd "python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N>" \
        --review-cmd "python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N>" \
-       --fix-cmd 'codex exec --full-auto "下列檔案語法錯誤，請修正（只寫入 src/）：\n$(cat {defects_file})"'
+       --fix-cmd 'python tools/codex_runner.py --prompt "下列檔案語法錯誤，請修正（只寫入 src/）：\n$(cat {defects_file})"'
      ```
      `status=escalated` → 停止並通知使用者，不得硬進 Phase 6。
 

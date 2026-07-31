@@ -1,6 +1,7 @@
 // CodexAutoAI VS Code extension — 啟動器（自帶框架快照）。
-// 指令：初始化（把框架複製進 workspace）、啟動（輸入需求跑 claude）、設定/修復、檢查更新，
-// 外加進度面板相關的 中止 / 重整 / 顯示進度（見 progressView.js）。
+// 面板四個指令：安裝設定（初始化＋登入修復合一）、啟動新任務（輸入需求跑 claude）、
+// 啟動新任務：從 spec 開始（gs-spec-forge 產 spec 再跑 pipeline）、檢查更新。
+// codexautoai.init 仍註冊供舊 keybinding/腳本呼叫，但已從命令面板移除（setup 涵蓋其功能）。
 // 純 vscode API + Node 內建模組（fs / path / https / child_process），無第三方依賴。
 const vscode = require("vscode");
 const fs = require("fs");
@@ -9,8 +10,84 @@ const path = require("path");
 const https = require("https");
 const { execFile, exec } = require("child_process");
 const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原全域 Claude/Codex 設定
-const progressView = require("./progressView"); // pipeline 進度面板 + 狀態列 + 中止
-const { safePrompt } = require("./prompt");     // 需求清理（與 launcher._safe_prompt 同規則）
+const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗試（含內建快照 fallback）
+const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
+const preview = require("./preview");
+const { safePrompt } = require("./prompt"); // 需求清理（與 launcher._safe_prompt 同規則） // 前端網頁 UI 內嵌即時預覽（Live Preview / Simple Browser 三層降級）
+
+// 供 preview.openPreview 使用的 vscode 介面（隔離讓 preview.js 保持純 Node 可測）。
+function previewVsApi(root) {
+  return {
+    hasLivePreview: () => !!vscode.extensions.getExtension("ms-vscode.live-server"),
+    livePreviewAtFile: (absPath) =>
+      vscode.commands.executeCommand("livePreview.start.preview.atFile", vscode.Uri.file(absPath)),
+    simpleBrowser: (url) => vscode.commands.executeCommand("simpleBrowser.show", url),
+    // server 型專案一鍵啟動：隱藏 terminal 跑 launcher（run.ps1 / npm dev / app.py…），
+    // 「顯示背景終端機」逃生口可查看；不 kill——server 生命週期屬於專案本身。
+    runServer: (cmd, label) => {
+      const t = vscode.window.createTerminal({ name: `CodexAutoAI Server (${label})`, cwd: root, hideFromUser: true });
+      lastTerminal = t;
+      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
+      t.sendText(cmd);
+    },
+    askUrl: (defaultUrl) => vscode.window.showInputBox({
+      prompt: "找不到靜態網頁（index.html）。若專案是 server 型（Flask/FastAPI…），輸入它的預覽網址",
+      value: defaultUrl, ignoreFocusOut: true,
+    }),
+  };
+}
+
+// 中止 pipeline：放下 log/abort.flag，由 tools/autopilot/cont.py 的閥 4 在**回合邊界**停下。
+// 它殺不掉正在跑的 codex exec，所以文案一律寫「下一個回合邊界」，不得寫「立即中止」。
+async function abortPipeline(root) {
+  if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+  const pick = await vscode.window.showWarningMessage(
+    "要中止目前的 CodexAutoAI pipeline 嗎？",
+    { modal: true, detail: "會在下一個回合邊界停止；正在執行的 Codex 無法立即中斷。" },
+    "中止"
+  );
+  if (pick !== "中止") return;
+  try {
+    fs.mkdirSync(path.join(root, "log"), { recursive: true });
+    fs.writeFileSync(path.join(root, "log", "abort.flag"), "", "utf8");
+    vscode.window.showInformationMessage("已送出中止，將於下一個回合邊界停止。");
+  } catch (e) {
+    vscode.window.showErrorMessage(`寫入中止旗標失敗：${(e && e.message) || e}`);
+  }
+}
+
+// 最近一次背景啟動的 terminal（控制台「顯示終端機」逃生口用）。
+let lastTerminal = null;
+
+// 在 root 開 terminal 跑 claude；hidden=true 時不搶焦點（控制台走這條，非開發者不用看 CLI）。
+function runClaudeInTerminal(root, inner, { hidden = false } = {}) {
+  const t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden });
+  lastTerminal = t;
+  if (!hidden) t.show();
+  if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
+  t.sendText(inner);
+  return t;
+}
+
+// 需求 → claude 啟動指令（與 start 命令同語意；autopilot=true 走非停模式）。
+function buildInner(requirement, autopilot) {
+  // sendText 是直接餵給活的 shell，只換掉 `"` 擋不住 $(...) / `...` / &。
+  // safePrompt 會把 shell 語法字元刪掉或轉全形，規則與 launcher._safe_prompt 一致。
+  // 注意：**路徑不要走這裡**（會吃掉 Windows 的反斜線），呼叫端先轉成正斜線。
+  const safe = safePrompt(requirement);
+  if (autopilot) return `claude "/autopilot on ${safe}"`;
+  return safe ? `claude "${safe}"` : "claude";
+}
+
+// 產 spec 再啟動（start 與控制台共用）。回傳 Promise<{ok, specPath?, error?}>。
+function seedThenBuildInner(root, intent, cfg) {
+  const cands = specforge.candidates(cfg.get("specForgeCmd", "spec-forge"),
+    __dirname);
+  const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
+  const safeIntent = safePrompt(intent);
+  return specforge.trySeed(cands, safeIntent,
+    { cwd: root, env, timeout: 60000, windowsHide: true }, exec);
+}
 
 // 本 extension host 持有的 overlay owner token（deactivate 時用同一個 token release）。
 let overlayToken = null;
@@ -25,6 +102,10 @@ function workspaceRoot() {
   const f = vscode.workspace.workspaceFolders;
   return f && f.length ? f[0].uri.fsPath : null;
 }
+
+// spec-forge 解析與執行已抽到 specforge.js（候選鏈：明確設定 > venv > PATH > 內建快照），
+// 前面候選失敗會自動落到下一個——venv 斷根（Python 升級）、沒裝 gs-spec-forge、沒 gh、
+// 沒 private repo 權限的使用者都能靠內建快照開箱即用（唯一前置：Python）。
 
 function hasFramework(root) {
   return fs.existsSync(path.join(root, "CLAUDE.md")) &&
@@ -51,6 +132,16 @@ function copyFramework(extPath, root, opts = {}) {
 
 function termInRoot(root, name) {
   return vscode.window.createTerminal({ name, cwd: root });
+}
+
+// 框架核心清單：這些是 pipeline 的 SSOT（extension 快照為準），啟動時一律刷新到最新——
+// 使用者不必記得「更新後要重跑安裝設定」（0.9.5→0.9.6 的 permission 修正就因此沒生效過）。
+// 使用者資料（src/ docs/ log/ vault/…）永不在此清單。
+const FRAMEWORK_CORE = ["setup.ps1", "setup.cmd", "setup.sh",
+  "CLAUDE.md", "AGENTS.md", ".claude", "tools", ".githooks"];
+
+function refreshFrameworkCore(extPath, root) {
+  return copyFramework(extPath, root, { force: FRAMEWORK_CORE });
 }
 
 // ── 環境 pre-check（已安裝+登入就跳過「設定/修復」，不開終端機）──────────────
@@ -275,6 +366,31 @@ function activate(context) {
     }
   } catch (e) { console.warn("CodexAutoAI: 套用全域設定失敗：", e && e.message); }
 
+  // ── 狀態列指示（像 Claude/Codex：底部一眼看到 pipeline 跑到哪）─────────────
+  // 點一下開控制台。有 run 進行中才顯示；純輪詢既有 transcript，不影響 pipeline。
+  const statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusItem.command = "codexautoai.dashboard";
+  context.subscriptions.push(statusItem);
+  const refreshStatus = () => {
+    try {
+      const root = workspaceRoot();
+      if (!root) { statusItem.hide(); return; }
+      const { exists, summary: s } = dashboard.computeState(root);
+      if (!exists) { statusItem.hide(); return; }
+      const marker = s.marker || 0;
+      const name = dashboard.PHASES[marker] || "";
+      const done = marker === 7 && (s.completed.includes(7) || s.started.includes(7));
+      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : "$(sync~spin)");
+      statusItem.text = `${icon} CodexAutoAI ${marker}/7 ${name}`;
+      statusItem.tooltip = s.failed ? "pipeline 失敗/升級——點開控制台查看"
+        : (done ? "已到交付階段——點開控制台" : `並行實作中・Codex ${s.codex.sessions || 0} sessions——點開控制台`);
+      statusItem.show();
+    } catch { statusItem.hide(); }
+  };
+  refreshStatus();
+  const statusTimer = setInterval(refreshStatus, 3000);
+  context.subscriptions.push({ dispose: () => clearInterval(statusTimer) });
+
   context.subscriptions.push(
     vscode.commands.registerCommand("codexautoai.init", async () => {
       const root = workspaceRoot();
@@ -294,7 +410,10 @@ function activate(context) {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
       // 修復：缺漏框架檔照補；launcher（setup.ps1/cmd/sh）一律覆蓋成最新，避免舊專案留著沒 BOM/過期的壞檔。
-      copyFramework(extPath, root, { force: ["setup.ps1", "setup.cmd", "setup.sh"] });
+      // 「修復」語意：框架核心（CLAUDE.md/AGENTS.md/.claude/tools/.githooks）一律更新到
+      // extension 內建版本，否則舊專案吃不到框架演進（如 Codex-first 分工、hook 擴大）。
+      // 使用者資料（src/ docs/ log/ 等）不在 force 清單、永不覆蓋。
+      copyFramework(extPath, root, { force: FRAMEWORK_CORE });
 
       // pre-check：本機若已安裝+登入 Claude / Codex / gh，就不重跑 setup（連終端機都不開）。
       // 可用設定 codexautoai.skipSetupWhenReady=false 關閉此偵測，永遠開終端機跑完整 setup。
@@ -305,7 +424,7 @@ function activate(context) {
         const missing = checks.filter((c) => !c.ok);
         if (missing.length === 0) {
           vscode.window.showInformationMessage(
-            "✓ 環境已就緒：Claude / Codex / GitHub CLI 都已安裝並登入，無需重跑設定。");
+            "✓ 框架已就緒、環境已就緒：Claude / Codex / GitHub CLI 都已安裝並登入。可直接「啟動新任務」。");
           return;
         }
         vscode.window.showInformationMessage(
@@ -328,7 +447,7 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.start", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      if (!hasFramework(root)) { copyFramework(extPath, root); }
+      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
 
       const cfg = vscode.workspace.getConfiguration("codexautoai");
       const req = await vscode.window.showInputBox({
@@ -347,19 +466,151 @@ function activate(context) {
       );
       if (!mode) return;
 
-      // sendText 是直接餵給活的 shell，所以需求必須先清掉 shell 語法字元
-      // （原本只換掉 `"` 擋不住 $(...) / `...` / &）。規則與 launcher._safe_prompt 一致。
-      const safe = safePrompt(req);
-      const inner = mode.label.startsWith("非停")
-        ? `claude "/autopilot on ${safe}"`
-        : (safe ? `claude "${safe}"` : "claude");
+      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）——
+      // runClaudeInTerminal 內建 Set-Location 處理。
+      runClaudeInTerminal(root, buildInner(req, mode.label.startsWith("非停")));
+    })
+  );
 
-      const t = termInRoot(root, "CodexAutoAI");
-      t.show();
-      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）。
-      // PowerShell：Set-Location 成功 cd 回專案；cmd host 會出現一行無害的「不認得」訊息，claude 仍在 root 執行。
-      if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
-      t.sendText(inner);
+  // ── 控制台（webview 內嵌 GUI）：給不想碰 CLI/TUI 的使用者 ─────────────────
+  // 建控制台 deps（面板命令與側欄 view 共用）。root 為當前 workspace，null 時回傳 null。
+  function buildDashboardDeps() {
+    const root = workspaceRoot();
+    if (!root) return null;
+    refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
+    const cfg = vscode.workspace.getConfiguration("codexautoai");
+    return {
+      vscode, root,
+      defaultReq: cfg.get("defaultRequirement", ""),
+      onStart: (requirement, autopilot, reply) => {
+        if (!(requirement || "").trim()) { reply("請先輸入需求。"); return; }
+        runClaudeInTerminal(root, buildInner(requirement, autopilot), { hidden: true });
+        reply("✓ 已在背景啟動，下方進度會自動更新（terminal 隱藏，可按「顯示背景終端機」查看）。");
+      },
+      onSeed: (intent, autopilot, reply) => {
+        if (!(intent || "").trim()) { reply("請先輸入要開發的功能意圖。"); return; }
+        reply("產生 spec 中…");
+        seedThenBuildInner(root, intent, cfg).then((r) => {
+          if (!r.ok) {
+            const tail = r.errors.length ? r.errors[r.errors.length - 1].detail : "";
+            reply(`產生 spec 失敗：${tail.slice(0, 160)}`);
+            return;
+          }
+          // 轉正斜線：路徑要穿過 buildInner 的 safePrompt，反斜線會被清掉。
+          const safePath = r.specPath.replace(/\\/g, "/");
+          runClaudeInTerminal(root,
+            buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot), { hidden: true });
+          reply(`✓ 已產生 spec（${r.specPath}）並在背景啟動。`);
+        });
+      },
+      onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
+      onPreview: (reply) => {
+        reply("偵測網頁 UI / 啟動 server 中…");
+        preview.openPreview(root, previewVsApi(root))
+          .then((r) => {
+            if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
+            else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
+            else if (r.mode === "pending") reply(`⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成（或修復 stall）後再按 🌐。`);
+            else if (r.mode === "url") reply(`✓ 已開啟內嵌預覽：${r.detail}`);
+          })
+          .catch((e) => reply(`預覽失敗：${String(e.message || e).slice(0, 160)}`));
+      },
+    };
+  }
+
+  // 命令：開控制台「面板」（編輯器分頁）
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.dashboard", () => {
+      const deps = buildDashboardDeps();
+      if (!deps) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      dashboard.openDashboard(deps);
+    })
+  );
+
+  // 側欄常駐 view（活動列 CodexAutoAI 圖示）：像 Claude/Codex 一樣永遠點得到。
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      "codexautoai.dashboardView",
+      dashboard.makeDashboardViewProvider(() => buildDashboardDeps() || {
+        vscode, root: workspaceRoot() || ".", defaultReq: "",
+        onStart: (_r, _a, reply) => reply("請先開啟一個資料夾。"),
+        onSeed: (_i, _a, reply) => reply("請先開啟一個資料夾。"),
+        onShowTerminal: () => {}, onPreview: (reply) => reply("請先開啟一個資料夾。"),
+      })
+    )
+  );
+
+  // ── 即時預覽（命令面板版；多個候選頁時 QuickPick 選擇）─────────────────────
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.preview", async () => {
+      const root = workspaceRoot();
+      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      const hits = preview.findWebRoots(root);
+      let pickIndex = 0;
+      if (hits.length > 1) {
+        const picked = await vscode.window.showQuickPick(hits, { placeHolder: "選擇要預覽的網頁進入點" });
+        if (!picked) return;
+        pickIndex = hits.indexOf(picked);
+      }
+      try {
+        const r = await preview.openPreview(root, previewVsApi(root), { pickIndex });
+        if (r.mode === "pending") {
+          vscode.window.showWarningMessage(
+            `⏳ pipeline 還在 ${r.detail} 階段，網頁尚未產出——等七階段完成後再預覽。`);
+        } else if (r.mode !== "cancelled") {
+          vscode.window.showInformationMessage(`✓ 預覽已開啟（${r.mode}）：${r.detail}`);
+        }
+      } catch (e) {
+        vscode.window.showErrorMessage(`預覽失敗：${String(e.message || e).slice(0, 200)}`);
+      }
+    })
+  );
+
+  // ── 從 spec 開始開發（gs-spec-forge 整合，純附加）─────────────────────────
+  // 先跑 `spec-forge seed "<意圖>"` 產出 spec.md（帶 gs-rag 檢索引用），再把該 spec 路徑
+  // 當需求丟進「既有」start 流程的同一條 pipeline。不改動 codexautoai.start 的行為。
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.seedFromSpec", async () => {
+      const root = workspaceRoot();
+      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
+
+      const cfg = vscode.workspace.getConfiguration("codexautoai");
+      const intent = await vscode.window.showInputBox({
+        prompt: "描述要開發的功能意圖（先產 spec 再跑 pipeline）",
+        value: cfg.get("defaultRequirement", ""),
+        ignoreFocusOut: true,
+      });
+      if (intent === undefined) return; // 取消
+
+      // spec 產在 workspace 下的 vault/，讓 spec 與專案同處、可被 pipeline 讀到。
+      const cands = specforge.candidates(cfg.get("specForgeCmd", "spec-forge"), extPath);
+      const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
+      const safeIntent = safePrompt(intent);
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "gs-spec-forge：產生 spec…" },
+        () => specforge.trySeed(cands, safeIntent,
+          { cwd: root, env, timeout: 60000, windowsHide: true }, exec));
+
+      if (!result.ok) {
+        // 全部候選都失敗：附上實際錯誤尾巴讓問題可診斷，並依情況給指引。
+        const tail = result.errors.length
+          ? result.errors[result.errors.length - 1].detail : "";
+        const hint = result.errors.some((e) => /python/i.test(e.detail))
+          ? "疑似找不到 Python——請先執行「CodexAutoAI: 安裝設定」。"
+          : "內建輕量版應可直接用；若持續失敗請回報以下錯誤。";
+        vscode.window.showErrorMessage(
+          `gs-spec-forge: 產生 spec 失敗。${hint}${tail ? `（${tail.slice(0, 160)}）` : ""}`);
+        return;
+      }
+      const specPath = result.specPath;
+
+      // 交回既有 pipeline：以 spec 檔為依據跑七階段（沿用 start 的終端啟動慣例）。
+      runClaudeInTerminal(root,
+        buildInner(`依照規格檔 ${specPath.replace(/\\/g, "/")} 開發，跑完整七階段`, false));
+      vscode.window.showInformationMessage(`✓ 已產生 spec：${specPath}，開始跑 pipeline。`);
     })
   );
 
@@ -368,13 +619,9 @@ function activate(context) {
       checkForUpdate(context, { manual: true }))
   );
 
-  // 進度面板 + 狀態列 + 中止：讓 pipeline 跑起來後在 IDE 裡看得到、也停得下來。
-  // 失敗不可擋住 activate（面板是加值，不是必要路徑）。
-  try {
-    progressView.register(context, workspaceRoot());
-  } catch (e) {
-    console.warn("CodexAutoAI: 進度面板初始化失敗：", e && e.message);
-  }
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexautoai.abort", () => abortPipeline(workspaceRoot()))
+  );
 
   // 啟動時背景檢查（不阻塞 activate；失敗靜默）。
   checkForUpdate(context).catch(() => {});
@@ -385,6 +632,7 @@ function deactivate() {
   try {
     if (overlayToken) { globalOverlay.release(overlayToken); overlayToken = null; }
   } catch (e) { console.warn("CodexAutoAI: 還原全域設定失敗：", e && e.message); }
+  try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
 module.exports = { activate, deactivate };

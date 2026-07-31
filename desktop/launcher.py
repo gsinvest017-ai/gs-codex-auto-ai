@@ -61,7 +61,7 @@ def load_progress_model(log_path: Path) -> dict | None:
     且凍結（PyInstaller）後的佈局與 repo 佈局不同，寫死 import 會在其中一種
     情境下壞掉。找不到模組就回 None，進度卡降級顯示、絕不擋住啟動器。
 
-    VS Code extension 走 `python tools/events_model.py --json` 讀同一份模型，
+    VS Code 的控制台（`vscode-extension/dashboard.js`）讀同一份模型，
     兩邊 UI 因此不會對「跑到哪」有不同說法。
     """
     try:
@@ -157,6 +157,76 @@ def run_setup() -> None:
         messagebox.showerror("CodexAutoAI", f"找不到 setup 腳本於 {APP_DIR}")
 
 
+def _spec_forge_candidates() -> list[tuple[str, dict]]:
+    """依序嘗試的 (命令模板, 額外 env) 候選：SPECFORGE_CMD > ~/gs-spec-forge venv > PATH >
+    內建快照（python -m，stdlib-first 核心）。前者失敗自動落到下一個——venv 斷根、沒裝
+    gs-spec-forge、沒 gh / 沒 private repo 權限的使用者都能靠快照開箱即用。"""
+    cands: list[tuple[str, dict]] = []
+    env_cmd = os.environ.get("SPECFORGE_CMD")
+    if env_cmd and (_which(env_cmd) or Path(env_cmd).exists()):
+        cands.append((f'"{env_cmd}"', {}))
+    venv = Path.home() / "gs-spec-forge" / ".venv" / (
+        "Scripts/spec-forge.exe" if IS_WIN else "bin/spec-forge")
+    if venv.exists():
+        cands.append((f'"{venv}"', {}))
+    if _which("spec-forge"):
+        cands.append(("spec-forge", {}))
+    # 內建快照：凍結版放 exe 旁、開發版在 vscode-extension/（build-vsix 產物）
+    for snap in (APP_DIR / "spec_forge_snapshot",
+                 APP_DIR / "vscode-extension" / "spec_forge_snapshot"):
+        if (snap / "gs_spec_forge" / "cli.py").exists():
+            env = {"PYTHONPATH": str(snap) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                   "PYTHONIOENCODING": "utf-8"}
+            cands.append(("python -m gs_spec_forge.cli", env))
+            break
+    return cands
+
+
+def seed_from_spec(intent: str) -> bool:
+    """先用 gs-spec-forge 產 spec，再把 spec 當需求丟進既有 launch_claude（純附加）。
+
+    候選鏈見 _spec_forge_candidates()；SPEC_VAULT 指定 vault（預設 ~/gs-vault，
+    否則 App 目錄下 vault/）。
+    """
+    cands = _spec_forge_candidates()
+    if not cands:
+        messagebox.showerror(
+            "CodexAutoAI",
+            "找不到 spec-forge 也沒有內建快照。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
+            "或設環境變數 SPECFORGE_CMD 指到 spec-forge 執行檔。")
+        return False
+    vault = os.environ.get("SPEC_VAULT")
+    if not vault:
+        home_vault = Path.home() / "gs-vault"
+        vault = str(home_vault) if home_vault.exists() else str(APP_DIR / "vault")
+    safe = _safe_prompt(intent)     # 下面走 shell=True，只換掉 `"` 擋不住 $(...) / `...` / &
+    if not safe:
+        messagebox.showerror("CodexAutoAI", "請先在需求框輸入要開發的功能意圖。")
+        return False
+    last_detail = ""
+    for cmd, extra_env in cands:
+        env = dict(os.environ)
+        env.update(extra_env)
+        env["SPEC_VAULT"] = vault
+        try:
+            p = subprocess.run(f'{cmd} seed "{safe}"', shell=True, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", env=env, timeout=90)
+        except Exception as exc:  # noqa: BLE001
+            last_detail = str(exc)
+            continue
+        out = (p.stdout or "").strip()
+        spec_path = out.splitlines()[-1].strip() if out else ""
+        if p.returncode == 0 and spec_path.lower().endswith(".md"):
+            # 路徑轉正斜線：它要穿過 launch_claude 的 _safe_prompt，反斜線會被清掉。
+            return launch_claude(
+                f"依照規格檔 {spec_path.replace(chr(92), '/')} 開發，跑完整七階段")
+        last_detail = (p.stderr or p.stdout or "").strip()[:300]
+    hint = ("疑似找不到 Python——請先按「設定 / 修復」。" if "python" in last_detail.lower()
+            else "")
+    messagebox.showerror("CodexAutoAI", f"產生 spec 失敗。{hint}{last_detail}")
+    return False
+
+
 # shell / cmd 語法字元 → 安全替代。需求是自由文字（多半是中文），所以在 prose 裡
 # 有意義的字元（`% ! & $ ; < >`）改成**全形等價字**保住語意，純語法字元才刪掉。
 # 為什麼不用「正確地引用」解決：cmd 的 `%VAR%` 展開發生在解析之後，值裡的 `&`
@@ -180,6 +250,10 @@ def _safe_prompt(text: str) -> str:
 
     中文與全形標點（`（）「」`）完全不受影響；`100%` 會變成 `100％`、
     `A & B` 變成 `A ＆ B`，語意保留但對 shell 失去意義。
+
+    **路徑不要餵進來**（`\\` 會被刪掉）；呼叫端先把路徑轉成正斜線。
+    JS 對應版是 `vscode-extension/prompt.js` 的 `safePrompt`，兩邊規則必須一致
+    （`tests/test_launcher.py` 有 parity 測試把關）。
     """
     return " ".join((text or "").translate(_META_TABLE).split())
 
@@ -234,8 +308,8 @@ class LauncherUI:
         self.root = root
         root.title("CodexAutoAI")
         root.configure(bg=BG)
-        root.geometry("560x760")
-        root.minsize(520, 720)
+        root.geometry("560x820")
+        root.minsize(520, 780)
         ico = APP_DIR / "desktop" / "codexautoai.ico"
         if not ico.exists():
             ico = APP_DIR / "codexautoai.ico"
@@ -311,9 +385,15 @@ class LauncherUI:
             anchor="w",
         ).pack(fill="x", padx=24, pady=(8, 0))
 
-        self.launch_btn = tk.Button(self.root, text="🚀 啟動 CodexAutoAI", command=self.on_launch,
+        self.launch_btn = tk.Button(self.root, text="🚀 啟動新任務", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
-        self.launch_btn.pack(fill="x", padx=22, pady=18)
+        self.launch_btn.pack(fill="x", padx=22, pady=(10, 6))
+
+        # 啟動新任務：從 spec 開始（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
+        self.seed_btn = tk.Button(self.root, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
+                                  command=self.on_seed_from_spec, font=self.h2,
+                                  bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
+        self.seed_btn.pack(fill="x", padx=22, pady=(0, 10))
 
         # 進度卡：讀 log/events.jsonl（共用 tools/events_model.py）。
         # 在這之前，App 按下啟動後就只是「開了一個終端機」——pipeline 跑到哪、
@@ -338,21 +418,6 @@ class LauncherUI:
         self.status = tk.Label(self.root, text="", font=self.mono, fg=MUTED, bg=BG)
         self.status.pack()
 
-    def refresh(self) -> None:
-        ready = True
-        for c in gather_checks():
-            r = self.rows[c["key"]]
-            r["dot"].config(fg=GREEN if c["ok"] else (RED if c["critical"] else GOLD))
-            r["msg"].config(text=c["msg"])
-            if c["critical"] and not c["ok"]:
-                ready = False
-        if ready:
-            self.launch_btn.config(state="normal", bg=GOLD)
-            self.status.config(text="✓ 環境就緒，可以啟動", fg=GREEN)
-        else:
-            self.launch_btn.config(state="disabled", bg="#3a3a3a")
-            self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
-
     # ── 進度輪詢 ────────────────────────────────────────────────────────────
     def _events_log(self) -> Path:
         return APP_DIR / "log" / "events.jsonl"
@@ -361,7 +426,7 @@ class LauncherUI:
         """每 2 秒讀一次 events.jsonl 更新進度卡（唯讀，不干擾 pipeline）。"""
         try:
             model = load_progress_model(self._events_log())
-        except Exception:
+        except Exception:  # noqa: BLE001
             model = None
 
         if not model or not model.get("log_exists"):
@@ -405,6 +470,21 @@ class LauncherUI:
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("CodexAutoAI", f"寫入中止旗標失敗：{exc}")
 
+    def refresh(self) -> None:
+        ready = True
+        for c in gather_checks():
+            r = self.rows[c["key"]]
+            r["dot"].config(fg=GREEN if c["ok"] else (RED if c["critical"] else GOLD))
+            r["msg"].config(text=c["msg"])
+            if c["critical"] and not c["ok"]:
+                ready = False
+        if ready:
+            self.launch_btn.config(state="normal", bg=GOLD)
+            self.status.config(text="✓ 環境就緒，可以啟動", fg=GREEN)
+        else:
+            self.launch_btn.config(state="disabled", bg="#3a3a3a")
+            self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
+
     def on_setup(self) -> None:
         # 環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
         checks = gather_checks()
@@ -421,6 +501,13 @@ class LauncherUI:
         if launch_claude(req, autopilot=self.autopilot_var.get()):
             mode = "非停（autopilot）" if self.autopilot_var.get() else "一般"
             self.status.config(text=f"已開啟終端機（{mode}），CodexAutoAI 在新視窗執行中…", fg=GREEN)
+
+    def on_seed_from_spec(self) -> None:
+        intent = self.req.get("1.0", "end").strip()
+        self.status.config(text="spec-forge 產生 spec 中…", fg=GOLD)
+        self.root.update_idletasks()
+        if seed_from_spec(intent):
+            self.status.config(text="已產 spec 並開啟終端機跑 pipeline…", fg=GREEN)
 
     # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
     def start_update_check(self) -> None:

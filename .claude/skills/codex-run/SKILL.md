@@ -11,7 +11,7 @@ description: 調用 OpenAI Codex CLI 執行任務。當使用者要求透過 Cod
 ## 調用指令
 
 ```bash
-codex exec --full-auto "$ARGUMENTS"
+python tools/codex_runner.py --prompt "$ARGUMENTS"
 ```
 
 將使用者的指令作為 `$ARGUMENTS` 傳入。
@@ -42,7 +42,7 @@ codex exec --full-auto "$ARGUMENTS"
 1. 在工作目錄下執行：
 
 ```bash
-codex exec --full-auto "使用者的指令\n\n重要：所有程式碼檔案必須寫入 src/ 目錄下，不可寫在專案根目錄。"
+python tools/codex_runner.py --prompt "使用者的指令\n\n重要：所有程式碼檔案必須寫入 src/ 目錄下，不可寫在專案根目錄。"
 ```
 
 2. 等待 Codex 執行完成，將結果回報給使用者。
@@ -55,13 +55,13 @@ codex exec --full-auto "使用者的指令\n\n重要：所有程式碼檔案必�
 
 ```bash
 # 生成程式碼（注意指定 src/ 路徑）
-codex exec --full-auto "寫一個 Python 的費波納契數列函式，存成 src/fibonacci.py"
+python tools/codex_runner.py --prompt "寫一個 Python 的費波納契數列函式，存成 src/fibonacci.py"
 
 # 修復 bug
-codex exec --full-auto "修復 src/main.py 中的錯誤"
+python tools/codex_runner.py --prompt "修復 src/main.py 中的錯誤"
 
 # 重構程式碼
-codex exec --full-auto "將 src/utils.js 重構為 TypeScript，存到 src/utils.ts"
+python tools/codex_runner.py --prompt "將 src/utils.js 重構為 TypeScript，存到 src/utils.ts"
 ```
 
 ## 注意事項

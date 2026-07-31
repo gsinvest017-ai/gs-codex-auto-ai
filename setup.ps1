@@ -88,7 +88,11 @@ if (-not (Have codex)) {
 if ((Have codex) -or $DryRun) {
   $loggedIn = $false
   if (-not $ForceLogin) {
-    try { codex login status *> $null; if ($LASTEXITCODE -eq 0) { $loggedIn = $true } } catch {}
+    # PS 5.1 陷阱：EAP=Stop 時原生指令寫 stderr 會被 *> 轉成例外拋進 catch（codex 把
+    # 「Logged in using ChatGPT」印在 stderr），已登入仍被誤判成未登入而強迫重登。
+    # 改經 cmd /c 在 cmd 層吞掉輸出、只看 exit code（5.1 / 7 皆安全）。
+    cmd /c "codex login status >nul 2>&1"
+    if ($LASTEXITCODE -eq 0) { $loggedIn = $true }
   }
   if ($loggedIn) { Skip "Codex 已登入（codex login status 通過）" }
   else { Todo "開啟瀏覽器登入 Codex…"; Run { codex login } "codex login" }
@@ -107,7 +111,9 @@ if (-not (Have gh)) {
 if ((Have gh) -or $DryRun) {
   $ghAuthed = $false
   if (-not $ForceLogin) {
-    try { gh auth status *> $null; if ($LASTEXITCODE -eq 0) { $ghAuthed = $true } } catch {}
+    # 同 codex 段的 PS 5.1 stderr 陷阱（gh auth status 舊版也寫 stderr），經 cmd /c 只看 exit code。
+    cmd /c "gh auth status >nul 2>&1"
+    if ($LASTEXITCODE -eq 0) { $ghAuthed = $true }
   }
   if ($ghAuthed) { Skip "gh 已登入（gh auth status 通過）" }
   else { Todo "開啟瀏覽器登入 GitHub…"; Run { gh auth login --hostname github.com --git-protocol https --web } "gh auth login --web" }
@@ -115,8 +121,18 @@ if ((Have gh) -or $DryRun) {
   Err "gh 仍不可用——請手動安裝 https://cli.github.com 後重跑（沒有 gh 也可改設環境變數 GH_TOKEN）。"
 }
 
-# --- 步驟 5：啟用 git hooks ---
-Write-Host "5. 啟用 git hooks（AGENTS.md commit 時自動同步）"
+# --- 步驟 5：VS Code Live Preview（內嵌網頁預覽用，選配） ---
+Write-Host "5. VS Code Live Preview（「即時預覽網頁 UI」最佳體驗，選配）"
+if (Have code) {
+  $extInstalled = (& code --list-extensions 2>$null) -contains "ms-vscode.live-server"
+  if ($extInstalled) { Skip "Live Preview 已安裝" }
+  else { Todo "安裝 ms-vscode.live-server…"; Run { code --install-extension ms-vscode.live-server } "code --install-extension ms-vscode.live-server" }
+} else {
+  Skip "找不到 code CLI——略過（沒裝也能預覽，會退回內建 Simple Browser）"
+}
+
+# --- 步驟 6：啟用 git hooks ---
+Write-Host "6. 啟用 git hooks（AGENTS.md commit 時自動同步）"
 if ($SkipHooks) { Skip "依 -SkipHooks 跳過" }
 else { Run { & $py tools/install_hooks.py } "python tools/install_hooks.py" }
 

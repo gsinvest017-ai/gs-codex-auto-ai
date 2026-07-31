@@ -5,6 +5,7 @@ tests/*
 !tests/codexautoai_v2/
 !tests/tools/
 !tests/test_updater.py
+!tests/test_codex_runner.py
 !tests/test_global_overlay.py
 !tests/test_launcher.py
 # ⚠️ 新增 tests/ 底下的**頂層**測試檔時，一定要在這裡加一條 `!tests/<檔名>`。
@@ -55,5 +56,6 @@ desktop/__pycache__/
 # VS Code extension 打包產物（原始碼入庫；框架快照/icon/vsix/node_modules 不入庫）
 vscode-extension/framework/
 vscode-extension/icon.png
+vscode-extension/spec_forge_snapshot/
 vscode-extension/node_modules/
 *.vsix

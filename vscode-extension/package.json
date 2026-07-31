@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.2.3",
+  "version": "0.10.0",
   "publisher": "gsinvest",
   "engines": {
     "vscode": "^1.75.0"
@@ -23,24 +23,103 @@
     "type": "git",
     "url": "https://github.com/gsinvest017-ai/gs-codex-auto-ai"
   },
-  "license": "SEE LICENSE IN ../LICENSE",
+  "license": "SEE LICENSE IN LICENSE",
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexautoai",
+          "title": "CodexAutoAI",
+          "icon": "resources/codexautoai.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexautoai": [
+        {
+          "id": "codexautoai.dashboardView",
+          "name": "控制台",
+          "type": "webview"
+        }
+      ]
+    },
+    "walkthroughs": [
+      {
+        "id": "codexautoai.gettingStarted",
+        "title": "CodexAutoAI 快速上手",
+        "description": "免終端機，三步驟做出東西：安裝設定 → 描述需求 → 看成果。",
+        "steps": [
+          {
+            "id": "setup",
+            "title": "安裝設定（一鍵）",
+            "description": "第一次使用先按這個，自動裝好並登入 Claude / Codex / GitHub CLI。\n[▶ 安裝設定](command:codexautoai.setup)",
+            "media": {
+              "markdown": "resources/walkthrough/setup.md"
+            },
+            "completionEvents": [
+              "onCommand:codexautoai.setup"
+            ]
+          },
+          {
+            "id": "dashboard",
+            "title": "打開控制台",
+            "description": "點左側活動列的 CodexAutoAI 圖示（或用這個按鈕）開啟常駐控制台。\n[▶ 開啟控制台](command:codexautoai.dashboard)",
+            "media": {
+              "markdown": "resources/walkthrough/dashboard.md"
+            },
+            "completionEvents": [
+              "onCommand:codexautoai.dashboard"
+            ]
+          },
+          {
+            "id": "describe",
+            "title": "描述需求 → 啟動",
+            "description": "在控制台用一句白話描述你要的東西，按「🚀 啟動新任務」，全自動跑完七階段。",
+            "media": {
+              "markdown": "resources/walkthrough/describe.md"
+            },
+            "completionEvents": [
+              "onCommand:codexautoai.start"
+            ]
+          },
+          {
+            "id": "preview",
+            "title": "看成果（內嵌預覽）",
+            "description": "有網頁畫面的成品，按「🌐 即時預覽網頁 UI」直接在 VS Code 內嵌開啟。\n[▶ 即時預覽](command:codexautoai.preview)",
+            "media": {
+              "markdown": "resources/walkthrough/preview.md"
+            },
+            "completionEvents": [
+              "onCommand:codexautoai.preview"
+            ]
+          }
+        ]
+      }
+    ],
     "commands": [
       {
-        "command": "codexautoai.init",
-        "title": "CodexAutoAI: 初始化（把框架放進這個資料夾）"
+        "command": "codexautoai.dashboard",
+        "title": "CodexAutoAI: 開啟控制台（免終端機 GUI）"
       },
       {
-        "command": "codexautoai.start",
-        "title": "CodexAutoAI: 啟動（輸入需求跑 pipeline）"
+        "command": "codexautoai.preview",
+        "title": "CodexAutoAI: 即時預覽網頁 UI（內嵌）"
       },
       {
         "command": "codexautoai.setup",
-        "title": "CodexAutoAI: 設定 / 修復（登入 + 啟用 hooks）"
+        "title": "CodexAutoAI: 安裝設定（初始化 + 登入修復，一鍵）"
+      },
+      {
+        "command": "codexautoai.start",
+        "title": "CodexAutoAI: 啟動新任務（輸入需求跑 pipeline）"
+      },
+      {
+        "command": "codexautoai.seedFromSpec",
+        "title": "CodexAutoAI: 啟動新任務：從 spec 開始（gs-spec-forge）"
       },
       {
         "command": "codexautoai.checkUpdate",
@@ -50,15 +129,6 @@
         "command": "codexautoai.abort",
         "title": "CodexAutoAI: 中止（下一個回合邊界停止）",
         "icon": "$(debug-stop)"
-      },
-      {
-        "command": "codexautoai.refreshProgress",
-        "title": "CodexAutoAI: 重整進度",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "codexautoai.showProgress",
-        "title": "CodexAutoAI: 顯示進度"
       }
     ],
     "configuration": {
@@ -83,30 +153,20 @@
           "type": "boolean",
           "default": true,
           "description": "執行「設定 / 修復」時，若偵測到 Claude / Codex / GitHub CLI 都已安裝並登入，就跳過、不開終端機重跑 setup。關閉則永遠開終端機執行完整 setup。"
+        },
+        "codexautoai.specForgeCmd": {
+          "type": "string",
+          "default": "spec-forge",
+          "description": "「從 spec 開始開發」呼叫的 gs-spec-forge CLI 指令（PATH 上的 spec-forge，或填絕對路徑的 python 入口）。需另裝 gs-spec-forge。"
         }
       }
-    },
-    "views": {
-      "explorer": [
-        {
-          "id": "codexautoaiProgress",
-          "name": "CodexAutoAI 進度",
-          "icon": "$(rocket)",
-          "visibility": "collapsed"
-        }
-      ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "codexautoai.refreshProgress",
-          "when": "view == codexautoaiProgress",
-          "group": "navigation@1"
-        },
-        {
           "command": "codexautoai.abort",
-          "when": "view == codexautoaiProgress",
-          "group": "navigation@2"
+          "when": "view == codexautoai.dashboardView",
+          "group": "navigation@1"
         }
       ]
     }

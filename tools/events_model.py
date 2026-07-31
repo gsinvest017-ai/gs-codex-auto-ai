@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -143,6 +144,57 @@ def summarize(events: list[dict]) -> dict:
     }
 
 
+def division_stats(events: list[dict]) -> dict:
+    """Claude 規劃 vs Codex 實作的分工證據（OBS-R2 的 llm_call / tool_call）。
+
+    語意**刻意與 `vscode-extension/dashboard.js` 的 `summarizeEvents` 逐項對齊**，
+    好讓 `tests/tools/test_dashboard_parity.py` 能機械化證明兩邊一致——控制台是
+    JS、progress/desktop 是 Python，沒有這道測試就只能靠人記得同步。
+
+    注意這裡的「當前 phase」與 :func:`summarize` 的 ``current`` **不同**，是故意的：
+
+    * `summarize` 的 ``current`` 取自任何帶 phase 的事件（要能在只有 loop_tick 時
+      仍顯示正確進度條）。
+    * 這裡的 ``reached5`` 只認 ``phase_start`` / ``phase_end``——「有沒有正式進入
+      Phase 5」是要拿來發分工警示的，寧可保守，不能因為一個 loop_tick 就誤報
+      「你只燒 Claude 沒用 Codex」。
+    """
+    claude = {"calls": 0, "in_tok": 0, "out_tok": 0}
+    codex = {"calls": 0}
+    codex_in_phase5 = 0
+    completed: set[int] = set()
+    current: int | None = None      # 只由 phase_start 設定（dashboard 語意）
+    cur_phase: int | None = None    # phase_start / phase_end 都更新
+
+    for ev in events:
+        etype = ev.get("event_type")
+        pnum = phase_num(ev.get("phase"))
+        if etype == "phase_start" and pnum is not None:
+            current = pnum
+            cur_phase = pnum
+        elif etype == "phase_end" and pnum is not None:
+            if ev.get("status") == "success":
+                completed.add(pnum)
+            cur_phase = pnum
+        elif etype == "llm_call":
+            claude["calls"] += 1
+            claude["in_tok"] += ev.get("gen_ai.usage.input_tokens") or 0
+            claude["out_tok"] += ev.get("gen_ai.usage.output_tokens") or 0
+        elif etype == "tool_call" and re.search(r"codex", str(ev.get("tool") or ""), re.I):
+            codex["calls"] += 1
+            if (pnum if pnum is not None else cur_phase) == 5:
+                codex_in_phase5 += 1
+
+    reached5 = (current is not None and current >= 5) or 5 in completed
+    return {
+        "claude": claude,
+        "codex": codex,
+        "codex_in_phase5": codex_in_phase5,
+        # 已進入/完成 phase5 卻沒有任何 codex 呼叫 → 疑似「只燒 Claude、沒用 Codex 實作」
+        "division_warning": bool(reached5 and codex_in_phase5 == 0),
+    }
+
+
 def _marker(summary: dict) -> int:
     """進度條位置：取「當前 phase」與「已完成最高 phase」較大者。
 
@@ -223,6 +275,7 @@ def build_model(events: list[dict], *, log_exists: bool) -> dict:
         "errors": errors,
         "last_event_ts": last_ts,
         "event_count": len(events),
+        **division_stats(scoped),
     }
 
 

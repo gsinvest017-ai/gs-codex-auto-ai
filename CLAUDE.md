@@ -27,7 +27,7 @@
 |-------|---------|------|
 | 0 | `/phase0-init` | 建立資料夾結構 |
 | 1 | `/codex-env-check` | 確認 Codex 環境可用 |
-| 2 | `/phase2-requirements` | 需求分析（唯一可暫停詢問的 Phase）|
+| 2 | `/phase2-requirements` | 需求分析（不確定處自行做合理假設並記入 spec，不暫停詢問）|
 | 3 | `/phase3-architecture` | 系統架構規劃與 function 拆解 |
 | 4 | `/phase4-review` | Codex 審查 + 中控複審（不通過則循環）|
 | 5 | `/phase5-build` | 並行開發所有 function |
@@ -36,16 +36,21 @@
 
 ## 調度原則
 
-- **自動推進**：Phase 2 待確認事項是唯一暫停理由
-- **簡短回報**：每 Phase 完成一句話回報，立即繼續
+- **自動推進（零詢問）**：pipeline 進行中**不可用 AskUserQuestion**（PreToolUse hook 會擋）——任何不確定處選「最保守、最符合需求規格」的選項，一行理由記到 `log/` 後直接繼續；Phase 2 的需求疑點寫成「假設」段落放進 spec
+- **簡短回報（≤1 行）**：每 Phase 完成回報恰好一行，立即繼續；**不重述規格、不貼 Codex 產出、不逐段解說**——Claude tokens 只花在調度與 gate，內容留給 Codex
 - **並行優先**：無依賴任務同時啟動多個 sub-agent
 - **批判性審查**：每階段產出必須審查後才進入下一階段
 - **完整日誌**：所有 agent 交握記錄到 `log/`（遵守 `log-writer.md`）
 - **最小權責**：不擅自擴充需求，不多做不少做
 - **進度可見**：每進入新 Phase，先印一行狀態給使用者，格式：
   `[CodexAutoAI] Phase N/7 ▓▓▓░░░░ {階段名}…`（完整視圖見 `tools/progress.py`）
-- **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
-- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 5（build）進行中**（`log/state.json` phase=phase5 且未 `phase5-end`）擋下 Claude 對 `src/` 的直接 `Edit/Write/MultiEdit`——src/ 實作一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他 phase / build 結束 / 非 src/ 不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
+- **非停模式（零 permission 卡停）**：`.claude/settings.json` 預設 `bypassPermissions` 且 **`ask` 清單為空**——無人值守下 ask=必卡死。可逆操作（`git commit`/`git push`）直接 allow；毀滅性操作（`reset --hard`/`clean`/`rm -rf`/deploy）改 **deny**（fail-fast，被擋時換安全做法而不是停等使用者）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
+- **Codex-first 硬分工（用量原則）**：Claude 只負責**最前期 high-level planning（Phase 0–2）與各 phase 的調度/gate 驗收**；**Phase 3 起所有「內容產出」一律 `codex exec --full-auto` 產生**——架構文件與 fn-manifest（P3）、審查報告（P4）、src/tests 實作（P5）、測試失敗的修復（P6）、交付文件（P7）。Claude 的驗收**只回 PASS/FAIL + 短理由**（≤10 行），不通過就把 findings 丟回 codex exec 修，**絕不自己改寫內容**。Why：Claude 額度貴且有限、Codex 額度大——重工作全搬 Codex。
+- **codex 一律經防掛外殼**：呼叫 Codex **不可**裸跑 `codex exec`，一律
+  `python tools/codex_runner.py --prompt "…" [--expect 產出檔…] [--model m]`——它以
+  stdin=DEVNULL 啟動（根治 openai/codex#20919 的沉默掛死），並以 session 心跳看門狗
+  判死自動重派（≤3 次）。builder 派工**序列優先**（並行時心跳歸屬只能近似）。
+- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 3–7 進行中**擋下 Claude 對 `src/`、`tests/`、`docs/` 的直接 `Edit/Write/MultiEdit`（白名單：`docs/requirements-spec.md` 屬 Phase 2 規劃產物）——內容一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他情境不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
 
 ## 生態定位（重要：決定什麼該進來、什麼不該）
 
@@ -101,15 +106,23 @@ PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直
 - 使用者入口：`.claude/skills/start/SKILL.md`（`/start`，唯一需使用者觸發的指令）
 - Agent 定義：`.claude/agents/`（dispatcher、requirements-analyst、architecture-planner、codex-reviewer、function-builder、test-runner、log-writer）
 - Skill 定義：`.claude/skills/`（各 Phase 詳細流程）
-- 進度視圖：**`tools/events_model.py` 是 `log/events.jsonl` 的唯一解析層（SSOT）**，
-  三個 UI 都吃它——`tools/progress.py`（終端機進度條）、`desktop/launcher.py` 的進度卡、
-  VS Code 的 `codexautoaiProgress` TreeView + 狀態列（`vscode-extension/progressView.js`
-  走 `python tools/events_model.py --json`）。**不要在任何 UI 裡重寫事件解析**，否則三邊
-  對「跑到哪」會有不同說法。另有 `/progress` skill 與 `tools/dispatch_hook.py`（共用
+- 進度視圖：**`tools/events_model.py` 是 `log/events.jsonl` 的正規解析定義**，
+  `tools/progress.py`（終端機進度條）與 `desktop/launcher.py` 的進度卡都吃它。
+  VS Code 端由 **`vscode-extension/dashboard.js` 的控制台 webview** 負責（活動列圖示進入），
+  它目前**自帶一份 JS 解析**（`summarizeEvents`）。兩份實作以
+  `tests/tools/test_dashboard_parity.py` **機械化證明等價**——任一邊改了語意就會紅。
+  新增欄位請先加在 `events_model.py`（含 `division_stats` 的分工證據），再同步 JS 側；
+  想徹底收斂就讓 dashboard 改吃 `python tools/events_model.py --json`，屆時可刪 parity 測試。
+  **不要再開第三份解析。** 另有 `/progress` skill 與 `tools/dispatch_hook.py`（共用
   UserPromptSubmit hook）在對話視窗同窗顯示進度、並讓 bare `/start`、`/progress` 零 LLM 即時回覆
 - 中止：UI 按「中止」＝寫 `log/abort.flag`，由 `tools/autopilot/cont.py` 的閥 4 在**回合邊界**
-  停下。它**殺不掉正在跑的 `codex exec`**，所以 UI 文案一律寫「下一個回合邊界停止」，
+  停下（desktop 進度卡的「■ 中止」鈕、VS Code 的 `codexautoai.abort` 指令）。
+  它**殺不掉正在跑的 `codex exec`**，所以 UI 文案一律寫「下一個回合邊界停止」，
   不得寫「立即中止」
+- 逾時 / 掛死：呼叫 Codex 一律走 `tools/codex_runner.py`（stdin=DEVNULL 根治
+  openai/codex#20919、session mtime 心跳看門狗、判死殺行程樹重派、`--expect` 驗產出），
+  **不要裸跑 `codex exec`**。`tools/run_loop.py` 的 `_run` 只負責它自己那層
+  （review/pytest 指令）的逾時與殺行程樹
 - 用量閘門：`tools/usage_gate.py`，設定在 `usage_gate.toml`（**本專案已啟用**，門檻 60%）。
   autopilot 續跑、`claude -p`、GitHub Actions 上的 claude-code-action（走
   `CLAUDE_CODE_OAUTH_TOKEN`）**都從同一份 Pro/Max 訂閱額度扣**——2026-06-15 原訂把

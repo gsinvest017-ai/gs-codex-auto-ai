@@ -14,15 +14,16 @@ description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求�
 
 等待回傳「審查報告」。
 
-## Step 2：中控複審（批判性思維）
+## Step 2：中控 gate 驗收（Codex-first：只回 PASS/FAIL，不重寫）
 
-收到審查報告後，Dispatcher **自行以批判性思維複審**：
+收到審查報告後，Dispatcher 做**輕量 gate**（≤10 行短評，禁止長篇複審、禁止改寫內容）：
 
 1. **不可以變多**：有沒有多餘 function 超出需求範圍？
 2. **不可以變少**：有沒有遺漏需求對應的 function？
-3. **Codex 審查結論是否合理**：有沒有遺漏或誤判？
-4. **介面設計是否合理**：參數與回傳值是否正確
-5. **檔案路徑**：是否都在 `src/` 下
+3. **檔案路徑**：是否都在 `src/` 下
+
+深入重審與所有修正**一律交 Step 3 的雙 Codex 迴圈**；Claude 不得自行 Edit/Write
+`docs/architecture.md`（PreToolUse hook 會擋）。
 
 ## 產出
 
@@ -37,8 +38,8 @@ description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求�
 ```bash
 python tools/run_loop.py --mode review --phase 4 --run-id <id> --max-iters 3 --patience 2 \
   --reviewer-model <模型A> --fixer-model <模型B> --available <A,B> \
-  --review-cmd 'codex exec -m <A> --full-auto "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把每個問題以 TYPE:ID 寫到 {review_out}（TYPE∈MISSING/EXTRA/MISMATCH，ID 用 FN 編號）。"' \
-  --fix-cmd 'codex exec -m <B> --full-auto "依 {review_out} 的問題清單修正 docs/architecture.md。"'
+  --review-cmd 'python tools/codex_runner.py --model <A> --prompt "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把每個問題以 TYPE:ID 寫到 {review_out}（TYPE∈MISSING/EXTRA/MISMATCH，ID 用 FN 編號）。"' \
+  --fix-cmd 'python tools/codex_runner.py --model <B> --prompt "依 {review_out} 的問題清單修正 docs/architecture.md。"'
 ```
 
 讀 stdout JSON `status`：`resolved*` → 通過 → **進入 Phase 5**；`escalated`/`error` → 升級終態通知使用者。
