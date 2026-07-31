@@ -25,6 +25,17 @@ run_loop.py — Stage 2：把有界 fix 迴圈交給 Python 的 Orchestrator 確
 輸出：stdout 印一行 RunResult JSON；exit 0=resolved/error(fail-safe)、3=escalated。
 憲章：永不 commit/push（C6）；Codex 輸出只當資料、regex 抽 id，永不 eval（C10）；
       時間戳由系統時鐘（C3）。
+
+三個可靠性保證（皆為預設行為，無需開關）：
+  1. **一律有逾時**（`--review-timeout` / `--fix-timeout`）。所有子行程都走 `_run`，
+     hang 住的 `codex exec` 不再無聲卡死整條 pipeline；review 逾時合成
+     `review:timeout` 缺陷，**絕不當成通過**。
+  2. **修復器失敗會進入下一輪 prompt**。Codex 非零 exit / 逾時時把 stderr 尾段併進
+     `{defects_file}`，並在 escalation reason 標記 `fixer_failed`——否則缺陷集完全
+     相同、no-progress 會把「Codex 沒跑起來」誤報成「測試修不動」。
+  3. **地端先試修**（`--local-fix-cmd` + `--max-local-attempts`，借鏡 gs-agent-router
+     的 escalate 分層）：前 N 輪走便宜的地端修復器，之後才升級雲端 Codex。外層迴圈的
+     review 就是 verifier，不多花一次驗證成本。
 """
 from __future__ import annotations
 
@@ -32,12 +43,104 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 _TOOL_ROOT = Path(__file__).resolve().parent.parent
+
+# 逾時預設值（秒）。Codex 修復比跑測試久得多，故給不同預設。
+DEFAULT_REVIEW_TIMEOUT = 900
+DEFAULT_FIX_TIMEOUT = 1800
+
+
+class Ran:
+    """一次子行程執行的結果（逾時不拋例外，改回傳 ``timed_out=True``）。
+
+    語意移植自 gs-common 的 ``gs_common.proc.run``；此處**重寫而非 import**，
+    因為 gs-common 是 private repo，而本框架是公開發行、且會被丟進使用者專案裡
+    直接跑，不能引入私有或第三方依賴（同 `desktop/launcher.py` 的純標準庫不變式）。
+
+    **刻意不用 `@dataclass`**：本檔會被 `importlib.util.module_from_spec` 之類的
+    載入器直接 exec（測試與被丟進他人專案時都是），那條路徑不會把模組註冊進
+    `sys.modules`，而 `dataclasses` 內部要靠 `sys.modules[cls.__module__]` 解析
+    型別註解，會炸 `AttributeError: 'NoneType' object has no attribute '__dict__'`。
+    手寫 `__init__` 對載入方式零假設。
+    """
+
+    def __init__(self, returncode: int, stdout: str, stderr: str,
+                 timed_out: bool = False) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timed_out = timed_out
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.timed_out
+
+    @property
+    def text(self) -> str:
+        return (self.stdout or "") + "\n" + (self.stderr or "")
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """殺掉整棵行程樹（**不只是直屬子行程**）。
+
+    `shell=True` 下 Python 的子行程是 shell，`codex` / `node` 是孫行程。
+    只殺 shell 會讓孫行程變孤兒**並繼續持有 stdout pipe**，於是後續的
+    `communicate()` 仍會阻塞到孫行程自己結束——逾時等於沒生效。
+    Windows 用 `taskkill /T`（整棵樹）、POSIX 用 process group signal。
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _run(cmd: str, cwd: str, timeout: int) -> Ran:
+    """跑一條 shell 指令並擷取輸出；**逾時不拋例外**，回傳 timed_out 結果。
+
+    這是本工具唯一的子行程入口——裸的 ``subprocess.run`` 沒有 timeout，
+    一個 hang 住的 `codex exec` 會無聲卡死整條 pipeline（沒有任何訊號）。
+    """
+    kwargs: dict = dict(shell=True, cwd=cwd, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True,
+                        encoding="utf-8", errors="replace")
+    if os.name != "nt":
+        # 自己開一個 process group，讓逾時能整組殺掉。
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return Ran(proc.returncode, out or "", err or "")
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            # 收殘餘輸出，但給有限寬限期，避免又卡在同一個 pipe 上。
+            out, err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        return Ran(-1, out or "", err or "", timed_out=True)
+
+
+def _as_text(stream: object) -> str:
+    """TimeoutExpired 的 stdout/stderr 可能是 bytes / str / None，統一成 str。"""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return str(stream)
 
 
 def _project_dir() -> Path:
@@ -130,8 +233,12 @@ def _subst(template: str, iteration: int, defects_file: str, review_out: str) ->
 # callable 工廠
 # ---------------------------------------------------------------------------
 def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
-                    defects_file, review_out, boxes, compile_cmd=None, fix_retries=1):
+                    defects_file, review_out, boxes, compile_cmd=None, fix_retries=1,
+                    review_timeout=DEFAULT_REVIEW_TIMEOUT,
+                    fix_timeout=DEFAULT_FIX_TIMEOUT,
+                    local_fix_cmd=None, max_local_attempts=0):
     cost_box, raw_box = boxes["cost"], boxes["raw"]
+    fixfail_box, fixerr_box, tier_box = boxes["fix_fail"], boxes["fix_err"], boxes["tiers"]
 
     def _grounding(compiled, test_out):
         # 延遲匯入 review.py，套用 REVIEW-R2 的 grounding / skip 規則。
@@ -143,26 +250,35 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
     def review(fix, iteration):
         # REVIEW-R2-S2：若有 compile 步驟且編譯失敗，跳過昂貴的 reviewer/測試，直接 fix。
         if compile_cmd:
-            cp = subprocess.run(_subst(compile_cmd, iteration, defects_file, review_out),
-                               shell=True, cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
-            if _grounding(cp.returncode == 0, (cp.stdout or "") + (cp.stderr or "")):
-                raw = (cp.stdout or "") + "\n" + (cp.stderr or "")
+            cp = _run(_subst(compile_cmd, iteration, defects_file, review_out),
+                      workdir, review_timeout)
+            if _grounding(cp.ok, cp.text):
+                raw = cp.text
+                if cp.timed_out:
+                    raw += f"\n[compile 逾時 {review_timeout}s，視為編譯失敗]"
                 _write(defects_file, raw); raw_box[0] = raw
                 orch.events.emit("loop_tick", phase=phase_label, iteration=iteration,
                                 cumulative_cost_usd=round(cost_box[0] / 1000.0, 6),
                                 status="in_progress")
                 return {"defects": ["compile:failed"], "tokens": 0}
         cmd = _subst(review_cmd, iteration, defects_file, review_out)
-        proc = subprocess.run(cmd, shell=True, cwd=workdir,
-                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = _run(cmd, workdir, review_timeout)
         if mode == "test":
             defects = parse_pytest_failures(proc.stdout, proc.stderr, proc.returncode)
-            raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            raw = proc.text
             tokens = 0
         else:
             defects = parse_issue_list(review_out)
             raw = _read(review_out)
             tokens = estimate_tokens(cmd, proc.stdout)
+        # review 逾時絕不能被當成「通過」——合成一個穩定缺陷讓迴圈繼續收斂。
+        if proc.timed_out:
+            defects = sorted(set(defects) | {"review:timeout"})
+            raw += f"\n[review 指令逾時 {review_timeout}s]"
+        # 上一輪 fixer 的失敗訊息要帶進 prompt 素材，否則 Codex 沒跑成功時
+        # 下一輪看到的缺陷完全相同、no-progress 會誤判成「測試修不動」。
+        if fixerr_box[0]:
+            raw += f"\n\n[上一輪修復器失敗，原始錯誤]\n{fixerr_box[0]}"
         # 把這一輪的原始輸出留給下一輪 produce_fix 當 prompt 素材（資料，不插指令）
         _write(defects_file, raw)
         raw_box[0] = raw
@@ -176,12 +292,31 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         # 迴圈是 fix→review；第 0 輪沒有前一輪 review，跳過讓 review 先建立缺陷集。
         if iteration == 0 or not raw_box[0].strip():
             return {"diff": "", "tokens": 0}
-        cmd = _subst(fix_cmd, iteration, defects_file, review_out)
-        # Codex CLI 薄 retry：非零 exit 先便宜地重試，再交給下一輪 review 判定。
+        # 地端先試修（借鏡 gs-agent-router 的 escalate 分層）：前 max_local_attempts
+        # 輪走便宜的地端修復器，之後才升級雲端 Codex。外層迴圈的 review 就是
+        # verifier，不需要巢狀驗證、不會多花一次測試成本。
+        use_local = bool(local_fix_cmd) and iteration <= max_local_attempts
+        tier = "local" if use_local else "cloud"
+        template = local_fix_cmd if use_local else fix_cmd
+        cmd = _subst(template, iteration, defects_file, review_out)
+
+        # 薄 retry：非零 exit / 逾時先便宜地重試，再交給下一輪 review 判定。
+        last = None
         for _ in range(max(1, fix_retries)):
-            p = subprocess.run(cmd, shell=True, cwd=workdir, capture_output=True, text=True, encoding="utf-8", errors="replace")
-            if p.returncode == 0:
+            last = _run(cmd, workdir, fix_timeout)
+            if last.ok:
                 break
+        tier_box.append(tier)
+        if last is not None and not last.ok:
+            fixfail_box[0] += 1
+            why = f"逾時 {fix_timeout}s" if last.timed_out else f"exit {last.returncode}"
+            # 只留尾段，避免把整份輸出灌進下一輪 prompt。
+            tail = (last.stderr or last.stdout or "").strip()[-2000:]
+            fixerr_box[0] = f"[{tier} 修復器{why}]\n{tail}"
+            orch.events.emit("tool_call", phase=phase_label, iteration=iteration,
+                            tool=f"fixer:{tier}", status="failure", reason=why)
+        else:
+            fixerr_box[0] = ""
         diff = _git_diff_stat(workdir)            # 唯讀，永不 commit（C6）
         tokens = estimate_tokens(cmd, raw_box[0])
         cost_box[0] += tokens
@@ -237,23 +372,41 @@ def run(args) -> dict:
     review_out = str(Path(tmp) / "review_out.txt")
     _write(defects_file, "")
     _write(review_out, "")
-    boxes = {"cost": [0.0], "raw": [""]}
+    boxes = {"cost": [0.0], "raw": [""], "fix_fail": [0], "fix_err": [""], "tiers": []}
 
+    # getattr 取值：`run()` 也被測試與其他呼叫端用手搭的 Namespace 驅動，
+    # 不強制它們補齊新旗標（缺省即沿用預設行為）。
     produce_fix, review = _make_callables(
         orch, args.mode, phase_label, workdir,
         args.review_cmd, args.fix_cmd, defects_file, review_out, boxes,
-        compile_cmd=args.compile_cmd, fix_retries=args.fix_retries)
+        compile_cmd=getattr(args, "compile_cmd", None),
+        fix_retries=getattr(args, "fix_retries", 1),
+        review_timeout=getattr(args, "review_timeout", DEFAULT_REVIEW_TIMEOUT),
+        fix_timeout=getattr(args, "fix_timeout", DEFAULT_FIX_TIMEOUT),
+        local_fix_cmd=getattr(args, "local_fix_cmd", None),
+        max_local_attempts=getattr(args, "max_local_attempts", 0))
 
     result = orch.run_fix_loop(
         produce_fix=produce_fix, review=review,
         max_iterations=args.max_iters, patience=args.patience,
         max_tokens=args.max_tokens, phase=phase_label)
 
+    fix_failures = boxes["fix_fail"][0]
+    reason = result.reason
+    # 守衛觸發時，區分「測試真的修不動」與「修復器根本沒跑成功」——後者是環境問題
+    # （額度耗盡 / 未登入 / sandbox 拒寫），報成 no_progress 會把人導向錯的地方。
+    if result.status == "escalated" and fix_failures and len(boxes["tiers"]) == fix_failures:
+        reason = f"fixer_failed（修復器 {fix_failures} 次全部失敗，非缺陷修不動）：{reason}"
+
     out = {"status": result.status, "iterations": result.iterations,
-           "reason": result.reason, "final_defects": result.final_defects}
+           "reason": reason, "final_defects": result.final_defects,
+           "fixer_failures": fix_failures,
+           "fixer_tiers": list(boxes["tiers"])}
+    if boxes["fix_err"][0]:
+        out["fixer_last_error"] = boxes["fix_err"][0][-500:]
     if result.status == "escalated":
         orch.events.emit("error", phase=phase_label,
-                        reason=result.reason or "escalated", status="escalated")
+                        reason=reason or "escalated", status="escalated")
     return out
 
 
@@ -276,11 +429,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--compile-cmd", default=None,
                     help="可選：先跑編譯/語法檢查；失敗則跳過 reviewer 直接 fix（REVIEW-R2-S2 省成本）")
     ap.add_argument("--fix-retries", type=int, default=1,
-                    help="fix-cmd 非零 exit 時的便宜 CLI 重試次數（預設 1）")
+                    help="fix-cmd 非零 exit / 逾時的便宜 CLI 重試次數（預設 1）")
+    ap.add_argument("--review-timeout", type=int, default=DEFAULT_REVIEW_TIMEOUT,
+                    help=f"review/compile 指令逾時秒數（預設 {DEFAULT_REVIEW_TIMEOUT}）；"
+                         "逾時視為缺陷而非通過")
+    ap.add_argument("--fix-timeout", type=int, default=DEFAULT_FIX_TIMEOUT,
+                    help=f"fix 指令逾時秒數（預設 {DEFAULT_FIX_TIMEOUT}）；"
+                         "hang 住的 codex exec 不再無聲卡死 pipeline")
+    ap.add_argument("--local-fix-cmd", default=None,
+                    help="可選：地端便宜修復器樣板（如接 Ollama/klaude）。前 "
+                         "--max-local-attempts 輪走這個，之後才升級雲端 --fix-cmd")
+    ap.add_argument("--max-local-attempts", type=int, default=0,
+                    help="地端先試修的輪數（預設 0=關閉）。**必須小於 --max-iters**，"
+                         "否則雲端修復器永遠不會被呼叫")
     ap.add_argument("--reviewer-model")
     ap.add_argument("--fixer-model")
     ap.add_argument("--available")
     args = ap.parse_args(argv)
+
+    # 地端輪數吃掉全部迭代 → 雲端永遠輪不到，等於默默關掉升級路徑。明確警告。
+    if args.local_fix_cmd and args.max_local_attempts >= args.max_iters:
+        print(f"[run_loop] 警告：--max-local-attempts={args.max_local_attempts} >= "
+              f"--max-iters={args.max_iters}，雲端 --fix-cmd 永遠不會被呼叫。",
+              file=sys.stderr)
 
     try:
         out = run(args)
