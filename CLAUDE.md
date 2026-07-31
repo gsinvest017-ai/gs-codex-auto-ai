@@ -47,6 +47,43 @@
 - **非停模式**：`.claude/settings.json` 預設 `bypassPermissions`（一般工具不問權限）；commit/push/刪除等不可逆操作走 `ask` 仍會停（C6）。`/autopilot on` 會用 Stop hook（`tools/autopilot/cont.py`）連回合都不停、per-session 獨立（見 `.claude/skills/autopilot/SKILL.md`）。
 - **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 5（build）進行中**（`log/state.json` phase=phase5 且未 `phase5-end`）擋下 Claude 對 `src/` 的直接 `Edit/Write/MultiEdit`——src/ 實作一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他 phase / build 結束 / 非 src/ 不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
 
+## 生態定位（重要：決定什麼該進來、什麼不該）
+
+本 repo 在 gsinvest017-ai 的 agentic 工具生態裡是 **`gs-conductor` 的 implement / release 節點**，
+**不是第二個 control plane**。`gs-conductor` 已經是「把散落在各 repo 的 agent 工具串成
+research → plan → implement → test → CICD → release 迴圈」的總指揮，且已把本 repo 列為
+release/deploy 階段要 reuse 的元件。跨 repo 的編排歸它，本 repo 只負責「一句需求 → 七階段
+把東西做出來」。
+
+因此：
+
+- **不要**把其他 repo 的能力整批搬進來當總整合器（會與 gs-conductor 撞位）。
+- 只吸收「直接補本 repo 自己缺口」的東西，且**移植而非依賴**——見下。
+
+### 為什麼是移植（vendor）而不是 `pip install`
+
+本 repo 是 **public 且公開發行**（desktop App + `.vsix`，發行鏡像 `gs-codex-auto-ai-releases`
+刻意做成 public 讓「免 token 人人可用」），而 `gs-common` / `gs-harness` / `gs-agent-router`
+**都是 private**。硬依賴會讓公開使用者裝不起來、也讓框架沒法「丟進任何專案就跑」。
+所以一律**重寫成純標準庫**並在 docstring 註明出處，方便日後對照上游：
+
+| 本 repo 的檔案 | 移植來源 | 補的缺口 |
+|---|---|---|
+| `tools/run_loop.py` 的 `_run` / `Ran` | `gs_common.proc.run` | 子行程一律有逾時、逾時不拋例外 |
+| `tools/run_loop.py` 的地端先試修分層 | `gs_agent_router.escalate` | 前 N 輪走便宜地端修復器才升級雲端 |
+| `tools/usage_gate.py` | `harness.usage` | autopilot 不跟使用者搶 token 額度 |
+| `.github/workflows/{claude-fix,claude-review,auto-merge}.yml` + ci.yml 的 `open-issue-on-failure` | `gs-harness templates/github-workflows`（即 gs-auto-fix 四段式） | CI 紅燈 → 自動修 → PR → review → merge |
+
+移植時**允許改預設值**，但必須在 docstring 寫清楚哪裡不同與為什麼
+（例：`usage_gate.py` 相對 harness 改成預設關閉 + fail-open，因為 autopilot 是使用者
+自己按下去的互動情境，沿用 harness 的 fail-closed 會讓它直接不能用）。
+
+### 純標準庫不變式
+
+`desktop/`、`tools/`、`src/codexautoai_v2/` 一律**只用標準庫**。這不是風格偏好：框架會被
+PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直接跑。新增第三方或私有依賴
+前先問「公開使用者裝得起來嗎、凍結後還在嗎」。
+
 ## 開發此框架的工作慣例（維護者 / Claude 自身改動）
 
 **對本 repo 自身的修改（框架碼、工具、文件、設定——非使用者專案產出），預設走 dev worktree 驗證再 merge，不直接動 `main`。** 尤其同時有其他 worktree 在跑別的任務時，直接改 `main` 會干擾它們。
@@ -64,6 +101,15 @@
 - 使用者入口：`.claude/skills/start/SKILL.md`（`/start`，唯一需使用者觸發的指令）
 - Agent 定義：`.claude/agents/`（dispatcher、requirements-analyst、architecture-planner、codex-reviewer、function-builder、test-runner、log-writer）
 - Skill 定義：`.claude/skills/`（各 Phase 詳細流程）
-- 進度視圖：`tools/progress.py`（讀 `log/events.jsonl` 印進度條）；另有 `/progress` skill 與 `tools/dispatch_hook.py`（共用 UserPromptSubmit hook）在對話視窗同窗顯示進度、並讓 bare `/start`、`/progress` 零 LLM 即時回覆
+- 進度視圖：**`tools/events_model.py` 是 `log/events.jsonl` 的唯一解析層（SSOT）**，
+  三個 UI 都吃它——`tools/progress.py`（終端機進度條）、`desktop/launcher.py` 的進度卡、
+  VS Code 的 `codexautoaiProgress` TreeView + 狀態列（`vscode-extension/progressView.js`
+  走 `python tools/events_model.py --json`）。**不要在任何 UI 裡重寫事件解析**，否則三邊
+  對「跑到哪」會有不同說法。另有 `/progress` skill 與 `tools/dispatch_hook.py`（共用
+  UserPromptSubmit hook）在對話視窗同窗顯示進度、並讓 bare `/start`、`/progress` 零 LLM 即時回覆
+- 中止：UI 按「中止」＝寫 `log/abort.flag`，由 `tools/autopilot/cont.py` 的閥 4 在**回合邊界**
+  停下。它**殺不掉正在跑的 `codex exec`**，所以 UI 文案一律寫「下一個回合邊界停止」，
+  不得寫「立即中止」
+- 用量閘門：`tools/usage_gate.py`（預設關閉；`CODEXAUTOAI_USAGE_GATE=1` 啟用）
 - 日誌格式：時間戳由系統時鐘（`clock.now_iso()` 或 shell `date`）產生，**禁止 LLM 自填**；命名 `{system-timestamp}-{phase}-{描述}.md`（見 `log-writer.md` OBS-R1）
 - 指令同步：只改本檔（SSOT）；`AGENTS.md`（供 Codex 讀取）由 `.githooks/pre-commit` 於 commit 時自動重生，不手動編輯（一次性安裝 `python tools/install_hooks.py`）
