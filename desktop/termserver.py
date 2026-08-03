@@ -233,6 +233,10 @@ class _Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
                 return False
 
+        # 這條串流的世代。EventSource 斷線會自動重連，舊迴圈可能還沒退出；
+        # 兩個 handler 同時 pump 會把輸出切成兩半，所以舊的看到世代變了就結束。
+        my_gen = sess.new_stream()
+
         # 先重播既有畫面，再接即時串流——否則切分頁／重新整理會看到一片空白。
         replay = sess.replay()
         if replay and not emit("data", {"b64": _b64(replay)}):
@@ -240,6 +244,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         last_beat = time.time()
         while not self.server.stopping.is_set():           # type: ignore[attr-defined]
+            if sess.stream_gen != my_gen:                  # 有更新的串流接手了
+                return
             chunk = sess.pump()
             if chunk:
                 if not emit("data", {"b64": _b64(chunk)}):

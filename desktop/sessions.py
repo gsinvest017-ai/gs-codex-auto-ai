@@ -87,6 +87,10 @@ class Session:
         self._pty = pty
         self._buf = bytearray()
         self._lock = threading.Lock()
+        # 目前有效的串流世代。EventSource 斷線會自動重連，舊的串流迴圈可能還在跑；
+        # 兩個 handler 同時 pump 同一個 session 會把輸出切成兩半（畫面看起來像壞掉）。
+        # 新串流進來就 +1，舊的看到世代變了就自己退出。
+        self.stream_gen = 0
 
     # -- 輸出 ---------------------------------------------------------------
     def pump(self) -> bytes:
@@ -99,6 +103,12 @@ class Session:
                     # 從尾端保留：使用者要看的是最近的畫面，不是最早的。
                     del self._buf[:len(self._buf) - REPLAY_LIMIT]
         return chunk
+
+    def new_stream(self) -> int:
+        """宣告一條新串流；回傳它的世代編號（舊串流看到編號變了就該退出）。"""
+        with self._lock:
+            self.stream_gen += 1
+            return self.stream_gen
 
     def replay(self) -> bytes:
         """目前緩衝的全部內容（前端剛連上時先送這個）。"""
@@ -138,6 +148,7 @@ class SessionManager:
         self.default_cwd = default_cwd or os.getcwd()
         self.max_sessions = max_sessions
         self._sessions: dict[str, Session] = {}
+        self._pending = 0          # 已通過上限檢查、但 spawn 還沒完成的佔位數
         self._lock = threading.RLock()
 
     # -- 建立 ---------------------------------------------------------------
@@ -147,22 +158,32 @@ class SessionManager:
         spec = KINDS.get(kind)
         if spec is None:
             raise UnknownKind(f"未知的 session 種類：{kind!r}（可用：{', '.join(KINDS)}）")
-        with self._lock:
-            live = [s for s in self._sessions.values() if s.alive]
-            if len(live) >= self.max_sessions:
-                raise RuntimeError(f"同時開啟的 session 已達上限 {self.max_sessions}")
         if not spec.available():
             raise FileNotFoundError(
                 f"找不到 {spec.argv[0]}——請先在 App 按「設定 / 修復」安裝並登入。")
 
-        argv = spec.build_argv(prompt)
-        pty = conpty.PtySession.spawn(argv, cwd=cwd or self.default_cwd,
-                                      cols=cols, rows=rows)
-        sid = f"s{next(_ids)}"
-        sess = Session(sid, spec, title or spec.label, pty, cwd or self.default_cwd)
+        # **檢查與佔位必須是同一個原子操作**：spawn() 很慢，若檢查完就放掉鎖，
+        # 併發的建立請求會全部通過上限檢查（服務是 ThreadingHTTPServer，這條路
+        # 真的到得了），生出比 max_sessions 更多的實際行程。上限是防資源耗盡的
+        # 守衛之一，破了就等於沒有。用 _pending 計數在鎖內先佔位，spawn 完再補實體。
         with self._lock:
-            self._sessions[sid] = sess
-        return sess
+            live = sum(1 for s in self._sessions.values() if s.alive)
+            if live + self._pending >= self.max_sessions:
+                raise RuntimeError(f"同時開啟的 session 已達上限 {self.max_sessions}")
+            self._pending += 1
+
+        try:
+            argv = spec.build_argv(prompt)
+            pty = conpty.PtySession.spawn(argv, cwd=cwd or self.default_cwd,
+                                          cols=cols, rows=rows)
+            sid = f"s{next(_ids)}"
+            sess = Session(sid, spec, title or spec.label, pty, cwd or self.default_cwd)
+            with self._lock:
+                self._sessions[sid] = sess
+            return sess
+        finally:
+            with self._lock:
+                self._pending -= 1
 
     # -- 查詢 ---------------------------------------------------------------
     def get(self, sid: str) -> Optional[Session]:

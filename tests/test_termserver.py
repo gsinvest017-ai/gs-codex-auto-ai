@@ -261,3 +261,53 @@ class TestStatic:
             body = f.read()
         assert f.status == 200
         assert needle in body
+
+
+# ── 併發（review #45 抓到的 TOCTOU）──────────────────────────────────────────
+class TestConcurrency:
+    def test_max_sessions_holds_under_concurrent_create(self, monkeypatch, tmp_path):
+        """上限檢查與佔位必須原子化。
+
+        原本檢查在鎖裡、spawn 在鎖外，併發請求會全部通過檢查，生出比上限更多的
+        實際行程。服務是 ThreadingHTTPServer，這條路真的到得了；上限是防資源
+        耗盡的守衛，破了等於沒有。
+        """
+        import threading
+        kind = sessions_mod.SessionKind("test", "測試", LONG_LIVED)
+        monkeypatch.setitem(sessions_mod.KINDS, "test", kind)
+        cap = 3
+        mgr = sessions_mod.SessionManager(default_cwd=str(tmp_path), max_sessions=cap)
+        made, errors = [], []
+        start = threading.Event()
+
+        def worker():
+            start.wait()
+            try:
+                made.append(mgr.create("test"))
+            except RuntimeError:
+                errors.append(1)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(12)]
+        for t in threads:
+            t.start()
+        start.set()                      # 一起衝，最大化競態機會
+        for t in threads:
+            t.join(timeout=30)
+        try:
+            assert len(made) <= cap, f"生出 {len(made)} 個 session，超過上限 {cap}"
+            assert len(made) + len(errors) == 12
+            assert all(e == 1 for e in errors), f"出現非預期例外：{errors}"
+        finally:
+            mgr.close_all()
+
+    def test_newer_stream_supersedes_older(self, server):
+        """EventSource 斷線重連時，舊串流迴圈要退出，否則兩個 handler 會把輸出切兩半。"""
+        srv, mgr = server
+        sid = call(srv, "/api/sessions", {"kind": "test"})[1]["id"]
+        sess = mgr.get(sid)
+        g1 = sess.new_stream()
+        g2 = sess.new_stream()
+        assert g2 > g1
+        assert sess.stream_gen == g2      # 舊的 g1 會看到不相等而自行結束
