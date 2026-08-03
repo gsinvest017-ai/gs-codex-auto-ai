@@ -591,8 +591,13 @@ def _quote_for_batch(arg: str) -> str:
     注入。而唯一能脫出的字元就是 `"` 本身——cmd 上不存在能安全表示它的引用方式
     （`launcher._safe_prompt` 的註解已經記過同一件事），所以直接換成單引號。
     需求是自由文字，掉一個引號遠比讓它變成可執行的命令好。
+
+    `%` 也要處理：**cmd 的 `%VAR%` 展開發生在引號之內**，加引號擋不住它。留著的話
+    含 `%PATH%` 的需求會被換成環境變數的值再交給 CLI（是資料被竄改／外洩，不是
+    命令注入）。轉成全形 `％` 保住 prose 的語意——`launcher._META_MAP` 對同一個字元
+    也是這樣處理的，兩條路的取捨保持一致。
     """
-    return '"' + arg.replace('"', "'") + '"'
+    return '"' + arg.replace('"', "'").replace("%", "％") + '"'
 
 
 def build_cmdline(argv: list[str]) -> str:

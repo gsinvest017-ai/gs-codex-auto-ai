@@ -321,6 +321,12 @@ class TestBatchArgumentInjection:
         """`"` 是唯一能脫出引號的字元，cmd 上沒有能安全表示它的引用方式。"""
         assert '"' not in conpty._quote_for_batch('a" & calc & "b')[1:-1]
 
+    def test_batch_target_neutralises_percent(self):
+        """`%VAR%` 展開發生在**引號之內**，加引號擋不住——留著的話含 `%PATH%` 的
+        需求會被換成環境變數的值再交給 CLI。"""
+        out = conpty._quote_for_batch("報表 %PATH% 完成")
+        assert "%" not in out and "％" in out
+
     def test_native_exe_keeps_msvcrt_quoting(self):
         """原生 exe 不經 cmd，需求字串要能原樣送達，不該被多改一個字。"""
         line = conpty.build_cmdline([r"C:\x\claude.exe", "價格 $100 & 交期 <7 天"])
