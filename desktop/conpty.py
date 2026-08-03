@@ -237,7 +237,7 @@ class PtySession:
                 "這台機器開不了 PTY（Windows 需 10 1809 以上）。")
         self = cls()
         if IS_WIN:
-            self._spawn_windows(resolve_argv(argv), cwd, env, cols, rows)
+            self._spawn_windows(resolve_argv(argv, env), cwd, env, cols, rows)
         else:
             self._spawn_posix(argv, cwd, env, cols, rows)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -547,15 +547,14 @@ def which(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
-def resolve_argv(argv: list[str]) -> list[str]:
+def resolve_argv(argv: list[str], env: Optional[dict] = None) -> list[str]:
     r"""把 `argv[0]` 解析成完整路徑。**Windows 上這是必要的，不是最佳化。**
 
     `CreateProcessW`（`lpApplicationName=NULL`）和 shell 用的是兩套不同的規則：
     名稱沒有副檔名時它**只會補 `.exe`**，完全不看 `PATHEXT`。而 `claude` / `codex`
     用 npm 裝出來的是 `claude.cmd` / `codex.ps1` 這種蓋子，於是
 
-        shutil.which("codex")  → C:\...
-pm\codex.CMD   （kind 判定為「已安裝」）
+        shutil.which("codex")  → C:/Users/…/npm/codex.CMD  （kind 判定為「已安裝」）
         CreateProcessW("codex …") → ERROR_FILE_NOT_FOUND（WinError 2）
 
     ——可用性檢查說有、真的要開卻說找不到。改成先解析完整路徑，兩邊就用同一套
@@ -564,10 +563,15 @@ pm\codex.CMD   （kind 判定為「已安裝」）
 
     找不到就原樣傳回去，讓 `CreateProcessW` 自己報錯——這裡不該多發明一種錯誤訊息。
     POSIX 走 `execvpe`，它本來就會查 PATH，不需要這層。
+
+    帶了 `env` 就用**那份** PATH 解析。目前沒有呼叫端會傳自訂 PATH，
+    但若沒這層，一旦有人傳了就會變成「拿父行程的 PATH 找、用子行程的 PATH 跑」
+    ——兩邊默默不一致，而這種不一致最難查。
     """
     if not argv:
         return argv
-    found = which(argv[0])
+    path = env.get("PATH") if env else None
+    found = which(argv[0]) if path is None else shutil.which(argv[0], path=path)
     return [found, *argv[1:]] if found else list(argv)
 
 

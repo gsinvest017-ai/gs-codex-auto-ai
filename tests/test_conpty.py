@@ -228,6 +228,27 @@ class TestPathextShims:
         assert Path(out[0]) == shim, f"沒解析成完整路徑：{out[0]}"
         assert out[1:] == ["--flag", "帶空白的 引數"], "後面的引數不能被動到"
 
+    def test_custom_env_path_is_used_for_resolution(self, monkeypatch, tmp_path):
+        """帶了 `env` 就要用**那份** PATH 解析。
+
+        否則會變成「拿父行程的 PATH 找、用子行程的 PATH 跑」——兩邊默默指向不同
+        的執行檔，而這種不一致最難查。
+        """
+        theirs = tmp_path / "theirs"
+        theirs.mkdir()
+        shim = theirs / ("only-here.cmd" if IS_WIN else "only-here")
+        shim.write_text("@echo off\n" if IS_WIN else "#!/bin/sh\n", encoding="utf-8")
+        if not IS_WIN:
+            shim.chmod(0o755)
+        # 父行程的 PATH 裡**沒有**這個東西
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        if IS_WIN:
+            monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+        assert conpty.resolve_argv(["only-here"]) == ["only-here"], "父 PATH 不該找得到"
+        out = conpty.resolve_argv(["only-here"], {"PATH": str(theirs)})
+        assert Path(out[0]) == shim, f"沒有用 env 的 PATH 解析：{out[0]}"
+
     def test_unknown_command_passes_through(self):
         """找不到就原樣傳回去，讓 CreateProcessW 自己報錯，不要多發明一種訊息。"""
         assert conpty.resolve_argv(["絕對不存在的指令-xyz"]) == ["絕對不存在的指令-xyz"]
