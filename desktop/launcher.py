@@ -115,8 +115,12 @@ class EmbeddedTerminal:
              shell=None) -> str:
         """開啟（或聚焦）終端機；可順便先建一個 session。回傳 URL。
 
-        `shell(url) -> bool` 是「把頁面顯示在 App 視窗內」的實作（由 UI 層提供）。
+        `shell(open_url) -> bool` 是「把頁面顯示在 App 視窗內」的實作（由 UI 層提供）。
         回 False 或沒提供，就退回 `_show()`（pywebview 原生視窗 → 瀏覽器分頁）。
+
+        傳給它的是**取得 URL 的函式**而不是 URL 本身：每叫一次就發一張新的
+        handoff 券，而 shell 有可能根本不需要導頁（面板已經嵌著、只是重新展開）。
+        先算好就等於白發一張券。
         """
         srv = self._ensure()
         if kind:
@@ -128,7 +132,7 @@ class EmbeddedTerminal:
         # Windows 上同機任何帳號都讀得到，token 放上去等於公開。見 termserver 說明。
         if shell is not None:
             try:
-                if shell(srv.handoff_url):
+                if shell(lambda: srv.handoff_url):
                     return srv.url
             except Exception:  # noqa: BLE001 — 內嵌只是體驗升級，壞了就走舊路
                 pass
@@ -584,7 +588,7 @@ class LauncherUI:
         # 之後就是幾十個指向已關閉物件的 callback，App 活多久就漲多久。
         TERMINAL.add_closer(self._close_embed)
 
-    def show_terminal_pane(self, url: str) -> bool:
+    def show_terminal_pane(self, open_url) -> bool:
         """把終端機頁面嵌進右欄。回 False 代表這台機器嵌不了，呼叫端自行退回瀏覽器。
 
         **必須擋重入**：`attach()` 會等瀏覽器視窗出現（最多 ~25 秒），期間靠
@@ -613,7 +617,7 @@ class LauncherUI:
             self.status.config(text="正在開啟內嵌終端機…", fg=GOLD)
             self.root.update()             # 先讓 frame 有真正的尺寸與 HWND
             emb = winembed.EmbeddedBrowser()
-            okd = emb.attach(self.term_host.winfo_id(), url,
+            okd = emb.attach(self.term_host.winfo_id(), open_url(),
                              width=max(self.term_host.winfo_width(), 600),
                              height=max(self.term_host.winfo_height(), 400),
                              pump=self.root.update)

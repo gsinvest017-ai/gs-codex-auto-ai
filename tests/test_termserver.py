@@ -393,3 +393,18 @@ class TestHandoff:
         srv, _ = server
         code, _ = call(srv, "/api/sessions", {"kind": "test"}, token="wrong")
         assert code == 403
+
+    def test_overflow_evicts_oldest_not_everything(self, server):
+        """滿了要淘汰**最舊的**，不能整包清掉。
+
+        整包清會把「剛發出去、頁面正要拿來用」的那張也作廢，使用者就會看到一個
+        連不上服務的終端機。要驗出差別得看**中間**那張：溢位一格時，淘汰最舊的
+        會留下它，整包清則只剩最後一張。
+        """
+        srv, _ = server
+        oldest = srv.new_handoff()                     # #1
+        second = srv.new_handoff()                     # #2
+        rest = [srv.new_handoff() for _ in range(srv.MAX_HANDOFFS - 1)]   # #3..#33
+        assert srv.token not in self._page(srv, f"?handoff={oldest}")[1],             "溢位一格，最舊的應被淘汰"
+        assert srv.token in self._page(srv, f"?handoff={second}")[1],             "只溢位一格，第二張不該被牽連（整包清掉才會）"
+        assert srv.token in self._page(srv, f"?handoff={rest[-1]}")[1]

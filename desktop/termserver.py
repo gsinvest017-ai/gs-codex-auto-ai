@@ -42,6 +42,7 @@ import secrets
 import sys
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -324,7 +325,7 @@ class TerminalServer:
         self._httpd.token = self.token         # type: ignore[attr-defined]
         # 用過即丟的入口券。每次「開啟終端機」發一張新的，所以就算某次開啟失敗，
         # 下一次也不會拿到已經作廢的券。上限只是防呆（沒人會連按 32 次）。
-        self._handoffs: set[str] = set()
+        self._handoffs: deque = deque(maxlen=self.MAX_HANDOFFS)
         self._handoff_lock = threading.Lock()
         self._httpd.consume_handoff = self._consume_handoff  # type: ignore[attr-defined]
         self._httpd.stopping = threading.Event()  # type: ignore[attr-defined]
@@ -335,15 +336,15 @@ class TerminalServer:
     def port(self) -> int:
         return self._httpd.server_address[1]
 
+    # 上限只是防呆。**淘汰最舊的、不要整包清掉**：整包清會把「剛發出去、頁面
+    # 正要拿來用」的那張也作廢，使用者就會看到一個連不上服務的終端機。
     MAX_HANDOFFS = 32
 
     def new_handoff(self) -> str:
         """發一張用過即丟的入口券。**要把 URL 交給外部行程時一律用這個**。"""
         nonce = secrets.token_urlsafe(16)
         with self._handoff_lock:
-            if len(self._handoffs) >= self.MAX_HANDOFFS:
-                self._handoffs.clear()
-            self._handoffs.add(nonce)
+            self._handoffs.append(nonce)   # deque(maxlen=…) 會自己淘汰最舊的
         return nonce
 
     def _consume_handoff(self, nonce: str) -> bool:
@@ -351,7 +352,7 @@ class TerminalServer:
             for known in self._handoffs:
                 # compare_digest：別讓比對時間洩漏 nonce 前綴
                 if secrets.compare_digest(known, nonce):
-                    self._handoffs.discard(known)
+                    self._handoffs.remove(known)
                     return True
         return False
 
