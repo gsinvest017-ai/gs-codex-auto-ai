@@ -249,6 +249,26 @@ class TestPathextShims:
         out = conpty.resolve_argv(["only-here"], {"PATH": str(theirs)})
         assert Path(out[0]) == shim, f"沒有用 env 的 PATH 解析：{out[0]}"
 
+    @pytest.mark.parametrize("key", ["PATH", "Path", "path"])
+    def test_env_path_key_is_case_insensitive(self, monkeypatch, tmp_path, key):
+        """Windows 的環境變數名不分大小寫，手工組的 env 寫成 `Path` 也合法。
+
+        只認 `PATH` 的話會**默默**退回父行程的 PATH 去解析——沒有錯誤訊息，
+        只是找到了另一個執行檔。
+        """
+        theirs = tmp_path / "theirs"
+        theirs.mkdir()
+        shim = theirs / ("only-here.cmd" if IS_WIN else "only-here")
+        shim.write_text("@echo off\n" if IS_WIN else "#!/bin/sh\n", encoding="utf-8")
+        if not IS_WIN:
+            shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        if IS_WIN:
+            monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+        out = conpty.resolve_argv(["only-here"], {key: str(theirs)})
+        assert Path(out[0]) == shim, f"env 的 {key} 沒被認出來：{out[0]}"
+
     def test_unknown_command_passes_through(self):
         """找不到就原樣傳回去，讓 CreateProcessW 自己報錯，不要多發明一種訊息。"""
         assert conpty.resolve_argv(["絕對不存在的指令-xyz"]) == ["絕對不存在的指令-xyz"]

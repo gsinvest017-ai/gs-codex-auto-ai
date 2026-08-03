@@ -570,9 +570,24 @@ def resolve_argv(argv: list[str], env: Optional[dict] = None) -> list[str]:
     """
     if not argv:
         return argv
-    path = env.get("PATH") if env else None
+    path = _env_path(env)
     found = which(argv[0]) if path is None else shutil.which(argv[0], path=path)
     return [found, *argv[1:]] if found else list(argv)
+
+
+def _env_path(env: Optional[dict]) -> Optional[str]:
+    """從 env 取 PATH。**大小寫不敏感**——Windows 的環境變數名本來就不分大小寫。
+
+    `dict(os.environ)` 在 Windows 上鍵會是大寫的 `PATH`，所以常見情況直接命中；
+    但手工組出來的 env 寫成 `Path` 也完全合法，那時若只認 `PATH` 就會**默默**退回
+    父行程的 PATH 去解析——沒有錯誤訊息，只是找到了另一個執行檔。
+    """
+    if not env:
+        return None
+    for k, v in env.items():
+        if isinstance(k, str) and k.upper() == "PATH":
+            return v
+    return None
 
 
 if __name__ == "__main__":   # 手動煙霧測試：python desktop/conpty.py
