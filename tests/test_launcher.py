@@ -165,3 +165,104 @@ def test_js_and_python_sanitisers_agree(tmp_path):
     js = json.loads(proc.stdout)
     py = [launcher._safe_prompt(c) for c in CASES]
     assert js == py, f"兩邊規則漂移了：\njs={js}\npy={py}"
+
+
+# ── 內嵌終端機的調度分支 ─────────────────────────────────────────────────────
+class _FakeSrv:
+    """假的 TerminalServer：只要能發 handoff 與回 url 就夠了。"""
+
+    def __init__(self):
+        self.handoff_calls = 0
+        self.url = "http://127.0.0.1:1/?token=REAL"
+
+    @property
+    def handoff_url(self):
+        self.handoff_calls += 1
+        return f"http://127.0.0.1:1/?handoff=N{self.handoff_calls}"
+
+
+def _term(monkeypatch, srv):
+    """一個接上假 server 的 EmbeddedTerminal（不起真的服務、不生行程）。"""
+    t = launcher.EmbeddedTerminal()
+    monkeypatch.setattr(t, "_ensure", lambda: srv)
+    shown = []
+    monkeypatch.setattr(t, "_show", lambda url: shown.append(url))
+    return t, shown
+
+
+class TestEmbeddedTerminalDispatch:
+    """`open()` 的 shell 分支。**真 token 不能外流到會變成命令列參數的地方**，
+    而「內嵌成功了還是又開了一個瀏覽器」則是使用者一眼就看得出來的行為差異。"""
+
+    def test_successful_shell_does_not_also_open_a_window(self, monkeypatch):
+        srv = _FakeSrv()
+        term, shown = _term(monkeypatch, srv)
+        term.open(shell=lambda open_url: True)
+        assert shown == [], "內嵌成功了還去開獨立視窗＝使用者會看到兩個終端機"
+
+    def test_shell_returning_false_falls_back_to_a_window(self, monkeypatch):
+        srv = _FakeSrv()
+        term, shown = _term(monkeypatch, srv)
+        term.open(shell=lambda open_url: False)
+        assert len(shown) == 1
+
+    def test_shell_blowing_up_still_falls_back(self, monkeypatch):
+        """內嵌只是體驗升級——它壞掉不該讓使用者完全開不了終端機。"""
+        srv = _FakeSrv()
+        term, shown = _term(monkeypatch, srv)
+
+        def boom(open_url):
+            raise RuntimeError("內嵌炸了")
+
+        term.open(shell=boom)
+        assert len(shown) == 1
+
+    def test_window_fallback_never_gets_the_real_token(self, monkeypatch):
+        """`_show()` 的兩條路（pywebview / webbrowser）都可能變成另一個行程的
+        命令列參數，所以它拿到的必須是 handoff 券而不是 token。"""
+        srv = _FakeSrv()
+        term, shown = _term(monkeypatch, srv)
+        term.open()
+        assert "token=REAL" not in shown[0]
+        assert "handoff=" in shown[0]
+
+    def test_handoff_is_minted_lazily(self, monkeypatch):
+        """shell 沒去要 URL（面板已經嵌著、只是重新展開）就不該白發一張券。"""
+        srv = _FakeSrv()
+        term, _ = _term(monkeypatch, srv)
+        term.open(shell=lambda open_url: True)          # 不呼叫 open_url
+        assert srv.handoff_calls == 0
+        term.open(shell=lambda open_url: bool(open_url()))
+        assert srv.handoff_calls == 1
+
+
+class TestShutdownReaping:
+    """關 App 一定要收乾淨——這個 repo 在 pty 那邊已經為孤兒行程吃過苦頭。"""
+
+    def test_shutdown_runs_registered_closers(self, monkeypatch):
+        term, _ = _term(monkeypatch, _FakeSrv())
+        calls = []
+        term.add_closer(lambda: calls.append("closed"))
+        term.shutdown()
+        assert calls == ["closed"]
+
+    def test_one_closer_blowing_up_does_not_skip_the_others(self, monkeypatch):
+        term, _ = _term(monkeypatch, _FakeSrv())
+        calls = []
+
+        def boom():
+            raise RuntimeError("收尾炸了")
+
+        term.add_closer(boom)
+        term.add_closer(lambda: calls.append("second"))
+        term.shutdown()
+        assert calls == ["second"], "第一個收尾失敗就漏掉後面的＝留下孤兒行程"
+
+    def test_closers_run_only_once(self, monkeypatch):
+        """關閉路徑有兩個入口（WM_DELETE_WINDOW 與 atexit），兩邊都會呼叫。"""
+        term, _ = _term(monkeypatch, _FakeSrv())
+        calls = []
+        term.add_closer(lambda: calls.append(1))
+        term.shutdown()
+        term.shutdown()
+        assert calls == [1]

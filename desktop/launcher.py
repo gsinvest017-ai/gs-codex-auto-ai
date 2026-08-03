@@ -617,17 +617,22 @@ class LauncherUI:
             self.status.config(text="正在開啟內嵌終端機…", fg=GOLD)
             self.root.update()             # 先讓 frame 有真正的尺寸與 HWND
             emb = winembed.EmbeddedBrowser()
+            # **在 attach 之前就掛上去**：attach 最長等 25 秒，期間靠 root.update()
+            # 泵事件迴圈——使用者這時按關閉鈕，on_close() 會 destroy root，之後
+            # attach 裡的 pump() 與這裡的 status.config() 都會拋 TclError，一路被
+            # open() 外層的 except 吞掉，emb.close() 永遠不會被呼叫，Popen 出去的
+            # Chromium 就變孤兒。先賦值的話，關閉路徑的 _close_embed() 收得到它。
+            self._embed = emb
             okd = emb.attach(self.term_host.winfo_id(), open_url(),
                              width=max(self.term_host.winfo_width(), 600),
                              height=max(self.term_host.winfo_height(), 400),
                              pump=self.root.update)
             if not okd:
-                emb.close()
+                self._close_embed()
                 self._collapse_window()
                 self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟",
                                    fg=GOLD)
                 return False
-            self._embed = emb
             self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
             return True
         finally:
