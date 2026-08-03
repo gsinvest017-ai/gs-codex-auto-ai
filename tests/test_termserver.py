@@ -254,13 +254,39 @@ class TestStatic:
         ("/vendor/xterm.css", b".xterm"),
         ("/vendor/addon-fit.js", b"FitAddon"),
     ])
-    def test_assets_served(self, server, path, needle):
+    def test_assets_served_without_token(self, server, path, needle):
+        """**不帶 token** 取靜態資產——這才是瀏覽器實際的行為。
+
+        瀏覽器載入 `<script src>` / `<link href>` 時不會帶自訂標頭，URL 上也沒有
+        query。先前這裡手動加了 `?token=`，測試綠但真的用瀏覽器開會整頁 403、
+        終端機完全打不開——是實際跑 playwright 才抓到的。這條測試現在按瀏覽器
+        的方式取，避免同樣的假綠再發生。
+        """
         srv, _ = server
-        url = f"http://127.0.0.1:{srv.port}{path}?token={srv.token}"
+        url = f"http://127.0.0.1:{srv.port}{path}"
         with urllib.request.urlopen(url, timeout=10) as f:
             body = f.read()
-        assert f.status == 200
+            status = f.status
+        assert status == 200
         assert needle in body
+
+    def test_api_still_requires_token(self, server):
+        """放寬靜態資產不能把 /api/* 也放掉——那裡才是能生行程的邊界。"""
+        srv, _ = server
+        for path in ("/api/kinds", "/api/sessions"):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.port}{path}")
+            with pytest.raises(urllib.error.HTTPError) as ei:
+                urllib.request.urlopen(req, timeout=10)
+            assert ei.value.code == 403, path
+
+    def test_static_still_blocks_non_loopback_host(self, server):
+        """靜態資產免 token，但 DNS rebinding 的 Host 檢查仍要擋。"""
+        srv, _ = server
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.port}/vendor/xterm.js")
+        req.add_header("Host", "evil.example.com")
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=10)
+        assert ei.value.code == 403
 
 
 # ── 併發（review #45 抓到的 TOCTOU）──────────────────────────────────────────
