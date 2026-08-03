@@ -126,3 +126,57 @@ def test_inset_never_negative():
 def test_unavailable_off_windows_with_a_reason():
     ok, why = winembed.available()
     assert ok is False and why
+
+
+class _FakeProc:
+    def __init__(self, pid=4242):
+        self.pid = pid
+        self.killed = False
+
+    def poll(self):
+        return None          # 一直活著
+
+    def kill(self):
+        self.killed = True
+
+
+class TestCloseDuringAttach:
+    """attach() 最長等 25 秒，期間靠 `pump` 把控制權交回 UI——使用者就在那一刻
+    按「收合」或關掉 App 是真的到得了的路徑，而那條路徑會 `close()` 掉同一個
+    實例、把 `self.proc` 設成 None。迴圈若直接用 `self.proc.poll()` 就會炸成
+    `AttributeError`，而且會被上層的 `except Exception: pass` 吞掉（＝沒有徵兆）。
+    """
+
+    @pytest.fixture
+    def stubbed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(winembed, "available", lambda: (True, ""))
+        monkeypatch.setattr(winembed, "browser_path", lambda: "fake-browser")
+        monkeypatch.setattr(winembed.subprocess, "Popen", lambda argv: _FakeProc())
+        monkeypatch.setattr(winembed.subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [])   # 永遠找不到視窗
+        monkeypatch.setattr(winembed.tempfile, "gettempdir", lambda: str(tmp_path))
+        return winembed.EmbeddedBrowser()
+
+    def test_close_from_pump_does_not_raise(self, stubbed):
+        emb = stubbed
+
+        def pump_then_close():
+            emb.close()          # 模擬使用者在等待期間按下「收合」
+
+        ok = emb.attach(1234, "http://127.0.0.1:1/", width=800, height=600,
+                        timeout=3, pump=pump_then_close)
+        assert ok is False
+        assert emb.error, "取消也要留下原因，不能靜默"
+
+    def test_cancelled_attach_reports_cancellation(self, stubbed):
+        emb = stubbed
+        emb.attach(1234, "http://127.0.0.1:1/", width=800, height=600,
+                   timeout=3, pump=emb.close)
+        assert "取消" in emb.error
+
+    def test_normal_timeout_still_reports_timeout(self, stubbed):
+        """沒有人取消時，逾時要照舊講逾時——別把兩種情況混成同一個訊息。"""
+        emb = stubbed
+        ok = emb.attach(1234, "http://127.0.0.1:1/", width=800, height=600,
+                        timeout=1, pump=None)
+        assert ok is False and "逾時" in emb.error

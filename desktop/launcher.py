@@ -570,10 +570,16 @@ class LauncherUI:
         bar = tk.Frame(self.termpane, bg=CARD)
         bar.pack(fill="x", padx=10, pady=(8, 6))
         tk.Label(bar, text="內嵌終端機", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(side="left")
-        tk.Button(bar, text="⇱ 另開視窗", command=self.on_pop_out, font=self.mono,
-                  bg="#21262d", fg=MUTED, relief="flat", padx=10).pack(side="right")
-        tk.Button(bar, text="⤢ 收合", command=self.hide_terminal_pane, font=self.mono,
-                  bg="#21262d", fg=MUTED, relief="flat", padx=10).pack(side="right", padx=(0, 6))
+        # 這兩個也要能被停用：它們會 close() 掉 attach 正在用的那個外殼，而 attach
+        # 期間 UI 是活的（靠 root.update() 泵事件），使用者真的按得到。
+        self.popout_btn = tk.Button(bar, text="⇱ 另開視窗", command=self.on_pop_out,
+                                    font=self.mono, bg="#21262d", fg=MUTED,
+                                    relief="flat", padx=10)
+        self.popout_btn.pack(side="right")
+        self.collapse_btn = tk.Button(bar, text="⤢ 收合", command=self.hide_terminal_pane,
+                                      font=self.mono, bg="#21262d", fg=MUTED,
+                                      relief="flat", padx=10)
+        self.collapse_btn.pack(side="right", padx=(0, 6))
         # 內嵌用的宿主 frame。背景刻意跟終端機頁面同色，這樣瀏覽器還沒畫出來的
         # 那一瞬間不會閃一塊亮色。
         self.term_host = tk.Frame(self.termpane, bg="#0f1115")
@@ -645,7 +651,8 @@ class LauncherUI:
         「啟動新任務」的正常狀態由 `refresh()` 依環境檢查決定，所以這裡記住原本的
         狀態再還原，不要自作主張把它打開。
         """
-        for name in ("launch_btn", "seed_btn", "term_btn"):
+        for name in ("launch_btn", "seed_btn", "term_btn",
+                     "collapse_btn", "popout_btn"):
             btn = getattr(self, name, None)
             if btn is None:
                 continue

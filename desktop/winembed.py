@@ -314,10 +314,17 @@ class EmbeddedBrowser:
                     pump()
                 except Exception:  # noqa: BLE001 — UI 已被關掉之類，不該影響內嵌流程
                     pass
-            if self.proc.poll() is not None:
+            # **pump() 會把控制權交回 UI**，使用者可能就在這一刻按了「收合」或關掉
+            # App，那條路徑會呼叫 close() 把 self.proc 設成 None。所以每輪都要重新
+            # 取一次快照再用——直接 `self.proc.poll()` 會炸成 AttributeError。
+            proc = self.proc
+            if proc is None:
+                self.error = "開啟途中被取消"
+                return False
+            if proc.poll() is not None:
                 self.error = "瀏覽器外殼啟動後立刻結束了"
                 return False
-            hwnd = pick_window(_enum_windows(), self.proc.pid, nonce)
+            hwnd = pick_window(_enum_windows(), proc.pid, nonce)
             if hwnd:
                 break
         if not hwnd:
@@ -325,6 +332,9 @@ class EmbeddedBrowser:
             self.close()
             return False
 
+        if self.proc is None:          # 找到視窗的同一輪被取消掉了
+            self.error = "開啟途中被取消"
+            return False
         try:
             self._reparent(hwnd, parent_hwnd)
         except Exception as exc:  # noqa: BLE001
@@ -345,6 +355,10 @@ class EmbeddedBrowser:
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
+            # 同上：這裡也會 pump，self.hwnd 可能被 close() 清掉。用 None 去
+            # EnumChildWindows 會變成列舉整個桌面的子視窗，不是我們要的。
+            if not self.hwnd:
+                return
             widget = next((h for h, cls in _child_windows(self.hwnd)
                            if cls.startswith(RENDER_WIDGET_CLASS)), None)
             if widget:
