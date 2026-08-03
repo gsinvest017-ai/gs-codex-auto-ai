@@ -318,6 +318,14 @@ async function createSession() {
   makeTab(body);
 }
 
+// App 要把這個視窗 SetParent 進自己的欄位裡，得先在一堆 Chromium 視窗中認出它。
+// 載入中視窗標題是 URL（本來就含 embed=），載完就換成 document.title——把 nonce
+// 留在標題裡，「用標題找視窗」這條退路在載入完之後才不會失效。詳見 winembed.py。
+(function keepEmbedNonceInTitle() {
+  const n = new URLSearchParams(location.search).get("embed");
+  if (n) document.title = document.title + " ·" + n;
+})();
+
 async function boot() {
   applyLayout("l1");
   const r = await api("/api/kinds");

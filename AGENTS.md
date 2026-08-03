@@ -132,13 +132,20 @@ PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直
   臨時關閉：`CODEXAUTOAI_USAGE_GATE=0`
 - 內嵌終端機（desktop）：`conpty.py`（純 ctypes ConPTY / POSIX pty）→ `sessions.py`
   （多 session + 重播緩衝）→ `termserver.py`（只綁 loopback 的 HTTP/SSE）→
-  `web/terminal.html`（vendored xterm.js 分頁 UI）。四個共同的鐵則：
+  `web/terminal.html`（vendored xterm.js 分頁 UI）→ `winembed.py`（把那個頁面
+  `SetParent` 進 launcher 右欄的 frame）。五個共同的鐵則：
   * **不要引入 pywinpty / PyConPTY**——前者要 Rust 編譯（破壞純標準庫不變式），
     後者是 GPLv3（本 repo 公開發行，不能用）。ConPTY 用 ctypes 就能呼叫。
   * **從終端機測試會看到假象**（讀不到輸出、裸 cmd 秒退）——那是 Windows console
     繼承，不是 bug。要驗證請用**沒有 console 的行程**跑（見 `conpty.py` 的對照表）。
   * `termserver` 能生行程，所以**四道防線缺一不可**：只綁 127.0.0.1、一次性 token、
     擋非 loopback 的 `Host`（DNS rebinding）、只允許固定 kind（不接受任意 argv）。
+  * **視窗內嵌（`winembed.py`）不能只靠 `SetParent`**：Chromium 在 `--app` 模式
+    是**自己畫標題列**的（拿掉 `WS_CAPTION` 也去不掉），要量出畫布
+    （`Chrome_RenderWidgetHostHWND`）相對視窗上緣的 inset、把子視窗往上挪同樣的
+    px 讓父 frame 裁掉它；resize 後也一定要補 `SWP_FRAMECHANGED` + `RedrawWindow`，
+    不然只會重畫一部分、其餘留著上一輪的殘影。找視窗要**先認自己的 pid**
+    （獨立 `--user-data-dir`）再認 URL nonce，只比對標題會抓到殘留的瀏覽器。
   * 新增前端資產要同步加進 `installer/build-app.ps1` 的 `--add-data`，否則凍結版
     只會拿到 404
 - 需求字串清理：`desktop/launcher.py` 的 `_safe_prompt` 與 `vscode-extension/prompt.js`

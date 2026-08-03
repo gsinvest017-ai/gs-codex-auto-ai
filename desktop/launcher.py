@@ -35,6 +35,11 @@ try:
 except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
     global_overlay = None
 
+try:
+    import winembed  # 把終端機頁面嵌進 App 視窗右欄（Windows only，sibling module）
+except Exception:  # noqa: BLE001 — 缺模組就退回獨立視窗，不擋啟動
+    winembed = None
+
 # ── GS 暗金主題 ──────────────────────────────────────────────────────────────
 BG = "#0f1115"          # warm-black
 CARD = "#171a21"
@@ -43,6 +48,10 @@ CHAMPAGNE = "#e7ddc7"
 GREEN = "#3fb950"
 RED = "#f85149"
 MUTED = "#8b949e"
+
+# 版面：左邊控制欄的固定寬度、右邊終端機欄展開時要多給的寬度。
+LEFT_W = 560
+TERM_W = 900
 
 
 def app_dir() -> Path:
@@ -72,6 +81,13 @@ class EmbeddedTerminal:
         self._srv = None
         self._mgr = None
         self._lock = threading.Lock()
+        # 關閉時要一併收掉的東西（例如嵌在右欄裡的瀏覽器外殼）。App 的關閉路徑
+        # 只認得 TERMINAL.shutdown()，UI 層自己註冊進來比讓 main() 多認一個物件簡單。
+        self._closers: list = []
+
+    def add_closer(self, fn) -> None:
+        with self._lock:
+            self._closers.append(fn)
 
     def available(self) -> tuple[bool, str]:
         """這台機器能不能用內嵌終端機。"""
@@ -95,8 +111,13 @@ class EmbeddedTerminal:
             self._srv = termserver.TerminalServer(self._mgr).start()
             return self._srv
 
-    def open(self, *, kind: str | None = None, prompt: str = "") -> str:
-        """開啟（或聚焦）終端機視窗；可順便先建一個 session。回傳 URL。"""
+    def open(self, *, kind: str | None = None, prompt: str = "",
+             shell=None) -> str:
+        """開啟（或聚焦）終端機；可順便先建一個 session。回傳 URL。
+
+        `shell(url) -> bool` 是「把頁面顯示在 App 視窗內」的實作（由 UI 層提供）。
+        回 False 或沒提供，就退回 `_show()`（pywebview 原生視窗 → 瀏覽器分頁）。
+        """
         srv = self._ensure()
         if kind:
             try:
@@ -104,11 +125,17 @@ class EmbeddedTerminal:
             except Exception as exc:  # noqa: BLE001
                 messagebox.showerror("CodexAutoAI", f"開啟 {kind} session 失敗：{exc}")
         url = srv.url
+        if shell is not None:
+            try:
+                if shell(url):
+                    return url
+            except Exception:  # noqa: BLE001 — 內嵌只是體驗升級，壞了就走舊路
+                pass
         self._show(url)
         return url
 
     def _show(self, url: str) -> None:
-        """優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""
+        """退路：優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""
         try:
             import webview  # noqa: PLC0415  # pywebview，選用
         except Exception:  # noqa: BLE001
@@ -124,6 +151,12 @@ class EmbeddedTerminal:
         """App 結束時收乾淨——不收的話 pty 子行程（claude/node）會變孤兒。"""
         with self._lock:
             srv, self._srv = self._srv, None
+            closers, self._closers = self._closers, []
+        for fn in closers:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
         if srv is not None:
             try:
                 srv.stop()
@@ -410,12 +443,22 @@ class LauncherUI:
         self.start_update_check()
 
     def _build(self) -> None:
-        tk.Label(self.root, text="CodexAutoAI", font=self.h1, fg=GOLD, bg=BG).pack(pady=(22, 2))
-        tk.Label(self.root, text="一句話描述需求，自動跑完需求→架構→寫碼→測試→交付",
+        # 版面：左邊是原本的控制欄（寬度固定 LEFT_W），右邊是內嵌終端機欄。
+        # 右欄預設**不 pack**——沒開終端機時視窗就跟以前一樣是一條窄的控制欄，
+        # 不會平白多出一塊空白。開了才 pack 進來並把視窗撐寬。
+        self.body = tk.Frame(self.root, bg=BG)
+        self.body.pack(fill="both", expand=True)
+        self.left = tk.Frame(self.body, bg=BG, width=LEFT_W)
+        self.left.pack(side="left", fill="y")
+        self.left.pack_propagate(False)   # 不讓子元件把固定寬度撐掉
+        self._build_term_pane()
+
+        tk.Label(self.left, text="CodexAutoAI", font=self.h1, fg=GOLD, bg=BG).pack(pady=(22, 2))
+        tk.Label(self.left, text="一句話描述需求，自動跑完需求→架構→寫碼→測試→交付",
                  font=self.h2, fg=MUTED, bg=BG).pack(pady=(0, 16))
 
         # 更新橫幅（預設隱藏，背景檢查到新版才 pack 進來）
-        self.update_banner = tk.Frame(self.root, bg="#2a2410")
+        self.update_banner = tk.Frame(self.left, bg="#2a2410")
         self.update_text = tk.Label(self.update_banner, text="", font=self.h2,
                                     fg=GOLD, bg="#2a2410", anchor="w", justify="left")
         self.update_text.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=8)
@@ -427,7 +470,7 @@ class LauncherUI:
                   bg="#2a2410", fg=MUTED, relief="flat", padx=6).pack(side="left", padx=(0, 10))
 
         # 環境檢查卡
-        self.card = card = tk.Frame(self.root, bg=CARD)
+        self.card = card = tk.Frame(self.left, bg=CARD)
         card.pack(fill="x", padx=22)
         tk.Label(card, text="環境檢查", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(anchor="w", padx=14, pady=(12, 6))
         for c in gather_checks():
@@ -449,8 +492,8 @@ class LauncherUI:
                   bg="#21262d", fg=CHAMPAGNE, relief="flat", padx=12, pady=4).pack(side="left", padx=8)
 
         # 需求 + 啟動
-        tk.Label(self.root, text="你想做什麼？", font=self.h2, fg=CHAMPAGNE, bg=BG).pack(anchor="w", padx=24, pady=(18, 4))
-        self.req = tk.Text(self.root, height=3, font=self.h2, bg=CARD, fg=CHAMPAGNE,
+        tk.Label(self.left, text="你想做什麼？", font=self.h2, fg=CHAMPAGNE, bg=BG).pack(anchor="w", padx=24, pady=(18, 4))
+        self.req = tk.Text(self.left, height=3, font=self.h2, bg=CARD, fg=CHAMPAGNE,
                           insertbackground=GOLD, relief="flat", wrap="word")
         self.req.pack(fill="x", padx=22)
         self.req.insert("1.0", "做一個記帳 CLI 工具，資料存 SQLite")
@@ -458,7 +501,7 @@ class LauncherUI:
         # 執行模式：勾選＝非停（autopilot），連回合都不停一路跑到交付（commit/push 仍會問）。
         self.autopilot_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            self.root,
+            self.left,
             text="非停模式（autopilot）：連回合都不停，一路跑到交付（commit/push 仍會問）",
             variable=self.autopilot_var, font=self.mono, fg=MUTED, bg=BG,
             activebackground=BG, activeforeground=CHAMPAGNE, selectcolor=CARD,
@@ -468,25 +511,25 @@ class LauncherUI:
         # 內嵌終端機：預設開。關掉才會回到舊行為（每個 session 跳一個外部終端機視窗）。
         self.embed_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
-            self.root,
+            self.left,
             text="內嵌終端機：session 開在 App 內、用分頁管理（取消勾選則另開外部終端機）",
             variable=self.embed_var, font=self.mono, fg=MUTED, bg=BG,
             activebackground=BG, activeforeground=CHAMPAGNE, selectcolor=CARD,
             anchor="w",
         ).pack(fill="x", padx=24, pady=(2, 0))
 
-        self.launch_btn = tk.Button(self.root, text="🚀 啟動新任務", command=self.on_launch,
+        self.launch_btn = tk.Button(self.left, text="🚀 啟動新任務", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=(10, 6))
 
         # 啟動新任務：從 spec 開始（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
-        self.seed_btn = tk.Button(self.root, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
+        self.seed_btn = tk.Button(self.left, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
                                   command=self.on_seed_from_spec, font=self.h2,
                                   bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
         self.seed_btn.pack(fill="x", padx=22, pady=(0, 6))
 
         # 直接開終端機（不建 session）：想手動開 codex 或一般 shell 分頁時用。
-        self.term_btn = tk.Button(self.root, text="🖥 開啟內嵌終端機（分頁管理 Claude / Codex）",
+        self.term_btn = tk.Button(self.left, text="🖥 開啟內嵌終端機（分頁管理 Claude / Codex）",
                                   command=self.on_open_terminal, font=self.h2,
                                   bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
         self.term_btn.pack(fill="x", padx=22, pady=(0, 10))
@@ -494,7 +537,7 @@ class LauncherUI:
         # 進度卡：讀 log/events.jsonl（共用 tools/events_model.py）。
         # 在這之前，App 按下啟動後就只是「開了一個終端機」——pipeline 跑到哪、
         # 卡在哪、花了多少，全都只能去終端機看。這張卡把它拉回 App 內。
-        self.prog_card = tk.Frame(self.root, bg=CARD)
+        self.prog_card = tk.Frame(self.left, bg=CARD)
         self.prog_card.pack(fill="x", padx=22, pady=(0, 10))
         head = tk.Frame(self.prog_card, bg=CARD)
         head.pack(fill="x", padx=14, pady=(10, 4))
@@ -511,8 +554,117 @@ class LauncherUI:
                                     bg=CARD, anchor="w", justify="left")
         self.prog_detail.pack(fill="x", padx=14, pady=(2, 12))
 
-        self.status = tk.Label(self.root, text="", font=self.mono, fg=MUTED, bg=BG)
+        self.status = tk.Label(self.left, text="", font=self.mono, fg=MUTED, bg=BG)
         self.status.pack()
+
+    # ── 內嵌終端機欄 ────────────────────────────────────────────────────────
+    def _build_term_pane(self) -> None:
+        """右欄的殼。真正的終端機是一個被 SetParent 進 `term_host` 的瀏覽器視窗
+        （見 `winembed.py`），所以這裡只準備容器與工具列。"""
+        self.termpane = tk.Frame(self.body, bg=CARD)
+        bar = tk.Frame(self.termpane, bg=CARD)
+        bar.pack(fill="x", padx=10, pady=(8, 6))
+        tk.Label(bar, text="內嵌終端機", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(side="left")
+        tk.Button(bar, text="⇱ 另開視窗", command=self.on_pop_out, font=self.mono,
+                  bg="#21262d", fg=MUTED, relief="flat", padx=10).pack(side="right")
+        tk.Button(bar, text="⤢ 收合", command=self.hide_terminal_pane, font=self.mono,
+                  bg="#21262d", fg=MUTED, relief="flat", padx=10).pack(side="right", padx=(0, 6))
+        # 內嵌用的宿主 frame。背景刻意跟終端機頁面同色，這樣瀏覽器還沒畫出來的
+        # 那一瞬間不會閃一塊亮色。
+        self.term_host = tk.Frame(self.termpane, bg="#0f1115")
+        self.term_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.term_host.bind("<Configure>", self._on_term_resize)
+
+        self._embed = None
+        self._embed_url = ""
+        self._resize_job = None
+
+    def show_terminal_pane(self, url: str) -> bool:
+        """把終端機頁面嵌進右欄。回 False 代表這台機器嵌不了，呼叫端自行退回瀏覽器。"""
+        ok, why = winembed.available() if winembed else (False, "缺少 winembed 模組")
+        if not ok:
+            self.status.config(text=f"視窗內嵌不可用（{why}），改用瀏覽器開啟", fg=GOLD)
+            return False
+        self._embed_url = url
+        if self._embed is not None and self._embed.alive:
+            self._expand_window()          # 已經嵌好了，收合過就再展開
+            return True
+
+        self._expand_window()
+        self.status.config(text="正在開啟內嵌終端機…", fg=GOLD)
+        self.root.update()                 # 先讓 frame 有真正的尺寸與 HWND
+        emb = winembed.EmbeddedBrowser()
+        okd = emb.attach(self.term_host.winfo_id(), url,
+                         width=max(self.term_host.winfo_width(), 600),
+                         height=max(self.term_host.winfo_height(), 400),
+                         pump=self.root.update)
+        if not okd:
+            emb.close()
+            self._collapse_window()
+            self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟", fg=GOLD)
+            return False
+        self._embed = emb
+        TERMINAL.add_closer(emb.close)     # App 關閉時一併收掉，不留孤兒 Chromium
+        self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
+        return True
+
+    def hide_terminal_pane(self) -> None:
+        """收合右欄。**session 不會被關掉**——服務的生命週期跟著 App，重新展開會接回。"""
+        if self._embed is not None:
+            self._embed.close()
+            self._embed = None
+        self._collapse_window()
+        self.status.config(text="已收合終端機（session 仍在執行，可再開啟接回）", fg=MUTED)
+
+    def on_pop_out(self) -> None:
+        """把終端機丟回獨立視窗——想把它拉到第二螢幕時用。"""
+        url = self._embed_url or TERMINAL.open()
+        if self._embed is not None:
+            self._embed.close()
+            self._embed = None
+        self._collapse_window()
+        TERMINAL._show(url)
+        self.status.config(text="已改用獨立視窗開啟終端機", fg=GREEN)
+
+    def _expand_window(self) -> None:
+        if self.termpane.winfo_ismapped():
+            return
+        self.termpane.pack(side="right", fill="both", expand=True)
+        self.root.minsize(LEFT_W + 360, 840)
+        # 只在「還沒被使用者手動撐寬過」時才自己加寬，否則會把使用者調好的尺寸蓋掉。
+        if self.root.winfo_width() <= LEFT_W + 40:
+            self.root.geometry(f"{LEFT_W + TERM_W}x{max(self.root.winfo_height(), 900)}")
+
+    def _collapse_window(self) -> None:
+        if not self.termpane.winfo_ismapped():
+            return
+        self.termpane.pack_forget()
+        self.root.minsize(520, 840)
+        self.root.geometry(f"{LEFT_W}x{max(self.root.winfo_height(), 900)}")
+
+    def _on_term_resize(self, _event=None) -> None:
+        """跟著欄位調整內嵌視窗大小。
+
+        **debounce 是必要的**：拖曳視窗邊框時 `<Configure>` 每幾毫秒就來一次，
+        每次都去 `SetWindowPos` + 強制重繪會讓拖曳整個卡住。
+        """
+        if self._embed is None:
+            return
+        if self._resize_job is not None:
+            try:
+                self.root.after_cancel(self._resize_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._resize_job = self.root.after(80, self._apply_term_size)
+
+    def _apply_term_size(self) -> None:
+        self._resize_job = None
+        if self._embed is None:
+            return
+        if not self._embed.alive:          # 使用者從工作管理員砍掉之類
+            self._embed = None
+            return
+        self._embed.fit(self.term_host.winfo_width(), self.term_host.winfo_height())
 
     # ── 進度輪詢 ────────────────────────────────────────────────────────────
     def _events_log(self) -> Path:
@@ -603,7 +755,7 @@ class LauncherUI:
             if ok:
                 prompt = f"/autopilot on {_safe_prompt(req)}".strip() if autopilot \
                     else _safe_prompt(req)
-                TERMINAL.open(kind="claude", prompt=prompt)
+                TERMINAL.open(kind="claude", prompt=prompt, shell=self.show_terminal_pane)
                 self.status.config(
                     text=f"已在內嵌終端機開啟 Claude 分頁（{mode}）", fg=GREEN)
                 return
@@ -619,7 +771,7 @@ class LauncherUI:
         if not ok:
             messagebox.showerror("CodexAutoAI", f"內嵌終端機不可用：{why}")
             return
-        TERMINAL.open()
+        TERMINAL.open(shell=self.show_terminal_pane)
         self.status.config(text="已開啟內嵌終端機（可用分頁管理多個 session）", fg=GREEN)
 
     def on_seed_from_spec(self) -> None:
