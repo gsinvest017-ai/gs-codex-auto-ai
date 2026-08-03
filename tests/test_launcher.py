@@ -266,3 +266,14 @@ class TestShutdownReaping:
         term.shutdown()
         term.shutdown()
         assert calls == [1]
+
+
+class TestOpenDoesNotHandBackTheToken:
+    """`open()` 的用途常是「給我一個能丟給外面開的 URL」，所以它不該回傳帶真
+    token 的那一個——那是等著被下一個呼叫者踩的坑。"""
+
+    def test_open_returns_nothing(self, monkeypatch):
+        srv = _FakeSrv()
+        term, _ = _term(monkeypatch, srv)
+        assert term.open(shell=lambda open_url: True) is None
+        assert term.open() is None

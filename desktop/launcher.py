@@ -112,8 +112,13 @@ class EmbeddedTerminal:
             return self._srv
 
     def open(self, *, kind: str | None = None, prompt: str = "",
-             shell=None) -> str:
-        """開啟（或聚焦）終端機；可順便先建一個 session。回傳 URL。
+             shell=None) -> None:
+        """開啟（或聚焦）終端機；可順便先建一個 session。
+
+        **刻意不回傳 URL**：這個方法的用途常常是「給我一個 URL 丟給外面的東西開」，
+        而唯一該外流的是 handoff 券。以前回 `srv.url`（帶真 token）沒被利用只是因為
+        目前沒人接它的回傳值——那是個等著被踩的坑。要 URL 的人自己去拿
+        `srv.handoff_url`。
 
         `shell(open_url) -> bool` 是「把頁面顯示在 App 視窗內」的實作（由 UI 層提供）。
         回 False 或沒提供，就退回 `_show()`（pywebview 原生視窗 → 瀏覽器分頁）。
@@ -133,11 +138,10 @@ class EmbeddedTerminal:
         if shell is not None:
             try:
                 if shell(lambda: srv.handoff_url):
-                    return srv.url
+                    return
             except Exception:  # noqa: BLE001 — 內嵌只是體驗升級，壞了就走舊路
                 pass
         self._show(srv.handoff_url)
-        return srv.url
 
     def _show(self, url: str) -> None:
         """退路：優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""

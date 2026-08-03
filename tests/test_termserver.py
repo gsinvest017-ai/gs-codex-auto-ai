@@ -460,3 +460,26 @@ class TestHandoff:
         # 輸掉的要拿到一張**乾淨的**無 token 頁面。沒有鎖時它們會同時通過比對、
         # 接著搶著移除同一張券，第二個之後全部炸成 500——這就是變異測試看的訊號。
         assert results.count("error") == 0, f"出現 {results.count('error')} 個錯誤：{results}"
+
+    def test_non_ascii_handoff_still_serves_the_page(self, server):
+        """`/` 這條路徑**不需要任何憑證**就打得到，所以它必須對垃圾輸入免疫。
+
+        `secrets.compare_digest` 對 str 只吃 ASCII，非 ASCII 直接 TypeError；
+        而 query 會被 percent-decode，`?handoff=%C3%A9` 就足以觸發。docstring
+        明講「沒帶（或已用掉）也照樣送頁面」，炸掉連線就是違反這個保證。
+        """
+        srv, _ = server
+        srv.new_handoff()      # 券池要**非空**，否則根本走不到比對那行（第一版就漏了）
+        code, body = self._page(srv, "?handoff=%C3%A9%C3%A8")
+        assert code == 200 and srv.token not in body
+
+    def test_non_ascii_token_is_rejected_not_crashed(self, server):
+        """同一個地雷也在 token 那條路上——要回 403，不是把連線炸斷。"""
+        srv, _ = server
+        url = f"http://127.0.0.1:{srv.port}/api/kinds?token=%C3%A9"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as f:
+                code = f.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 403

@@ -88,6 +88,20 @@ _POLL = 0.03
 _KEEPALIVE = 15.0
 
 
+def _same_secret(given: str, expected: str) -> bool:
+    """常數時間比對，但**先擋掉非 ASCII**。
+
+    `secrets.compare_digest` 對 str 只接受 ASCII，餵它非 ASCII 會直接
+    `TypeError`。而這兩個值都來自 URL query（`parse_qs` 會做 percent-decode），
+    所以 `GET /?token=%C3%A9` 這種請求就能讓比對整個炸掉——而 `/` 這條路徑
+    **不需要任何憑證**就打得到。我們自己發的 token / nonce 一律是
+    `token_urlsafe`（純 ASCII），非 ASCII 必定不匹配，直接回 False 即可。
+    """
+    if not given.isascii() or not expected.isascii():
+        return False
+    return secrets.compare_digest(given, expected)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "CodexAutoAI-Term"
     protocol_version = "HTTP/1.1"
@@ -120,7 +134,7 @@ class _Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-Term-Token") or ""
         if not given:
             given = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
-        return secrets.compare_digest(given, token)
+        return _same_secret(given, token)
 
     def _send(self, code: int, body: bytes, ctype: str, extra: Optional[dict] = None) -> None:
         self.send_response(code)
@@ -361,8 +375,8 @@ class TerminalServer:
     def _consume_handoff(self, nonce: str) -> bool:
         with self._handoff_lock:
             for known in self._handoffs:
-                # compare_digest：別讓比對時間洩漏 nonce 前綴
-                if secrets.compare_digest(known, nonce):
+                # 常數時間比對：別讓比對時間洩漏 nonce 前綴
+                if _same_secret(nonce, known):
                     self._handoffs.remove(known)
                     return True
         return False
