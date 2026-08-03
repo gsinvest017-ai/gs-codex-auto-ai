@@ -237,7 +237,7 @@ class PtySession:
                 "這台機器開不了 PTY（Windows 需 10 1809 以上）。")
         self = cls()
         if IS_WIN:
-            self._spawn_windows(argv, cwd, env, cols, rows)
+            self._spawn_windows(resolve_argv(argv, env), cwd, env, cols, rows)
         else:
             self._spawn_posix(argv, cwd, env, cols, rows)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -319,7 +319,7 @@ class PtySession:
             "UpdateProcThreadAttribute")
 
         pi = _PROCESS_INFORMATION()
-        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        cmdline = ctypes.create_unicode_buffer(build_cmdline(argv))
         envblock = _env_block(env) if env else None
         flags = _EXTENDED_STARTUPINFO_PRESENT | (0x00000400 if envblock else 0)  # CREATE_UNICODE_ENVIRONMENT
         check(_k32.CreateProcessW(None, cmdline, None, None, False, flags,
@@ -545,6 +545,88 @@ def _env_block(env: dict):
 def which(name: str) -> Optional[str]:
     """找可執行檔（Windows 上 claude/codex 是 .cmd 蓋子，shutil.which 找得到）。"""
     return shutil.which(name)
+
+
+def resolve_argv(argv: list[str], env: Optional[dict] = None) -> list[str]:
+    r"""把 `argv[0]` 解析成完整路徑。**Windows 上這是必要的，不是最佳化。**
+
+    `CreateProcessW`（`lpApplicationName=NULL`）和 shell 用的是兩套不同的規則：
+    名稱沒有副檔名時它**只會補 `.exe`**，完全不看 `PATHEXT`。而 `claude` / `codex`
+    用 npm 裝出來的是 `claude.cmd` / `codex.ps1` 這種蓋子，於是
+
+        shutil.which("codex")  → C:/Users/…/npm/codex.CMD  （kind 判定為「已安裝」）
+        CreateProcessW("codex …") → ERROR_FILE_NOT_FOUND（WinError 2）
+
+    ——可用性檢查說有、真的要開卻說找不到。改成先解析完整路徑，兩邊就用同一套
+    規則了。實測（2026-08-03）完整路徑的 `.CMD` 是**可以**直接餵給 `CreateProcessW`
+    的，所以不需要包一層 `cmd.exe /c`（包了會多一層行程，還可能吃掉 Ctrl+C 與 TUI）。
+
+    找不到就原樣傳回去，讓 `CreateProcessW` 自己報錯——這裡不該多發明一種錯誤訊息。
+    POSIX 走 `execvpe`，它本來就會查 PATH，不需要這層。
+
+    帶了 `env` 就用**那份** PATH 解析。目前沒有呼叫端會傳自訂 PATH，
+    但若沒這層，一旦有人傳了就會變成「拿父行程的 PATH 找、用子行程的 PATH 跑」
+    ——兩邊默默不一致，而這種不一致最難查。
+    """
+    if not argv:
+        return argv
+    path = _env_path(env)
+    found = which(argv[0]) if path is None else shutil.which(argv[0], path=path)
+    return [found, *argv[1:]] if found else list(argv)
+
+
+BATCH_EXTS = (".cmd", ".bat")
+
+
+def _quote_for_batch(arg: str) -> str:
+    r"""把一個參數包成「cmd.exe 一定當成字面值」的形式。
+
+    `CreateProcessW` 遇到 `.cmd` / `.bat` 目標時會**偷偷轉交 cmd.exe**（就算呼叫端
+    從來沒要求過 shell），於是後面的參數是被 cmd 的文法解析的，不是原樣交給程式。
+    而 `subprocess.list2cmdline` 是 MSVCRT 規則、**只在有空白或引號時才加引號**——
+    所以不含空白的 `x&calc` 完全不會被引起來，`&` 就直接生效了。實測（2026-08-03）
+    `x&echo>檔案` 這種 payload 真的會執行（BatBadBut / CVE-2024-27980 同一類）。
+
+    對策是**一律加引號**：cmd 在雙引號內不解讀 `& | < > ^`，沒有引號可脫出就沒有
+    注入。而唯一能脫出的字元就是 `"` 本身——cmd 上不存在能安全表示它的引用方式
+    （`launcher._safe_prompt` 的註解已經記過同一件事），所以直接換成單引號。
+    需求是自由文字，掉一個引號遠比讓它變成可執行的命令好。
+
+    `%` 也要處理：**cmd 的 `%VAR%` 展開發生在引號之內**，加引號擋不住它。留著的話
+    含 `%PATH%` 的需求會被換成環境變數的值再交給 CLI（是資料被竄改／外洩，不是
+    命令注入）。轉成全形 `％` 保住 prose 的語意——`launcher._META_MAP` 對同一個字元
+    也是這樣處理的，兩條路的取捨保持一致。
+    """
+    return '"' + arg.replace('"', "'").replace("%", "％") + '"'
+
+
+def build_cmdline(argv: list[str]) -> str:
+    """組出要餵給 `CreateProcessW` 的命令列。
+
+    目標是 `.cmd` / `.bat` 時走 cmd 安全的引用；其餘（原生 exe）維持 MSVCRT 規則的
+    `list2cmdline`，這樣一般情況的需求字串能原樣送達、不會被多改一個字。
+    """
+    if not argv:
+        return ""
+    if argv[0].lower().endswith(BATCH_EXTS):
+        return " ".join([_quote_for_batch(argv[0]),
+                         *(_quote_for_batch(a) for a in argv[1:])])
+    return subprocess.list2cmdline(argv)
+
+
+def _env_path(env: Optional[dict]) -> Optional[str]:
+    """從 env 取 PATH。**大小寫不敏感**——Windows 的環境變數名本來就不分大小寫。
+
+    `dict(os.environ)` 在 Windows 上鍵會是大寫的 `PATH`，所以常見情況直接命中；
+    但手工組出來的 env 寫成 `Path` 也完全合法，那時若只認 `PATH` 就會**默默**退回
+    父行程的 PATH 去解析——沒有錯誤訊息，只是找到了另一個執行檔。
+    """
+    if not env:
+        return None
+    for k, v in env.items():
+        if isinstance(k, str) and k.upper() == "PATH":
+            return v
+    return None
 
 
 if __name__ == "__main__":   # 手動煙霧測試：python desktop/conpty.py
