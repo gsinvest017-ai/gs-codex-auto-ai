@@ -343,6 +343,14 @@ class EmbeddedBrowser:
             return False
         self.hwnd = hwnd
         self._measure_inset(pump)
+        # `_measure_inset` 還會再 pump 最多 6 秒——同一條取消路徑在這裡一樣到得了，
+        # 而且瀏覽器也可能自己掛掉。**不重新確認就 return True** 的話，呼叫端會
+        # 拿到一個殭屍實例、狀態列還綠字寫「已嵌在右邊欄位」，右欄卻是一片空白，
+        # 要等下一次 resize 事件才自我修正。
+        if not self.alive or not self.hwnd:
+            self.error = self.error or "開啟途中被取消"
+            self.close()
+            return False
         self.fit(width, height)
         return True
 

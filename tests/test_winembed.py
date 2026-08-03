@@ -180,3 +180,30 @@ class TestCloseDuringAttach:
         ok = emb.attach(1234, "http://127.0.0.1:1/", width=800, height=600,
                         timeout=1, pump=None)
         assert ok is False and "逾時" in emb.error
+
+    def test_cancel_after_window_found_is_not_reported_as_success(
+            self, monkeypatch, stubbed):
+        """視窗找到之後、量 inset 的期間被取消——`_measure_inset` 還會再 pump 6 秒。
+
+        這裡漏掉存活確認的話 `attach()` 會回 True，UI 就綠字寫「已嵌在右邊欄位」
+        但右欄一片空白，而且 `_embed` 指著一個殭屍實例。
+        """
+        emb = stubbed
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(999, 4242, CHROME, "終端機")])
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "_reparent",
+                            lambda self, h, p: None)
+        monkeypatch.setattr(winembed, "_child_windows", lambda h: [])  # 量不到畫布
+
+        calls = {"n": 0}
+
+        def pump():
+            calls["n"] += 1
+            if calls["n"] >= 2:      # 第 1 次讓它找到視窗，之後才取消
+                emb.close()
+
+        ok = emb.attach(1234, "http://127.0.0.1:1/", width=800, height=600,
+                        timeout=3, pump=pump)
+        assert ok is False, "被取消了卻回報成功"
+        assert emb.error
+        assert emb.hwnd is None and not emb.alive
