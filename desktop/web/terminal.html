@@ -363,6 +363,25 @@ async function boot() {
   status("就緒 — 按「＋ 新增」開一個 session");
 }
 
+// App 那邊也會建 session（按「🚀 啟動新任務」時 launcher 直接呼叫
+// SessionManager.create()），而這個頁面**不會被重新載入**——內嵌的面板是常駐的。
+// 少了這段輪詢，第二次按啟動時 session 真的開了、App 也回報成功，畫面上卻什麼都
+// 沒有，要收合再展開（＝重跑 boot()）才看得到。
+async function syncSessions() {
+  let r;
+  try { r = await api("/api/sessions"); } catch (e) { return; }
+  if (!r.ok) return;
+  const { sessions } = await r.json();
+  const fresh = sessions.filter((s) => s.alive && !tabs.has(s.id));
+  if (!fresh.length) return;
+  // 版面不夠就先加大，否則新分頁會把正在看的那個擠掉
+  const want = tabs.size + fresh.length;
+  if (want > SLOT_COUNT[layout]) applyLayout(want >= 3 ? "l4" : "l2h");
+  fresh.forEach(makeTab);
+  status(`接上 ${fresh.length} 個新 session`);
+}
+setInterval(syncSessions, 2000);
+
 $("#newbtn").onclick = () => {
   $("#newpanel").classList.toggle("show");
   if ($("#newpanel").classList.contains("show")) $("#prompt").focus();

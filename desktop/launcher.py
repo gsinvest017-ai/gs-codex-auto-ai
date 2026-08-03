@@ -577,10 +577,12 @@ class LauncherUI:
         self.term_host.bind("<Configure>", self._on_term_resize)
 
         self._embed = None
-        self._embed_url = ""
         self._resize_job = None
         self._embed_busy = False      # attach 進行中；擋 root.update() 造成的重入
         self._btn_state: dict[str, str] = {}
+        # 只註冊**一次**收尾。改成每次 attach 都 add_closer 的話，開開合合幾十次
+        # 之後就是幾十個指向已關閉物件的 callback，App 活多久就漲多久。
+        TERMINAL.add_closer(self._close_embed)
 
     def show_terminal_pane(self, url: str) -> bool:
         """把終端機頁面嵌進右欄。回 False 代表這台機器嵌不了，呼叫端自行退回瀏覽器。
@@ -597,9 +599,11 @@ class LauncherUI:
         if self._embed_busy:
             self.status.config(text="內嵌終端機正在開啟中…", fg=GOLD)
             return True                    # 回 True＝已處理，別再退回去開瀏覽器
-        self._embed_url = url
         if self._embed is not None and self._embed.alive:
-            self._expand_window()          # 已經嵌好了，收合過就再展開
+            # 已經嵌好了，收合過就再展開。**不用重新導向**：剛剛在 open() 裡建的
+            # session 由頁面自己的輪詢（terminal.html 的 syncSessions）接上；
+            # 重新導向反而會把正在跑的畫面洗掉。
+            self._expand_window()
             return True
 
         self._embed_busy = True
@@ -620,7 +624,6 @@ class LauncherUI:
                                    fg=GOLD)
                 return False
             self._embed = emb
-            TERMINAL.add_closer(emb.close)  # App 關閉時一併收掉，不留孤兒 Chromium
             self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
             return True
         finally:
@@ -643,23 +646,25 @@ class LauncherUI:
             else:
                 btn.config(state=self._btn_state.pop(name, "normal"))
 
+    def _close_embed(self) -> None:
+        """收掉目前嵌著的瀏覽器外殼（沒有就當沒事）。App 關閉時也走這裡。"""
+        emb, self._embed = self._embed, None
+        if emb is not None:
+            emb.close()
+
     def hide_terminal_pane(self) -> None:
         """收合右欄。**session 不會被關掉**——服務的生命週期跟著 App，重新展開會接回。"""
-        if self._embed is not None:
-            self._embed.close()
-            self._embed = None
+        self._close_embed()
         self._collapse_window()
         self.status.config(text="已收合終端機（session 仍在執行，可再開啟接回）", fg=MUTED)
 
     def on_pop_out(self) -> None:
         """把終端機丟回獨立視窗——想把它拉到第二螢幕時用。
 
-        重開一次 `TERMINAL.open()` 而不是沿用 `self._embed_url`：那張 handoff 券
-        已經被嵌進來的那個頁面用掉了，拿它去開新視窗會開出一個沒有 token 的頁面。
+        重開一次 `TERMINAL.open()` 是為了拿一張新的 handoff 券——舊那張已經被嵌
+        進來的那個頁面用掉了，拿它去開新視窗只會開出一個沒有 token 的頁面。
         """
-        if self._embed is not None:
-            self._embed.close()
-            self._embed = None
+        self._close_embed()
         self._collapse_window()
         TERMINAL.open()          # 不傳 shell → 直接走獨立視窗那條路
         self.status.config(text="已改用獨立視窗開啟終端機", fg=GREEN)
