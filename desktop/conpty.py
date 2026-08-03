@@ -111,6 +111,37 @@ if IS_WIN:
         _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
                     ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
 
+    # --- Job object：讓子行程「跟著 App 一起死」，即使 App 是被強制結束的 -----
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong)]
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", _IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _JobObjectExtendedLimitInformation = 9
+
     def _bind() -> None:
         _k32.CreatePipe.argtypes = [ctypes.POINTER(wintypes.HANDLE),
                                     ctypes.POINTER(wintypes.HANDLE),
@@ -147,6 +178,13 @@ if IS_WIN:
         _k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
                                             ctypes.POINTER(wintypes.DWORD)]
         _k32.GetExitCodeProcess.restype = wintypes.BOOL
+        _k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        _k32.CreateJobObjectW.restype = wintypes.HANDLE
+        _k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                 ctypes.c_void_p, wintypes.DWORD]
+        _k32.SetInformationJobObject.restype = wintypes.BOOL
+        _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        _k32.AssignProcessToJobObject.restype = wintypes.BOOL
 
     if hasattr(_k32, "CreatePseudoConsole"):
         _bind()
@@ -185,6 +223,7 @@ class PtySession:
         self._in_w = None
         self._out_r = None
         self._attrbuf = None
+        self._job = None
         # POSIX
         self._fd: Optional[int] = None
         self._pid: Optional[int] = None
@@ -235,6 +274,12 @@ class PtySession:
             except Exception:  # noqa: BLE001
                 pass
             self._hpc = None
+        if self._job is not None:
+            try:
+                _k32.CloseHandle(self._job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._job = None
         self._attrbuf = None
 
     def _spawn_windows_inner(self, argv, cwd, env, cols, rows) -> None:
@@ -281,12 +326,39 @@ class PtySession:
                                   envblock, cwd, ctypes.byref(si), ctypes.byref(pi)),
               "CreateProcessW")
 
+        # 把子行程綁進一個 KILL_ON_JOB_CLOSE 的 job：這樣**即使本行程是被強制結束的**
+        # （安裝程式更新時 TerminateProcess、當機、工作管理員結束工作），OS 也會連帶
+        # 收掉整個 job 裡的行程。close() 的 taskkill 只在「有機會執行」時才有用，
+        # 實測過強制 kill 後 pty 子行程會變成看不見的孤兒，這一層是那個情境的保險。
+        self._attach_job(pi)
+
         # 子行程已繼承這兩端，父行程必須關掉自己的複本，否則 ReadFile 永遠等不到 EOF。
         _k32.CloseHandle(out_w)
         _k32.CloseHandle(in_r)
 
         self._pi = pi
         self._attrbuf = attrbuf   # 保住引用，別讓 GC 回收掉 attribute list
+
+    def _attach_job(self, pi) -> None:
+        """建立 job object 並把子行程放進去；失敗不致命（close() 仍會盡力收）。"""
+        import ctypes
+        try:
+            job = _k32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not _k32.SetInformationJobObject(
+                    job, _JobObjectExtendedLimitInformation,
+                    ctypes.byref(info), ctypes.sizeof(info)):
+                _k32.CloseHandle(job)
+                return
+            if not _k32.AssignProcessToJobObject(job, pi.hProcess):
+                _k32.CloseHandle(job)
+                return
+            self._job = job          # 保住 handle：handle 一關 job 就會殺光成員
+        except Exception:  # noqa: BLE001
+            self._job = None
 
     # -- POSIX --------------------------------------------------------------
     def _spawn_posix(self, argv, cwd, env, cols, rows) -> None:
@@ -438,7 +510,12 @@ class PtySession:
                     _k32.ClosePseudoConsole(self._hpc)
             except Exception:  # noqa: BLE001
                 pass
-            self._hpc = self._in_w = self._out_r = None
+            try:
+                if self._job is not None:
+                    _k32.CloseHandle(self._job)   # 關 handle＝殺光 job 內殘存的行程
+            except Exception:  # noqa: BLE001
+                pass
+            self._hpc = self._in_w = self._out_r = self._job = None
             self._pi = None
         else:
             try:

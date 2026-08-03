@@ -123,3 +123,76 @@ class TestSession:
 def test_spawn_raises_when_unavailable():
     with pytest.raises(conpty.PtyUnavailable):
         conpty.PtySession.spawn(SHELL)
+
+
+# ── 強制結束時不留孤兒（job object）──────────────────────────────────────────
+@pytest.mark.skipif(not IS_WIN, reason="job object 是 Windows 專屬機制")
+@pytest.mark.skipif(not conpty.pty_available(), reason="這台機器開不了 PTY")
+def test_detached_grandchild_dies_when_owner_is_force_killed(tmp_path):
+    """App 被**強制結束**時，連「脫離的孫行程」也要被收掉。
+
+    測的是孫行程而不是直屬子行程，因為**只有孫行程這層會有差**：直屬 pty 子行程
+    由 ConPTY / conhost 自己處理，owner 一死它就跟著死，有沒有 job 都一樣。
+    但 claude 底下還會再生 node，那類行程若以 DETACHED_PROCESS 起來就不受 conhost
+    管；實測（拿掉 job 綁定）確認它會活下來變成看不見的孤兒，繼續佔資源與額度。
+    KILL_ON_JOB_CLOSE 的 job object 是這一層的保證。
+
+    情境是真的會遇到的：安裝新版時 Inno Setup 會關掉執行中的 App，逾時就改用
+    TerminateProcess——那時 `close()` 裡的 taskkill 根本沒機會執行。
+    """
+    import subprocess
+    import textwrap
+    import time
+
+    gpid = tmp_path / "grandchild.pid"
+    # pty 子行程再生一個 DETACHED 的孫行程，模擬 claude → node
+    inner = (
+        "import subprocess,sys,time,pathlib;"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],"
+        "creationflags=0x00000008|0x00000200);"
+        f"pathlib.Path(r'{gpid}').write_text(str(g.pid));"
+        "time.sleep(120)"
+    )
+    helper = tmp_path / "helper.py"
+    helper.write_text(textwrap.dedent(f"""
+        import sys, time
+        sys.path.insert(0, {str(ROOT / "desktop")!r})
+        import conpty
+        s = conpty.PtySession.spawn([sys.executable, "-c", {inner!r}], cols=80, rows=24)
+        time.sleep(60)
+    """), encoding="utf-8")
+
+    owner = subprocess.Popen([sys.executable, str(helper)],
+                             creationflags=0x08000000)   # CREATE_NO_WINDOW
+    grandchild = None
+    try:
+        for _ in range(80):
+            if gpid.exists() and gpid.read_text().strip():
+                break
+            time.sleep(0.25)
+        assert gpid.exists() and gpid.read_text().strip(), "孫行程沒有起來，測試前提不成立"
+        grandchild = int(gpid.read_text().strip())
+        assert _pid_alive(grandchild), "孫行程應該先是活著的"
+
+        owner.kill()                      # 模擬 TerminateProcess，不給清理機會
+        owner.wait(timeout=15)
+
+        for _ in range(40):               # OS 回收 job 需要一點時間
+            if not _pid_alive(grandchild):
+                break
+            time.sleep(0.25)
+        assert not _pid_alive(grandchild), "強制結束後脫離的孫行程仍存活＝孤兒行程"
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        if grandchild and _pid_alive(grandchild):
+            subprocess.run(["taskkill", "/F", "/PID", str(grandchild)],
+                           capture_output=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    import subprocess
+    r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=20)
+    return str(pid) in (r.stdout or "")
