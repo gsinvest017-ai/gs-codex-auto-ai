@@ -17,18 +17,18 @@
     font:13px/1.5 "Segoe UI",system-ui,sans-serif; display:flex; flex-direction:column;
   }
   /* ── 分頁列 ───────────────────────────────────────────── */
-  #tabbar{
+  #topbar{
     display:flex; align-items:stretch; gap:2px; background:var(--card);
     border-bottom:1px solid var(--line); padding:6px 8px 0; flex:0 0 auto;
-    overflow-x:auto; scrollbar-width:thin;
   }
+  #tabbar{display:flex; gap:2px; overflow-x:auto; scrollbar-width:thin; flex:1 1 auto}
   .tab{
     display:flex; align-items:center; gap:8px; padding:7px 10px; cursor:pointer;
     background:#12151b; border:1px solid var(--line); border-bottom:none;
     border-radius:6px 6px 0 0; color:var(--muted); white-space:nowrap; max-width:230px;
   }
   .tab:hover{color:var(--champagne)}
-  .tab.active{background:var(--bg); color:var(--gold); border-color:var(--gold)}
+  .tab.shown{background:var(--bg); color:var(--gold); border-color:var(--gold)}
   .tab .dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:0 0 auto}
   .tab.dead .dot{background:var(--red)}
   .tab .name{overflow:hidden;text-overflow:ellipsis}
@@ -37,8 +37,17 @@
   #newbtn{
     padding:7px 12px; cursor:pointer; color:var(--gold); background:transparent;
     border:1px dashed var(--line); border-bottom:none; border-radius:6px 6px 0 0;
+    flex:0 0 auto;
   }
   #newbtn:hover{border-color:var(--gold)}
+  /* ── 版面切換 ─────────────────────────────────────────── */
+  #layoutbar{display:flex; gap:4px; align-items:center; padding:0 0 6px 10px; flex:0 0 auto}
+  #layoutbar button{
+    background:#12151b; color:var(--muted); border:1px solid var(--line);
+    border-radius:5px; padding:5px 9px; cursor:pointer; font:inherit; line-height:1;
+  }
+  #layoutbar button:hover{color:var(--champagne)}
+  #layoutbar button.on{color:var(--gold); border-color:var(--gold)}
   /* ── 新增分頁面板 ──────────────────────────────────────── */
   #newpanel{
     display:none; gap:8px; padding:10px 12px; background:var(--card);
@@ -55,15 +64,23 @@
     padding:6px 14px; cursor:pointer; font:inherit; font-weight:600;
   }
   #newpanel label{color:var(--muted)}
-  /* ── 終端機區 ─────────────────────────────────────────── */
-  #panes{flex:1 1 auto; position:relative; min-height:0}
-  .pane{position:absolute; inset:0; display:none; padding:6px 8px}
-  .pane.active{display:block}
-  #empty{
-    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-    color:var(--muted); flex-direction:column; gap:10px; text-align:center;
+  /* ── 面板區（grid，版面由 class 決定）──────────────────── */
+  #panes{flex:1 1 auto; display:grid; gap:6px; padding:6px 8px; min-height:0}
+  #panes.l1 {grid-template:1fr / 1fr}
+  #panes.l2h{grid-template:1fr / 1fr 1fr}
+  #panes.l2v{grid-template:1fr 1fr / 1fr}
+  #panes.l4 {grid-template:1fr 1fr / 1fr 1fr}
+  .slot{
+    position:relative; min-width:0; min-height:0; overflow:hidden;
+    border:1px solid var(--line); border-radius:6px;
   }
-  #empty .big{color:var(--gold); font-size:15px}
+  /* 多面板時才標示焦點——單面板沒有「哪一格」的問題 */
+  #panes:not(.l1) .slot.focused{border-color:var(--gold)}
+  .slot .ph{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--muted); text-align:center; padding:12px; font-size:12px;
+  }
+  .pane{position:absolute; inset:0; padding:4px 6px}
   #status{
     flex:0 0 auto; padding:5px 12px; background:var(--card); color:var(--muted);
     border-top:1px solid var(--line); font-size:12px;
@@ -71,7 +88,18 @@
 </style>
 </head>
 <body>
-  <div id="tabbar"><div id="newbtn" title="開新分頁">＋ 新增</div></div>
+  <div id="topbar">
+    <div id="tabbar"></div>
+    <div id="newbtn" title="開新分頁">＋ 新增</div>
+  </div>
+  <div id="layoutbar">
+    <span style="color:var(--muted);font-size:12px">版面</span>
+    <button data-l="l1"  class="on" title="單一面板">▢</button>
+    <button data-l="l2h" title="左右並排">▥</button>
+    <button data-l="l2v" title="上下堆疊">▤</button>
+    <button data-l="l4"  title="四格">⊞</button>
+    <span id="hint" style="color:var(--muted);font-size:12px;margin-left:8px"></span>
+  </div>
 
   <div id="newpanel">
     <label for="kind">種類</label>
@@ -80,74 +108,142 @@
     <button id="go">開啟</button>
   </div>
 
-  <div id="panes"><div id="empty">
-    <div class="big">還沒有開啟的 session</div>
-    <div>按左上角「＋ 新增」開一個 Claude / Codex / 終端機分頁</div>
-  </div></div>
-
+  <div id="panes" class="l1"></div>
   <div id="status">準備中…</div>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
-// token 從 URL 帶進來（見 termserver.py 的安全說明），之後所有請求都附上。
+// token 從 URL 帶進來（見 termserver.py 的安全說明），之後所有 API 請求都附上。
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const H = { "Content-Type": "application/json", "X-Term-Token": TOKEN };
 const api = (p, opt) => fetch(p, Object.assign({ headers: H }, opt || {}));
 
-const tabs = new Map();          // id -> {term, fit, es, tabEl, paneEl, alive}
-let active = null;
+const SLOT_COUNT = { l1: 1, l2h: 2, l2v: 2, l4: 4 };
+
+const tabs = new Map();     // id -> {term, fit, es, tabEl, paneEl, alive}
+let layout = "l1";
+let slots = [];             // [{el, sid}]，index 對應畫面上的格子
+let focused = 0;            // 目前接收「點分頁」指派的格子
 
 const $ = (s) => document.querySelector(s);
 const status = (m) => { $("#status").textContent = m; };
 
-// base64 → Uint8Array。pty 輸出是任意 bytes，不能當字串傳。
 function b64bytes(b64) {
   const bin = atob(b64), out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
-function fitActive() {
-  if (!active) return;
-  const t = tabs.get(active);
-  if (!t) return;
-  try {
-    t.fit.fit();
-    api(`/api/sessions/${active}/resize`, {
-      method: "POST",
-      body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
-    });
-  } catch (e) { /* 分頁剛關掉時會抓不到尺寸，忽略 */ }
-}
-
-function select(id) {
-  active = id;
-  for (const [sid, t] of tabs) {
-    t.tabEl.classList.toggle("active", sid === id);
-    t.paneEl.classList.toggle("active", sid === id);
+// ── 版面 ────────────────────────────────────────────────────────────────
+function applyLayout(name) {
+  const prev = slots.map((s) => s.sid);          // 記住原本各格顯示誰
+  layout = name;
+  const n = SLOT_COUNT[name];
+  const panes = $("#panes");
+  panes.className = name;
+  panes.innerHTML = "";
+  slots = [];
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement("div");
+    el.className = "slot";
+    el.innerHTML = `<div class="ph">空面板<br><span style="opacity:.7">點上方分頁把 session 放進來</span></div>`;
+    el.addEventListener("mousedown", () => setFocus(i));
+    panes.appendChild(el);
+    slots.push({ el, sid: null });
   }
-  $("#empty").style.display = tabs.size ? "none" : "flex";
-  const t = tabs.get(id);
-  if (t) { requestAnimationFrame(() => { fitActive(); t.term.focus(); }); }
+  // 先還原原本的配置，再用還沒顯示的 session 補滿空格
+  const assigned = new Set();
+  prev.slice(0, n).forEach((sid, i) => {
+    if (sid && tabs.has(sid)) { place(i, sid); assigned.add(sid); }
+  });
+  for (const sid of tabs.keys()) {
+    if (assigned.has(sid)) continue;
+    const empty = slots.findIndex((s) => !s.sid);
+    if (empty < 0) break;
+    place(empty, sid);
+    assigned.add(sid);
+  }
+  setFocus(Math.min(focused, n - 1));
+  document.querySelectorAll("#layoutbar button")
+    .forEach((b) => b.classList.toggle("on", b.dataset.l === name));
+  $("#hint").textContent = n > 1 ? "點分頁 → 放進有金框的那格" : "";
+  refreshTabs();
+  fitAll();
 }
 
+function setFocus(i) {
+  focused = Math.max(0, Math.min(i, slots.length - 1));
+  slots.forEach((s, idx) => s.el.classList.toggle("focused", idx === focused));
+}
+
+/** 把某個 session 的終端機搬進第 i 格（同一個 session 不會同時出現在兩格）。 */
+function place(i, sid) {
+  const t = tabs.get(sid);
+  if (!t || !slots[i]) return;
+  slots.forEach((s, idx) => { if (idx !== i && s.sid === sid) clearSlot(idx); });
+  const slot = slots[i];
+  if (slot.sid && slot.sid !== sid) clearSlot(i);
+  slot.sid = sid;
+  slot.el.querySelector(".ph")?.remove();
+  slot.el.appendChild(t.paneEl);     // 移動 DOM 節點即可，xterm 實體不受影響
+  refreshTabs();
+}
+
+function clearSlot(i) {
+  const slot = slots[i];
+  if (!slot || !slot.sid) return;
+  const t = tabs.get(slot.sid);
+  if (t && t.paneEl.parentElement === slot.el) slot.el.removeChild(t.paneEl);
+  slot.sid = null;
+  if (!slot.el.querySelector(".ph")) {
+    const ph = document.createElement("div");
+    ph.className = "ph";
+    ph.innerHTML = `空面板<br><span style="opacity:.7">點上方分頁把 session 放進來</span>`;
+    slot.el.appendChild(ph);
+  }
+}
+
+function shownIds() { return new Set(slots.map((s) => s.sid).filter(Boolean)); }
+
+function refreshTabs() {
+  const shown = shownIds();
+  for (const [sid, t] of tabs) t.tabEl.classList.toggle("shown", shown.has(sid));
+}
+
+function fitAll() {
+  requestAnimationFrame(() => {
+    for (const slot of slots) {
+      if (!slot.sid) continue;
+      const t = tabs.get(slot.sid);
+      if (!t) continue;
+      try {
+        t.fit.fit();
+        api(`/api/sessions/${slot.sid}/resize`, {
+          method: "POST",
+          body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
+        });
+      } catch (e) { /* 剛關掉的分頁量不到尺寸，忽略 */ }
+    }
+  });
+}
+
+// ── 分頁 ────────────────────────────────────────────────────────────────
 function makeTab(s) {
-  // 分頁按鈕
   const tabEl = document.createElement("div");
-  tabEl.className = "tab active";
+  tabEl.className = "tab";
   tabEl.innerHTML = `<span class="dot"></span><span class="name"></span><span class="x">✕</span>`;
   tabEl.querySelector(".name").textContent = s.title + " · " + s.id;
   tabEl.onclick = (e) => {
     if (e.target.classList.contains("x")) { closeTab(s.id); return; }
-    select(s.id);
+    place(focused, s.id);            // 放進目前有焦點的格子
+    tabs.get(s.id)?.term.focus();
+    fitAll();
   };
-  $("#tabbar").insertBefore(tabEl, $("#newbtn"));
+  $("#tabbar").appendChild(tabEl);
 
-  // 終端機
   const paneEl = document.createElement("div");
-  paneEl.className = "pane active";
-  $("#panes").appendChild(paneEl);
+  paneEl.className = "pane";
 
   const term = new Terminal({
     fontFamily: "Consolas,'Cascadia Mono',monospace", fontSize: 13,
@@ -156,14 +252,17 @@ function makeTab(s) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+
+  // 先把 pane 放進格子再 open()——xterm 需要有尺寸的容器才量得出 cols/rows
+  tabs.set(s.id, { term, fit, es: null, tabEl, paneEl, alive: true });
+  const empty = slots.findIndex((x) => !x.sid);
+  place(empty >= 0 ? empty : focused, s.id);
   term.open(paneEl);
 
-  // 按鍵 → 後端
   term.onData((d) => {
     api(`/api/sessions/${s.id}/input`, { method: "POST", body: JSON.stringify({ data: d }) });
   });
 
-  // 輸出 ← SSE（先重播既有畫面，再接即時）
   const es = new EventSource(`/api/sessions/${s.id}/stream?token=${encodeURIComponent(TOKEN)}`);
   es.addEventListener("data", (ev) => term.write(b64bytes(JSON.parse(ev.data).b64)));
   es.addEventListener("exit", () => {
@@ -173,24 +272,35 @@ function makeTab(s) {
     status(`${s.title} 已結束`);
   });
   es.onerror = () => status("串流中斷（session 可能已結束）");
+  tabs.get(s.id).es = es;
 
-  tabs.set(s.id, { term, fit, es, tabEl, paneEl, alive: true });
-  select(s.id);
+  fitAll();
+  term.focus();
   status(`${s.title} 已開啟（${s.cwd}）`);
 }
 
 async function closeTab(id) {
   const t = tabs.get(id);
   if (!t) return;
-  try { t.es.close(); } catch (e) {}
+  try { t.es && t.es.close(); } catch (e) {}
   await api(`/api/sessions/${id}/close`, { method: "POST" });
+  slots.forEach((s, i) => { if (s.sid === id) clearSlot(i); });
   t.term.dispose();
   t.tabEl.remove();
   t.paneEl.remove();
   tabs.delete(id);
-  const next = tabs.keys().next();
-  if (next.done) { active = null; $("#empty").style.display = "flex"; status("已關閉所有 session"); }
-  else select(next.value);
+  // 有空格就把還沒顯示的 session 補上，不要讓畫面空著
+  const shown = shownIds();
+  for (const sid of tabs.keys()) {
+    if (shown.has(sid)) continue;
+    const empty = slots.findIndex((x) => !x.sid);
+    if (empty < 0) break;
+    place(empty, sid);
+    shown.add(sid);
+  }
+  refreshTabs();
+  fitAll();
+  status(tabs.size ? "已關閉一個 session" : "已關閉所有 session");
 }
 
 async function createSession() {
@@ -209,12 +319,27 @@ async function createSession() {
 }
 
 async function boot() {
+  applyLayout("l1");
   const r = await api("/api/kinds");
   if (!r.ok) { status("無法連線到終端機服務（token 不正確？）"); return; }
   const { kinds } = await r.json();
   $("#kind").innerHTML = kinds
     .map((k) => `<option value="${k.key}"${k.available ? "" : " disabled"}>` +
                 `${k.label}${k.available ? "" : "（未安裝）"}</option>`).join("");
+
+  // 接回「已經在跑」的 session。服務的生命週期跟著 App 而不是這個視窗，
+  // 所以關掉視窗再開、或重新整理，既有 session 仍然活著——不接回來的話畫面
+  // 會是空的，看起來像 session 都不見了。重播緩衝會把畫面內容補回來。
+  const sr = await api("/api/sessions");
+  if (sr.ok) {
+    const { sessions } = await sr.json();
+    const live = sessions.filter((s) => s.alive);
+    live.forEach(makeTab);
+    if (live.length) {
+      status(`接回 ${live.length} 個進行中的 session`);
+      return;
+    }
+  }
   status("就緒 — 按「＋ 新增」開一個 session");
 }
 
@@ -224,9 +349,12 @@ $("#newbtn").onclick = () => {
 };
 $("#go").onclick = createSession;
 $("#prompt").addEventListener("keydown", (e) => { if (e.key === "Enter") createSession(); });
-addEventListener("resize", fitActive);
-// 關掉視窗時把 SSE 收乾淨，別讓後端留著半死的串流執行緒
-addEventListener("beforeunload", () => { for (const t of tabs.values()) { try { t.es.close(); } catch (e) {} } });
+document.querySelectorAll("#layoutbar button")
+  .forEach((b) => b.onclick = () => applyLayout(b.dataset.l));
+addEventListener("resize", fitAll);
+addEventListener("beforeunload", () => {
+  for (const t of tabs.values()) { try { t.es && t.es.close(); } catch (e) {} }
+});
 
 boot();
 </script>
