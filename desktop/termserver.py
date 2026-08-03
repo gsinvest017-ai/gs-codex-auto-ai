@@ -82,11 +82,22 @@ class _Handler(BaseHTTPRequestHandler):
     def mgr(self) -> "sessions_mod.SessionManager":
         return self.server.manager        # type: ignore[attr-defined]
 
-    def _authorised(self) -> bool:
-        """Host 必須是 loopback，且 token 要對（擋 DNS rebinding 與外部網頁）。"""
+    def _authorised(self, *, need_token: bool = True) -> bool:
+        """Host 必須是 loopback；`need_token` 時再驗 token。
+
+        **靜態資產刻意不要求 token**：瀏覽器載入 `<script src>` / `<link href>`
+        時不會帶自訂標頭，URL 上也沒有 query，全部要求 token 的話整頁資產都會 403
+        ——實際用瀏覽器開才會發現，只用 curl 手動加 token 測是驗不出來的。
+
+        這樣不會削弱安全性：這些檔案是公開的 MIT 前端資產，不含任何機密也不提供
+        任何能力。真正的邊界是 `/api/*`（那裡能生出行程），那條路徑仍然要 token。
+        沒有 token 的頁面即使被載入，所有 API 呼叫也都會 403，什麼都做不了。
+        """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
         if host not in {h.strip("[]") for h in _LOOPBACK}:
             return False
+        if not need_token:
+            return True
         token = self.server.token        # type: ignore[attr-defined]
         given = self.headers.get("X-Term-Token") or ""
         if not given:
@@ -99,6 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -121,10 +133,16 @@ class _Handler(BaseHTTPRequestHandler):
     # -- 路由 ---------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if not self._authorised():
+        # 靜態資產不要求 token（瀏覽器載入子資源時不會帶標頭），/api/* 才要求。
+        is_static = (path in ("/", "/index.html", "/favicon.ico")
+                     or path.startswith("/vendor/")
+                     or path.startswith("/static/"))
+        if not self._authorised(need_token=not is_static):
             self._json(403, {"error": "forbidden"})
             return
-        if path in ("/", "/index.html"):
+        if path == "/favicon.ico":
+            self._send(204, b"", "image/x-icon")
+        elif path in ("/", "/index.html"):
             self._static("terminal.html")
         elif path.startswith("/vendor/") or path.startswith("/static/"):
             self._static(path.lstrip("/"))

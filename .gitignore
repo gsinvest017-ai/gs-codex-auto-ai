@@ -61,3 +61,6 @@ vscode-extension/icon.png
 vscode-extension/spec_forge_snapshot/
 vscode-extension/node_modules/
 *.vsix
+
+# 瀏覽器驗證產物（playwright MCP 的 snapshot / 截圖）
+.playwright-mcp/
