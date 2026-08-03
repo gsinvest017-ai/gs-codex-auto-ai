@@ -334,8 +334,11 @@ async function boot() {
   if (sr.ok) {
     const { sessions } = await sr.json();
     const live = sessions.filter((s) => s.alive);
-    live.forEach(makeTab);
     if (live.length) {
+      // 版面先開到裝得下的大小，再把 session 放進去。否則在單面板下逐一 makeTab
+      // 會互相擠掉，只剩最後一個看得到——其他還活著卻要使用者自己去點分頁才發現。
+      applyLayout(live.length >= 3 ? "l4" : live.length === 2 ? "l2h" : "l1");
+      live.forEach(makeTab);
       status(`接回 ${live.length} 個進行中的 session`);
       return;
     }
