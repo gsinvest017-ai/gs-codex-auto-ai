@@ -23,9 +23,20 @@ termserver.py — 內嵌終端機的本機 HTTP 服務，**純標準庫**。
    `msedge.exe --app=<url>` 的參數丟出去的，命令列在 Windows 上同機任何帳號都讀得到
    （工作管理員的「命令列」欄、`Get-CimInstance Win32_Process` 都看得見），token 擺
    那裡等於公開。改成給一枚**用過即丟的 handoff nonce**（`new_handoff()`），
-   頁面載入時伺服器驗過就把真 token 直接注進 HTML；nonce 用掉之後就是死的，
-   之後才讀到命令列的人拿不到任何東西。頁面自己把 token 收進 `sessionStorage`，
-   所以重新整理仍然活著。
+   頁面載入時伺服器驗過就把真 token 直接注進 HTML。頁面自己把 token 收進
+   `sessionStorage`，所以重新整理仍然活著。
+
+   **這道防線縮小了視窗，但沒有把它關上——別把它當成「命令列已經安全」。**
+   nonce 本身還是走同一條命令列，而伺服器沒辦法在 loopback HTTP 上辨識請求者是誰，
+   所以「拿得到未用過的 nonce」就等於「換得到真 token」。實際剩下的是一場競賽：
+   同機另一個帳號如果**事先**就掛著行程建立事件的監聽（WMI
+   `__InstanceCreationEvent`），可以在剛生出來的瀏覽器完成冷啟動之前搶先
+   `GET /?handoff=<nonce>` 把 token 換走。事後才去翻命令列的人則什麼都拿不到。
+
+   為什麼接受這個殘餘風險：這是單人桌機 App，威脅模型裡的「同機另一個帳號」
+   本來就不是預設情境；而要真的關上這條，得把 nonce 從命令列拿掉（例如改成
+   讓瀏覽器先載一個只有本人讀得到的 `file://` 引導頁再轉址），代價與收益不成
+   比例。真要納入該威脅模型時再往那個方向做。
 3. **擋 DNS rebinding**：檢查 `Host` 標頭必須是 loopback。惡意網域即使解析到
    127.0.0.1，Host 也會是它自己的網域，這道就擋掉了。
 4. **不接受任意 argv**：只能開 `sessions.KINDS` 裡的固定種類（claude / codex /

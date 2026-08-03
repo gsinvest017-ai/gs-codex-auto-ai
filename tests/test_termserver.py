@@ -408,3 +408,55 @@ class TestHandoff:
         assert srv.token not in self._page(srv, f"?handoff={oldest}")[1],             "溢位一格，最舊的應被淘汰"
         assert srv.token in self._page(srv, f"?handoff={second}")[1],             "只溢位一格，第二張不該被牽連（整包清掉才會）"
         assert srv.token in self._page(srv, f"?handoff={rest[-1]}")[1]
+
+    def test_concurrent_redemption_has_exactly_one_winner(self, server, monkeypatch):
+        """同一張券被多執行緒同時兌換時，只能有一個拿到 token。
+
+        這是**安全敏感的併發**：服務是 ThreadingHTTPServer，兩個請求同時打進
+        `_page()` 是真的到得了的路徑，而這種地方壞掉不會有任何徵兆——只會安靜地
+        多發一份能生出行程的 token。
+
+        **必須人工把臨界區撐開**才驗得出東西：原生的「比對→移除」之間只隔幾個
+        bytecode，在 GIL 底下幾乎撞不到，拿掉鎖測試照樣全綠（實測過）。這裡把
+        比對函式換成「比中就先睡一下」，讓兩條執行緒一定同時站在移除之前——
+        拿掉 `_handoff_lock` 這條就會紅。
+        """
+        import threading
+        srv, _ = server
+        nonce = srv.new_handoff()
+
+        real = termserver.secrets.compare_digest
+
+        def slow_compare(a, b):
+            hit = real(a, b)
+            if hit and a == nonce:
+                time.sleep(0.15)      # 撐開「已比中、還沒移除」的那段
+            return hit
+
+        monkeypatch.setattr(termserver.secrets, "compare_digest", slow_compare)
+
+        start = threading.Event()
+        results: list[str] = []        # "token" / "clean" / "error"
+        lock = threading.Lock()
+
+        def race():
+            start.wait()
+            try:
+                code, body = self._page(srv, f"?handoff={nonce}")
+                r = "token" if srv.token in body else ("clean" if code == 200 else "error")
+            except Exception:
+                r = "error"
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=race) for _ in range(6)]
+        for t in threads:
+            t.start()
+        start.set()                    # 一起衝，最大化競態機會
+        for t in threads:
+            t.join(timeout=30)
+        assert len(results) == 6, "有執行緒沒跑完"
+        assert results.count("token") == 1,             f"{results.count('token')} 個執行緒拿到 token，應該只有 1 個"
+        # 輸掉的要拿到一張**乾淨的**無 token 頁面。沒有鎖時它們會同時通過比對、
+        # 接著搶著移除同一張券，第二個之後全部炸成 500——這就是變異測試看的訊號。
+        assert results.count("error") == 0, f"出現 {results.count('error')} 個錯誤：{results}"
