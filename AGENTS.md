@@ -140,6 +140,9 @@ PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直
     繼承，不是 bug。要驗證請用**沒有 console 的行程**跑（見 `conpty.py` 的對照表）。
   * `termserver` 能生行程，所以**四道防線缺一不可**：只綁 127.0.0.1、一次性 token、
     擋非 loopback 的 `Host`（DNS rebinding）、只允許固定 kind（不接受任意 argv）。
+    **要把 URL 交給另一個行程時一律用 `handoff_url` 而不是 `url`**——命令列在 Windows
+    上同機任何帳號都讀得到，token 擺上去等於公開；handoff 是用過即丟的券，頁面載入時
+    才換到真 token。
   * **視窗內嵌（`winembed.py`）不能只靠 `SetParent`**：Chromium 在 `--app` 模式
     是**自己畫標題列**的（拿掉 `WS_CAPTION` 也去不掉），要量出畫布
     （`Chrome_RenderWidgetHostHWND`）相對視窗上緣的 inset、把子視窗往上挪同樣的

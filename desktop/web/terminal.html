@@ -114,8 +114,17 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script>
-// token 從 URL 帶進來（見 termserver.py 的安全說明），之後所有 API 請求都附上。
-const TOKEN = new URLSearchParams(location.search).get("token") || "";
+// token 的三個來源，依序（見 termserver.py 的安全說明）：
+//  1. 伺服器注入——用「用過即丟的 handoff nonce」換到的，token 不會出現在 URL 上，
+//     因為這個頁面是被 `msedge.exe --app=<url>` 開的，命令列同機人人看得到。
+//  2. sessionStorage——handoff 用掉之後重新整理仍然要能活。
+//  3. URL 上的 token——舊的 pywebview / 瀏覽器分頁路徑還在用。
+const SS_KEY = "codexautoai-term-token";
+const TOKEN = window.__TERM_TOKEN__
+  || (() => { try { return sessionStorage.getItem(SS_KEY); } catch (e) { return ""; } })()
+  || new URLSearchParams(location.search).get("token")
+  || "";
+if (TOKEN) { try { sessionStorage.setItem(SS_KEY, TOKEN); } catch (e) {} }
 const H = { "Content-Type": "application/json", "X-Term-Token": TOKEN };
 const api = (p, opt) => fetch(p, Object.assign({ headers: H }, opt || {}));
 

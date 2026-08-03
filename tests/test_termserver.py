@@ -337,3 +337,59 @@ class TestConcurrency:
         g2 = sess.new_stream()
         assert g2 > g1
         assert sess.stream_gen == g2      # 舊的 g1 會看到不相等而自行結束
+
+
+class TestHandoff:
+    """token 不可以出現在交給外部行程的 URL 上。
+
+    內嵌終端機是用 `msedge.exe --app=<url>` 開頁面的，Windows 上同機任何帳號都讀得到
+    別人的命令列（工作管理員的「命令列」欄、`Get-CimInstance Win32_Process`）。
+    token 擺在那裡等於公開，而這個服務**能生出行程**。所以改成給一枚用過即丟的
+    handoff nonce，頁面載入時才把真 token 注進 HTML。
+    """
+
+    @staticmethod
+    def _page(srv, query=""):
+        url = f"http://127.0.0.1:{srv.port}/{query}"
+        with urllib.request.urlopen(url, timeout=10) as f:
+            return f.status, f.read().decode("utf-8")
+
+    def test_handoff_url_does_not_leak_the_token(self, server):
+        srv, _ = server
+        assert srv.token not in srv.handoff_url
+
+    def test_each_open_gets_a_fresh_handoff(self, server):
+        """開啟失敗時下一次不能拿到已作廢的券，所以每次都要發新的。"""
+        srv, _ = server
+        assert srv.handoff_url != srv.handoff_url
+
+    def test_valid_handoff_injects_the_token(self, server):
+        srv, _ = server
+        nonce = srv.new_handoff()
+        code, body = self._page(srv, f"?handoff={nonce}")
+        assert code == 200
+        assert "__TERM_TOKEN__" in body and srv.token in body
+
+    def test_handoff_is_single_use(self, server):
+        """用過就死——之後才讀到命令列的人拿不到任何東西。"""
+        srv, _ = server
+        nonce = srv.new_handoff()
+        assert srv.token in self._page(srv, f"?handoff={nonce}")[1]
+        assert srv.token not in self._page(srv, f"?handoff={nonce}")[1]
+
+    def test_wrong_handoff_serves_page_without_token(self, server):
+        """頁面本身是公開資產，照送；沒 token 的話所有 /api/* 都會 403。"""
+        srv, _ = server
+        code, body = self._page(srv, "?handoff=not-a-real-nonce")
+        assert code == 200 and srv.token not in body
+
+    def test_page_without_handoff_has_no_token(self, server):
+        srv, _ = server
+        code, body = self._page(srv)
+        assert code == 200 and srv.token not in body
+
+    def test_token_alone_is_still_useless_without_api_access(self, server):
+        """守住真正的邊界：拿不到 token 就開不了 session。"""
+        srv, _ = server
+        code, _ = call(srv, "/api/sessions", {"kind": "test"}, token="wrong")
+        assert code == 403

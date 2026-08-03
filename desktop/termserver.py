@@ -18,8 +18,14 @@ termserver.py — 內嵌終端機的本機 HTTP 服務，**純標準庫**。
 能對 `127.0.0.1` 發請求。四道防線：
 
 1. **只綁 127.0.0.1**，且 port 隨機。
-2. **每次啟動產生一次性 token**，所有 API 都要帶；token 只透過 App 自己開啟的
-   URL 傳遞。沒有 token 的請求一律 403。
+2. **每次啟動產生一次性 token**，所有 API 都要帶。沒有 token 的請求一律 403。
+   token **不放在給外部行程的 URL 上**——內嵌終端機是把 URL 當
+   `msedge.exe --app=<url>` 的參數丟出去的，命令列在 Windows 上同機任何帳號都讀得到
+   （工作管理員的「命令列」欄、`Get-CimInstance Win32_Process` 都看得見），token 擺
+   那裡等於公開。改成給一枚**用過即丟的 handoff nonce**（`new_handoff()`），
+   頁面載入時伺服器驗過就把真 token 直接注進 HTML；nonce 用掉之後就是死的，
+   之後才讀到命令列的人拿不到任何東西。頁面自己把 token 收進 `sessionStorage`，
+   所以重新整理仍然活著。
 3. **擋 DNS rebinding**：檢查 `Host` 標頭必須是 loopback。惡意網域即使解析到
    127.0.0.1，Host 也會是它自己的網域，這道就擋掉了。
 4. **不接受任意 argv**：只能開 `sessions.KINDS` 裡的固定種類（claude / codex /
@@ -143,7 +149,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
         elif path in ("/", "/index.html"):
-            self._static("terminal.html")
+            self._page()
         elif path.startswith("/vendor/") or path.startswith("/static/"):
             self._static(path.lstrip("/"))
         elif path == "/api/kinds":
@@ -174,6 +180,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     # -- 靜態檔 -------------------------------------------------------------
+    def _page(self) -> None:
+        """送出終端機頁面；帶著**還沒用過的** handoff nonce 才把真 token 注進去。
+
+        沒帶（或已用掉）也照樣送頁面——頁面本身是公開資產，沒 token 的話所有
+        `/api/*` 呼叫都會 403，什麼都做不了。這樣重新整理不會變成一張錯誤頁，
+        而是靠頁面自己存的 `sessionStorage` 接回來。
+        """
+        target = (WEB_ROOT / "terminal.html").resolve()
+        if not target.is_file():
+            self._json(404, {"error": "not found"})
+            return
+        body = target.read_bytes()
+        given = (parse_qs(urlparse(self.path).query).get("handoff") or [""])[0]
+        if given and self.server.consume_handoff(given):   # type: ignore[attr-defined]
+            token = self.server.token                      # type: ignore[attr-defined]
+            inject = f"<script>window.__TERM_TOKEN__={json.dumps(token)};</script>"
+            body = body.replace(b"</head>", inject.encode("utf-8") + b"</head>", 1)
+        self._send(200, body, "text/html; charset=utf-8")
+
     def _static(self, rel: str) -> None:
         # 防目錄穿越：解析後必須仍在 WEB_ROOT 底下
         target = (WEB_ROOT / rel).resolve()
@@ -297,6 +322,11 @@ class TerminalServer:
         self._httpd = ThreadingHTTPServer((host, port), _Handler)
         self._httpd.manager = manager          # type: ignore[attr-defined]
         self._httpd.token = self.token         # type: ignore[attr-defined]
+        # 用過即丟的入口券。每次「開啟終端機」發一張新的，所以就算某次開啟失敗，
+        # 下一次也不會拿到已經作廢的券。上限只是防呆（沒人會連按 32 次）。
+        self._handoffs: set[str] = set()
+        self._handoff_lock = threading.Lock()
+        self._httpd.consume_handoff = self._consume_handoff  # type: ignore[attr-defined]
         self._httpd.stopping = threading.Event()  # type: ignore[attr-defined]
         self._httpd.daemon_threads = True
         self._thread: Optional[threading.Thread] = None
@@ -305,9 +335,36 @@ class TerminalServer:
     def port(self) -> int:
         return self._httpd.server_address[1]
 
+    MAX_HANDOFFS = 32
+
+    def new_handoff(self) -> str:
+        """發一張用過即丟的入口券。**要把 URL 交給外部行程時一律用這個**。"""
+        nonce = secrets.token_urlsafe(16)
+        with self._handoff_lock:
+            if len(self._handoffs) >= self.MAX_HANDOFFS:
+                self._handoffs.clear()
+            self._handoffs.add(nonce)
+        return nonce
+
+    def _consume_handoff(self, nonce: str) -> bool:
+        with self._handoff_lock:
+            for known in self._handoffs:
+                # compare_digest：別讓比對時間洩漏 nonce 前綴
+                if secrets.compare_digest(known, nonce):
+                    self._handoffs.discard(known)
+                    return True
+        return False
+
+    @property
+    def handoff_url(self) -> str:
+        """給外部行程開的入口 URL。命令列會被同機其他帳號看到，所以這裡放的是
+        用過即丟的 nonce 而不是 token（見模組 docstring 第 2 點）。"""
+        return f"http://127.0.0.1:{self.port}/?handoff={self.new_handoff()}"
+
     @property
     def url(self) -> str:
-        """帶 token 的入口 URL（只給 App 自己開，不要外流）。"""
+        """帶 token 的入口 URL。**只在同一個行程內用**（例如 pywebview 內嵌控制項）；
+        要交給另一個行程當命令列參數請改用 `handoff_url`。"""
         return f"http://127.0.0.1:{self.port}/?token={self.token}"
 
     def start(self) -> "TerminalServer":

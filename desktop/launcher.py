@@ -124,15 +124,16 @@ class EmbeddedTerminal:
                 self._mgr.create(kind=kind, prompt=prompt)
             except Exception as exc:  # noqa: BLE001
                 messagebox.showerror("CodexAutoAI", f"開啟 {kind} session 失敗：{exc}")
-        url = srv.url
+        # 交給另一個行程（瀏覽器外殼）開的 URL 一律用 handoff nonce——命令列在
+        # Windows 上同機任何帳號都讀得到，token 放上去等於公開。見 termserver 說明。
         if shell is not None:
             try:
-                if shell(url):
-                    return url
+                if shell(srv.handoff_url):
+                    return srv.url
             except Exception:  # noqa: BLE001 — 內嵌只是體驗升級，壞了就走舊路
                 pass
-        self._show(url)
-        return url
+        self._show(srv.handoff_url)
+        return srv.url
 
     def _show(self, url: str) -> None:
         """退路：優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""
@@ -578,35 +579,69 @@ class LauncherUI:
         self._embed = None
         self._embed_url = ""
         self._resize_job = None
+        self._embed_busy = False      # attach 進行中；擋 root.update() 造成的重入
+        self._btn_state: dict[str, str] = {}
 
     def show_terminal_pane(self, url: str) -> bool:
-        """把終端機頁面嵌進右欄。回 False 代表這台機器嵌不了，呼叫端自行退回瀏覽器。"""
+        """把終端機頁面嵌進右欄。回 False 代表這台機器嵌不了，呼叫端自行退回瀏覽器。
+
+        **必須擋重入**：`attach()` 會等瀏覽器視窗出現（最多 ~25 秒），期間靠
+        `root.update()` 讓 UI 不凍住——而 `root.update()` 會把事件迴圈再跑一輪，
+        使用者這時再按一次按鈕，第二個 callback 就會在第一個還沒回來時進來，
+        變成同時開兩個瀏覽器外殼（第一個還會變成沒人收的孤兒）。
+        """
         ok, why = winembed.available() if winembed else (False, "缺少 winembed 模組")
         if not ok:
             self.status.config(text=f"視窗內嵌不可用（{why}），改用瀏覽器開啟", fg=GOLD)
             return False
+        if self._embed_busy:
+            self.status.config(text="內嵌終端機正在開啟中…", fg=GOLD)
+            return True                    # 回 True＝已處理，別再退回去開瀏覽器
         self._embed_url = url
         if self._embed is not None and self._embed.alive:
             self._expand_window()          # 已經嵌好了，收合過就再展開
             return True
 
-        self._expand_window()
-        self.status.config(text="正在開啟內嵌終端機…", fg=GOLD)
-        self.root.update()                 # 先讓 frame 有真正的尺寸與 HWND
-        emb = winembed.EmbeddedBrowser()
-        okd = emb.attach(self.term_host.winfo_id(), url,
-                         width=max(self.term_host.winfo_width(), 600),
-                         height=max(self.term_host.winfo_height(), 400),
-                         pump=self.root.update)
-        if not okd:
-            emb.close()
-            self._collapse_window()
-            self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟", fg=GOLD)
-            return False
-        self._embed = emb
-        TERMINAL.add_closer(emb.close)     # App 關閉時一併收掉，不留孤兒 Chromium
-        self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
-        return True
+        self._embed_busy = True
+        self._set_actions_enabled(False)
+        try:
+            self._expand_window()
+            self.status.config(text="正在開啟內嵌終端機…", fg=GOLD)
+            self.root.update()             # 先讓 frame 有真正的尺寸與 HWND
+            emb = winembed.EmbeddedBrowser()
+            okd = emb.attach(self.term_host.winfo_id(), url,
+                             width=max(self.term_host.winfo_width(), 600),
+                             height=max(self.term_host.winfo_height(), 400),
+                             pump=self.root.update)
+            if not okd:
+                emb.close()
+                self._collapse_window()
+                self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟",
+                                   fg=GOLD)
+                return False
+            self._embed = emb
+            TERMINAL.add_closer(emb.close)  # App 關閉時一併收掉，不留孤兒 Chromium
+            self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
+            return True
+        finally:
+            self._embed_busy = False
+            self._set_actions_enabled(True)
+
+    def _set_actions_enabled(self, on: bool) -> None:
+        """開啟期間把會再觸發一次的按鈕停掉（重入防線的第二層，也讓使用者看得出在忙）。
+
+        「啟動新任務」的正常狀態由 `refresh()` 依環境檢查決定，所以這裡記住原本的
+        狀態再還原，不要自作主張把它打開。
+        """
+        for name in ("launch_btn", "seed_btn", "term_btn"):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            if not on:
+                self._btn_state[name] = btn.cget("state")
+                btn.config(state="disabled")
+            else:
+                btn.config(state=self._btn_state.pop(name, "normal"))
 
     def hide_terminal_pane(self) -> None:
         """收合右欄。**session 不會被關掉**——服務的生命週期跟著 App，重新展開會接回。"""
@@ -617,13 +652,16 @@ class LauncherUI:
         self.status.config(text="已收合終端機（session 仍在執行，可再開啟接回）", fg=MUTED)
 
     def on_pop_out(self) -> None:
-        """把終端機丟回獨立視窗——想把它拉到第二螢幕時用。"""
-        url = self._embed_url or TERMINAL.open()
+        """把終端機丟回獨立視窗——想把它拉到第二螢幕時用。
+
+        重開一次 `TERMINAL.open()` 而不是沿用 `self._embed_url`：那張 handoff 券
+        已經被嵌進來的那個頁面用掉了，拿它去開新視窗會開出一個沒有 token 的頁面。
+        """
         if self._embed is not None:
             self._embed.close()
             self._embed = None
         self._collapse_window()
-        TERMINAL._show(url)
+        TERMINAL.open()          # 不傳 shell → 直接走獨立視窗那條路
         self.status.config(text="已改用獨立視窗開啟終端機", fg=GREEN)
 
     def _expand_window(self) -> None:
