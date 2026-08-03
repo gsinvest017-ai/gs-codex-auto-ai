@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>CodexAutoAI 終端機</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  /* GS 暗金主題，與桌面 App 的 tkinter 配色一致 */
+  :root{
+    --bg:#0f1115; --card:#171a21; --gold:#d4af37; --champagne:#e7ddc7;
+    --muted:#8b949e; --green:#3fb950; --red:#f85149; --line:#242832;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--champagne);
+    font:13px/1.5 "Segoe UI",system-ui,sans-serif; display:flex; flex-direction:column;
+  }
+  /* ── 分頁列 ───────────────────────────────────────────── */
+  #tabbar{
+    display:flex; align-items:stretch; gap:2px; background:var(--card);
+    border-bottom:1px solid var(--line); padding:6px 8px 0; flex:0 0 auto;
+    overflow-x:auto; scrollbar-width:thin;
+  }
+  .tab{
+    display:flex; align-items:center; gap:8px; padding:7px 10px; cursor:pointer;
+    background:#12151b; border:1px solid var(--line); border-bottom:none;
+    border-radius:6px 6px 0 0; color:var(--muted); white-space:nowrap; max-width:230px;
+  }
+  .tab:hover{color:var(--champagne)}
+  .tab.active{background:var(--bg); color:var(--gold); border-color:var(--gold)}
+  .tab .dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:0 0 auto}
+  .tab.dead .dot{background:var(--red)}
+  .tab .name{overflow:hidden;text-overflow:ellipsis}
+  .tab .x{opacity:.5;padding:0 2px;border-radius:3px}
+  .tab .x:hover{opacity:1;background:#2a2f3a;color:var(--red)}
+  #newbtn{
+    padding:7px 12px; cursor:pointer; color:var(--gold); background:transparent;
+    border:1px dashed var(--line); border-bottom:none; border-radius:6px 6px 0 0;
+  }
+  #newbtn:hover{border-color:var(--gold)}
+  /* ── 新增分頁面板 ──────────────────────────────────────── */
+  #newpanel{
+    display:none; gap:8px; padding:10px 12px; background:var(--card);
+    border-bottom:1px solid var(--line); align-items:center; flex-wrap:wrap;
+  }
+  #newpanel.show{display:flex}
+  #newpanel select,#newpanel input{
+    background:#0d1015; color:var(--champagne); border:1px solid var(--line);
+    border-radius:5px; padding:6px 8px; font:inherit;
+  }
+  #newpanel input{flex:1; min-width:220px}
+  #newpanel button{
+    background:var(--gold); color:#000; border:0; border-radius:5px;
+    padding:6px 14px; cursor:pointer; font:inherit; font-weight:600;
+  }
+  #newpanel label{color:var(--muted)}
+  /* ── 終端機區 ─────────────────────────────────────────── */
+  #panes{flex:1 1 auto; position:relative; min-height:0}
+  .pane{position:absolute; inset:0; display:none; padding:6px 8px}
+  .pane.active{display:block}
+  #empty{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--muted); flex-direction:column; gap:10px; text-align:center;
+  }
+  #empty .big{color:var(--gold); font-size:15px}
+  #status{
+    flex:0 0 auto; padding:5px 12px; background:var(--card); color:var(--muted);
+    border-top:1px solid var(--line); font-size:12px;
+  }
+</style>
+</head>
+<body>
+  <div id="tabbar"><div id="newbtn" title="開新分頁">＋ 新增</div></div>
+
+  <div id="newpanel">
+    <label for="kind">種類</label>
+    <select id="kind"></select>
+    <input id="prompt" placeholder="需求（選填，只有 Claude / Codex 會用到）">
+    <button id="go">開啟</button>
+  </div>
+
+  <div id="panes"><div id="empty">
+    <div class="big">還沒有開啟的 session</div>
+    <div>按左上角「＋ 新增」開一個 Claude / Codex / 終端機分頁</div>
+  </div></div>
+
+  <div id="status">準備中…</div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script>
+// token 從 URL 帶進來（見 termserver.py 的安全說明），之後所有請求都附上。
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const H = { "Content-Type": "application/json", "X-Term-Token": TOKEN };
+const api = (p, opt) => fetch(p, Object.assign({ headers: H }, opt || {}));
+
+const tabs = new Map();          // id -> {term, fit, es, tabEl, paneEl, alive}
+let active = null;
+
+const $ = (s) => document.querySelector(s);
+const status = (m) => { $("#status").textContent = m; };
+
+// base64 → Uint8Array。pty 輸出是任意 bytes，不能當字串傳。
+function b64bytes(b64) {
+  const bin = atob(b64), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function fitActive() {
+  if (!active) return;
+  const t = tabs.get(active);
+  if (!t) return;
+  try {
+    t.fit.fit();
+    api(`/api/sessions/${active}/resize`, {
+      method: "POST",
+      body: JSON.stringify({ cols: t.term.cols, rows: t.term.rows }),
+    });
+  } catch (e) { /* 分頁剛關掉時會抓不到尺寸，忽略 */ }
+}
+
+function select(id) {
+  active = id;
+  for (const [sid, t] of tabs) {
+    t.tabEl.classList.toggle("active", sid === id);
+    t.paneEl.classList.toggle("active", sid === id);
+  }
+  $("#empty").style.display = tabs.size ? "none" : "flex";
+  const t = tabs.get(id);
+  if (t) { requestAnimationFrame(() => { fitActive(); t.term.focus(); }); }
+}
+
+function makeTab(s) {
+  // 分頁按鈕
+  const tabEl = document.createElement("div");
+  tabEl.className = "tab active";
+  tabEl.innerHTML = `<span class="dot"></span><span class="name"></span><span class="x">✕</span>`;
+  tabEl.querySelector(".name").textContent = s.title + " · " + s.id;
+  tabEl.onclick = (e) => {
+    if (e.target.classList.contains("x")) { closeTab(s.id); return; }
+    select(s.id);
+  };
+  $("#tabbar").insertBefore(tabEl, $("#newbtn"));
+
+  // 終端機
+  const paneEl = document.createElement("div");
+  paneEl.className = "pane active";
+  $("#panes").appendChild(paneEl);
+
+  const term = new Terminal({
+    fontFamily: "Consolas,'Cascadia Mono',monospace", fontSize: 13,
+    cursorBlink: true, scrollback: 5000, allowProposedApi: true,
+    theme: { background: "#0f1115", foreground: "#e7ddc7", cursor: "#d4af37" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(paneEl);
+
+  // 按鍵 → 後端
+  term.onData((d) => {
+    api(`/api/sessions/${s.id}/input`, { method: "POST", body: JSON.stringify({ data: d }) });
+  });
+
+  // 輸出 ← SSE（先重播既有畫面，再接即時）
+  const es = new EventSource(`/api/sessions/${s.id}/stream?token=${encodeURIComponent(TOKEN)}`);
+  es.addEventListener("data", (ev) => term.write(b64bytes(JSON.parse(ev.data).b64)));
+  es.addEventListener("exit", () => {
+    const t = tabs.get(s.id);
+    if (t) { t.alive = false; t.tabEl.classList.add("dead"); }
+    term.write("\r\n\x1b[90m[session 已結束]\x1b[0m\r\n");
+    status(`${s.title} 已結束`);
+  });
+  es.onerror = () => status("串流中斷（session 可能已結束）");
+
+  tabs.set(s.id, { term, fit, es, tabEl, paneEl, alive: true });
+  select(s.id);
+  status(`${s.title} 已開啟（${s.cwd}）`);
+}
+
+async function closeTab(id) {
+  const t = tabs.get(id);
+  if (!t) return;
+  try { t.es.close(); } catch (e) {}
+  await api(`/api/sessions/${id}/close`, { method: "POST" });
+  t.term.dispose();
+  t.tabEl.remove();
+  t.paneEl.remove();
+  tabs.delete(id);
+  const next = tabs.keys().next();
+  if (next.done) { active = null; $("#empty").style.display = "flex"; status("已關閉所有 session"); }
+  else select(next.value);
+}
+
+async function createSession() {
+  const kind = $("#kind").value;
+  const prompt = $("#prompt").value.trim();
+  status("啟動中…");
+  const r = await api("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ kind, prompt, cols: 100, rows: 30 }),
+  });
+  const body = await r.json();
+  if (!r.ok) { status("開啟失敗：" + (body.error || r.status)); return; }
+  $("#newpanel").classList.remove("show");
+  $("#prompt").value = "";
+  makeTab(body);
+}
+
+async function boot() {
+  const r = await api("/api/kinds");
+  if (!r.ok) { status("無法連線到終端機服務（token 不正確？）"); return; }
+  const { kinds } = await r.json();
+  $("#kind").innerHTML = kinds
+    .map((k) => `<option value="${k.key}"${k.available ? "" : " disabled"}>` +
+                `${k.label}${k.available ? "" : "（未安裝）"}</option>`).join("");
+  status("就緒 — 按「＋ 新增」開一個 session");
+}
+
+$("#newbtn").onclick = () => {
+  $("#newpanel").classList.toggle("show");
+  if ($("#newpanel").classList.contains("show")) $("#prompt").focus();
+};
+$("#go").onclick = createSession;
+$("#prompt").addEventListener("keydown", (e) => { if (e.key === "Enter") createSession(); });
+addEventListener("resize", fitActive);
+// 關掉視窗時把 SSE 收乾淨，別讓後端留著半死的串流執行緒
+addEventListener("beforeunload", () => { for (const t of tabs.values()) { try { t.es.close(); } catch (e) {} } });
+
+boot();
+</script>
+</body>
+</html>

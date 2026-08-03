@@ -128,6 +128,17 @@ PyInstaller 凍結、被塞進 `.vsix`、被丟進使用者的任意專案裡直
   `CLAUDE_CODE_OAUTH_TOKEN`）**都從同一份 Pro/Max 訂閱額度扣**——2026-06-15 原訂把
   Agent SDK 用量拆成獨立 credit 的計畫已取消。沒裝 `ccusage` 的機器 fail-open 照跑。
   臨時關閉：`CODEXAUTOAI_USAGE_GATE=0`
+- 內嵌終端機（desktop）：`conpty.py`（純 ctypes ConPTY / POSIX pty）→ `sessions.py`
+  （多 session + 重播緩衝）→ `termserver.py`（只綁 loopback 的 HTTP/SSE）→
+  `web/terminal.html`（vendored xterm.js 分頁 UI）。四個共同的鐵則：
+  * **不要引入 pywinpty / PyConPTY**——前者要 Rust 編譯（破壞純標準庫不變式），
+    後者是 GPLv3（本 repo 公開發行，不能用）。ConPTY 用 ctypes 就能呼叫。
+  * **從終端機測試會看到假象**（讀不到輸出、裸 cmd 秒退）——那是 Windows console
+    繼承，不是 bug。要驗證請用**沒有 console 的行程**跑（見 `conpty.py` 的對照表）。
+  * `termserver` 能生行程，所以**四道防線缺一不可**：只綁 127.0.0.1、一次性 token、
+    擋非 loopback 的 `Host`（DNS rebinding）、只允許固定 kind（不接受任意 argv）。
+  * 新增前端資產要同步加進 `installer/build-app.ps1` 的 `--add-data`，否則凍結版
+    只會拿到 404
 - 需求字串清理：`desktop/launcher.py` 的 `_safe_prompt` 與 `vscode-extension/prompt.js`
   的 `safePrompt` 是**同一套規則的兩個實作**（需求最終會經過一層 shell，`$(...)` /
   `` ` `` / `&` 必須先失效）。改一邊就要改另一邊，`tests/test_launcher.py` 有 parity 測試把關

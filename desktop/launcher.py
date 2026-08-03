@@ -3,7 +3,8 @@
 launcher.py — CodexAutoAI 桌面啟動器（tkinter，純標準庫）。
 
 給完全不懂指令的人：點桌面圖示 → 看環境是否就緒 → 一鍵「設定/修復」把能自動的跑掉 →
-勾選是否要「非停模式（autopilot）」→ 在輸入框打一句需求按「啟動」→ 自動開新終端機跑互動式
+勾選是否要「非停模式（autopilot）」→ 在輸入框打一句需求按「啟動」→ 預設在**內嵌終端機**
+（App 內分頁管理，見 conpty/sessions/termserver）開一個 session 跑互動式
 claude，完整七階段開始。啟動後主視窗顯示 Pipeline 進度卡（讀 `log/events.jsonl`），可按
 「■ 中止」於下一個回合邊界停止 pipeline（寫 `log/abort.flag`）。
 
@@ -54,6 +55,83 @@ def app_dir() -> Path:
 
 APP_DIR = app_dir()
 IS_WIN = os.name == "nt"
+
+
+class EmbeddedTerminal:
+    """內嵌終端機：在 App 內用分頁管理 Claude / Codex session。
+
+    取代原本「每開一個 session 就 Popen 一個外部原生終端機視窗」的做法——那會讓
+    session 散在桌面各處、關掉 App 也收不乾淨、App 完全看不到裡面在幹嘛。
+
+    服務是**延遲啟動**的（第一次用到才起），沒用到就不佔 port、不開執行緒。
+    外殼優先用 pywebview（原生視窗），沒裝就退回預設瀏覽器——這樣沒裝任何額外
+    套件的公開使用者照樣能用，裝了才升級體驗，`desktop/` 的純標準庫不變式不破。
+    """
+
+    def __init__(self) -> None:
+        self._srv = None
+        self._mgr = None
+        self._lock = threading.Lock()
+
+    def available(self) -> tuple[bool, str]:
+        """這台機器能不能用內嵌終端機。"""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import conpty  # noqa: PLC0415
+            if not conpty.pty_available():
+                return False, "這台 Windows 太舊（內嵌終端機需要 Windows 10 1809 以上）"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"載入 PTY 後端失敗：{exc}"
+
+    def _ensure(self):
+        with self._lock:
+            if self._srv is not None:
+                return self._srv
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import sessions as sessions_mod   # noqa: PLC0415
+            import termserver                 # noqa: PLC0415
+            self._mgr = sessions_mod.SessionManager(default_cwd=str(APP_DIR))
+            self._srv = termserver.TerminalServer(self._mgr).start()
+            return self._srv
+
+    def open(self, *, kind: str | None = None, prompt: str = "") -> str:
+        """開啟（或聚焦）終端機視窗；可順便先建一個 session。回傳 URL。"""
+        srv = self._ensure()
+        if kind:
+            try:
+                self._mgr.create(kind=kind, prompt=prompt)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("CodexAutoAI", f"開啟 {kind} session 失敗：{exc}")
+        url = srv.url
+        self._show(url)
+        return url
+
+    def _show(self, url: str) -> None:
+        """優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""
+        try:
+            import webview  # noqa: PLC0415  # pywebview，選用
+        except Exception:  # noqa: BLE001
+            webbrowser.open(url)
+            return
+        try:
+            webview.create_window("CodexAutoAI 終端機", url, width=1100, height=720)
+            threading.Thread(target=webview.start, daemon=True).start()
+        except Exception:  # noqa: BLE001
+            webbrowser.open(url)
+
+    def shutdown(self) -> None:
+        """App 結束時收乾淨——不收的話 pty 子行程（claude/node）會變孤兒。"""
+        with self._lock:
+            srv, self._srv = self._srv, None
+        if srv is not None:
+            try:
+                srv.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+TERMINAL = EmbeddedTerminal()
 
 
 def load_progress_model(log_path: Path) -> dict | None:
@@ -310,8 +388,8 @@ class LauncherUI:
         self.root = root
         root.title("CodexAutoAI")
         root.configure(bg=BG)
-        root.geometry("560x820")
-        root.minsize(520, 780)
+        root.geometry("560x900")
+        root.minsize(520, 840)
         ico = APP_DIR / "desktop" / "codexautoai.ico"
         if not ico.exists():
             ico = APP_DIR / "codexautoai.ico"
@@ -387,6 +465,16 @@ class LauncherUI:
             anchor="w",
         ).pack(fill="x", padx=24, pady=(8, 0))
 
+        # 內嵌終端機：預設開。關掉才會回到舊行為（每個 session 跳一個外部終端機視窗）。
+        self.embed_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            self.root,
+            text="內嵌終端機：session 開在 App 內、用分頁管理（取消勾選則另開外部終端機）",
+            variable=self.embed_var, font=self.mono, fg=MUTED, bg=BG,
+            activebackground=BG, activeforeground=CHAMPAGNE, selectcolor=CARD,
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(2, 0))
+
         self.launch_btn = tk.Button(self.root, text="🚀 啟動新任務", command=self.on_launch,
                                     font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=(10, 6))
@@ -395,7 +483,13 @@ class LauncherUI:
         self.seed_btn = tk.Button(self.root, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
                                   command=self.on_seed_from_spec, font=self.h2,
                                   bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
-        self.seed_btn.pack(fill="x", padx=22, pady=(0, 10))
+        self.seed_btn.pack(fill="x", padx=22, pady=(0, 6))
+
+        # 直接開終端機（不建 session）：想手動開 codex 或一般 shell 分頁時用。
+        self.term_btn = tk.Button(self.root, text="🖥 開啟內嵌終端機（分頁管理 Claude / Codex）",
+                                  command=self.on_open_terminal, font=self.h2,
+                                  bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
+        self.term_btn.pack(fill="x", padx=22, pady=(0, 10))
 
         # 進度卡：讀 log/events.jsonl（共用 tools/events_model.py）。
         # 在這之前，App 按下啟動後就只是「開了一個終端機」——pipeline 跑到哪、
@@ -499,10 +593,34 @@ class LauncherUI:
         self.status.config(text="設定視窗已開啟，完成後請按「↻ 重新檢查」", fg=GOLD)
 
     def on_launch(self) -> None:
+        """啟動新任務。預設走**內嵌終端機**（分頁管理），PTY 不可用才退回外部終端機。"""
         req = self.req.get("1.0", "end").strip()
-        if launch_claude(req, autopilot=self.autopilot_var.get()):
-            mode = "非停（autopilot）" if self.autopilot_var.get() else "一般"
-            self.status.config(text=f"已開啟終端機（{mode}），CodexAutoAI 在新視窗執行中…", fg=GREEN)
+        autopilot = self.autopilot_var.get()
+        mode = "非停（autopilot）" if autopilot else "一般"
+
+        if self.embed_var.get():
+            ok, why = TERMINAL.available()
+            if ok:
+                prompt = f"/autopilot on {_safe_prompt(req)}".strip() if autopilot \
+                    else _safe_prompt(req)
+                TERMINAL.open(kind="claude", prompt=prompt)
+                self.status.config(
+                    text=f"已在內嵌終端機開啟 Claude 分頁（{mode}）", fg=GREEN)
+                return
+            # 不可用就誠實說明並降級，不要靜默地換一種行為
+            self.status.config(text=f"內嵌終端機不可用（{why}），改用外部終端機", fg=GOLD)
+
+        if launch_claude(req, autopilot=autopilot):
+            self.status.config(text=f"已開啟外部終端機（{mode}），在新視窗執行中…", fg=GREEN)
+
+    def on_open_terminal(self) -> None:
+        """只開終端機視窗，不建 session——使用者自己在裡面按「＋ 新增」。"""
+        ok, why = TERMINAL.available()
+        if not ok:
+            messagebox.showerror("CodexAutoAI", f"內嵌終端機不可用：{why}")
+            return
+        TERMINAL.open()
+        self.status.config(text="已開啟內嵌終端機（可用分頁管理多個 session）", fg=GREEN)
 
     def on_seed_from_spec(self) -> None:
         intent = self.req.get("1.0", "end").strip()
@@ -590,6 +708,13 @@ def main() -> int:
     released = {"done": False}
 
     def release_overlay() -> None:
+        # 內嵌終端機的 pty 子行程（claude 底下還有 node）不收會變孤兒，
+        # 所以關閉路徑一定要一併收掉，且要放在 overlay 還原之前——
+        # 就算還原失敗也已經先把行程收乾淨。
+        try:
+            TERMINAL.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         if released["done"] or global_overlay is None:
             return
         released["done"] = True
@@ -598,13 +723,13 @@ def main() -> int:
         except Exception:  # noqa: BLE001 — 還原失敗不該擋住關閉
             pass
 
+    import atexit
+    atexit.register(release_overlay)   # 沒有 overlay 時也要收 session
     if global_overlay is not None:
         try:
             global_overlay.acquire(_overlay_token())
         except Exception:  # noqa: BLE001 — 套用失敗不該擋住啟動
             pass
-        import atexit
-        atexit.register(release_overlay)
 
     root = tk.Tk()
 
