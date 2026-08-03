@@ -207,6 +207,37 @@ class PtySession:
 
     # -- Windows ------------------------------------------------------------
     def _spawn_windows(self, argv, cwd, env, cols, rows) -> None:
+        """建立 pseudoconsole 並在其中啟動行程。
+
+        任何一步失敗都要把已經配置的 pseudoconsole / pipe handle 收乾淨再往上拋——
+        否則例外從 `spawn()` 冒出去、物件被丟棄，`close()` 沒機會跑，handle 就洩漏了
+        （可執行檔不存在、cwd 不存在都會走到這條路）。
+        """
+        try:
+            self._spawn_windows_inner(argv, cwd, env, cols, rows)
+        except Exception:
+            self._release_windows_handles()
+            raise
+
+    def _release_windows_handles(self) -> None:
+        """釋放 Windows 端已配置的資源（可重複呼叫）。"""
+        for attr in ("_in_w", "_out_r"):
+            h = getattr(self, attr, None)
+            if h:
+                try:
+                    _k32.CloseHandle(h)
+                except Exception:  # noqa: BLE001
+                    pass
+                setattr(self, attr, None)
+        if self._hpc is not None:
+            try:
+                _k32.ClosePseudoConsole(self._hpc)
+            except Exception:  # noqa: BLE001
+                pass
+            self._hpc = None
+        self._attrbuf = None
+
+    def _spawn_windows_inner(self, argv, cwd, env, cols, rows) -> None:
         import ctypes
         from ctypes import wintypes
 
@@ -218,11 +249,16 @@ class PtySession:
         out_r, out_w = wintypes.HANDLE(), wintypes.HANDLE()
         check(_k32.CreatePipe(ctypes.byref(in_r), ctypes.byref(in_w), None, 0), "CreatePipe(in)")
         check(_k32.CreatePipe(ctypes.byref(out_r), ctypes.byref(out_w), None, 0), "CreatePipe(out)")
+        # 一配置就掛到 self：失敗清理只收得到 self 上的東西，留到最後才指派的話，
+        # CreateProcessW 失敗時 pseudoconsole 與 pipe 就洩漏了。
+        self._in_w, self._out_r = in_w, out_r
 
         hpc = HPCON()
         hr = _k32.CreatePseudoConsole(_COORD(cols, rows), in_r, out_w, 0, ctypes.byref(hpc))
         if hr != 0:
+            _k32.CloseHandle(in_r); _k32.CloseHandle(out_w)
             raise PtyUnavailable(f"CreatePseudoConsole 失敗 HRESULT=0x{hr & 0xFFFFFFFF:08X}")
+        self._hpc = hpc
 
         size = ctypes.c_size_t(0)
         _k32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
@@ -249,7 +285,7 @@ class PtySession:
         _k32.CloseHandle(out_w)
         _k32.CloseHandle(in_r)
 
-        self._hpc, self._pi, self._in_w, self._out_r = hpc, pi, in_w, out_r
+        self._pi = pi
         self._attrbuf = attrbuf   # 保住引用，別讓 GC 回收掉 attribute list
 
     # -- POSIX --------------------------------------------------------------
@@ -311,19 +347,32 @@ class PtySession:
         return b"".join(out)
 
     def write(self, data: str | bytes) -> int:
-        """把按鍵送進 pty。"""
+        """把按鍵送進 pty；session 已關閉時回 0，不拋例外。
+
+        「分頁已關但 UI 還在送按鍵」是常態競態（使用者按 Ctrl+W 的同時還在打字），
+        所以這裡跟 `resize()` 一樣採寬鬆處理。POSIX 的 `os.write(None, ...)` 丟的是
+        `TypeError` 而**不是** `OSError`，只 catch OSError 會漏掉——CI 在 ubuntu 上
+        實際踩過這個洞。
+        """
         if isinstance(data, str):
             data = data.encode("utf-8", "replace")
         if IS_WIN:
+            if self._in_w is None:
+                return 0
             import ctypes
             from ctypes import wintypes
             n = wintypes.DWORD(0)
-            if not _k32.WriteFile(self._in_w, data, len(data), ctypes.byref(n), None):
+            try:
+                if not _k32.WriteFile(self._in_w, data, len(data), ctypes.byref(n), None):
+                    return 0
+            except Exception:  # noqa: BLE001
                 return 0
             return n.value
+        if self._fd is None:
+            return 0
         try:
             return os.write(self._fd, data)
-        except OSError:
+        except (OSError, TypeError, ValueError):
             return 0
 
     def resize(self, cols: int, rows: int) -> None:

@@ -30,12 +30,29 @@ jobs:
         env:
           PYTHONPATH: .
 
+  # ConPTY 只在 Windows 上存在，而 verify 跑 ubuntu——內嵌終端機的整個存在理由
+  # （desktop/conpty.py 的 ctypes ConPTY 路徑）在 Linux CI 上一行都跑不到。
+  # 這個 job 補上那塊回歸保護；公開 repo 的 Actions 分鐘數不計費，成本為零。
+  verify-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+      - name: PTY 後端測試（ConPTY 路徑）
+        run: python -m pytest tests/test_conpty.py -q
+        env:
+          PYTHONPATH: .
+
   # ── 雲端 auto-fix loop 的觸發點（來源：gs-harness templates/github-workflows）──
   # main 紅燈 → 開一張帶 auto-fix label 的 issue（body 含 @claude）→ claude-fix.yml
   # 接手修復開 PR → claude-review.yml 審查 → auto-merge.yml 啟用 native auto-merge。
   # 只在 main 自己壞掉時開 issue；PR 的失敗在 PR 上就看得到，不該洗版 issue tracker。
   open-issue-on-failure:
-    needs: verify
+    needs: [verify, verify-windows]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
