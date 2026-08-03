@@ -337,3 +337,149 @@ class TestConcurrency:
         g2 = sess.new_stream()
         assert g2 > g1
         assert sess.stream_gen == g2      # 舊的 g1 會看到不相等而自行結束
+
+
+class TestHandoff:
+    """token 不可以出現在交給外部行程的 URL 上。
+
+    內嵌終端機是用 `msedge.exe --app=<url>` 開頁面的，Windows 上同機任何帳號都讀得到
+    別人的命令列（工作管理員的「命令列」欄、`Get-CimInstance Win32_Process`）。
+    token 擺在那裡等於公開，而這個服務**能生出行程**。所以改成給一枚用過即丟的
+    handoff nonce，頁面載入時才把真 token 注進 HTML。
+    """
+
+    @staticmethod
+    def _page(srv, query=""):
+        url = f"http://127.0.0.1:{srv.port}/{query}"
+        with urllib.request.urlopen(url, timeout=10) as f:
+            return f.status, f.read().decode("utf-8")
+
+    def test_handoff_url_does_not_leak_the_token(self, server):
+        srv, _ = server
+        assert srv.token not in srv.handoff_url
+
+    def test_each_open_gets_a_fresh_handoff(self, server):
+        """開啟失敗時下一次不能拿到已作廢的券，所以每次都要發新的。"""
+        srv, _ = server
+        assert srv.handoff_url != srv.handoff_url
+
+    def test_valid_handoff_injects_the_token(self, server):
+        srv, _ = server
+        nonce = srv.new_handoff()
+        code, body = self._page(srv, f"?handoff={nonce}")
+        assert code == 200
+        assert "__TERM_TOKEN__" in body and srv.token in body
+
+    def test_handoff_is_single_use(self, server):
+        """用過就死——之後才讀到命令列的人拿不到任何東西。"""
+        srv, _ = server
+        nonce = srv.new_handoff()
+        assert srv.token in self._page(srv, f"?handoff={nonce}")[1]
+        assert srv.token not in self._page(srv, f"?handoff={nonce}")[1]
+
+    def test_wrong_handoff_serves_page_without_token(self, server):
+        """頁面本身是公開資產，照送；沒 token 的話所有 /api/* 都會 403。"""
+        srv, _ = server
+        code, body = self._page(srv, "?handoff=not-a-real-nonce")
+        assert code == 200 and srv.token not in body
+
+    def test_page_without_handoff_has_no_token(self, server):
+        srv, _ = server
+        code, body = self._page(srv)
+        assert code == 200 and srv.token not in body
+
+    def test_token_alone_is_still_useless_without_api_access(self, server):
+        """守住真正的邊界：拿不到 token 就開不了 session。"""
+        srv, _ = server
+        code, _ = call(srv, "/api/sessions", {"kind": "test"}, token="wrong")
+        assert code == 403
+
+    def test_overflow_evicts_oldest_not_everything(self, server):
+        """滿了要淘汰**最舊的**，不能整包清掉。
+
+        整包清會把「剛發出去、頁面正要拿來用」的那張也作廢，使用者就會看到一個
+        連不上服務的終端機。要驗出差別得看**中間**那張：溢位一格時，淘汰最舊的
+        會留下它，整包清則只剩最後一張。
+        """
+        srv, _ = server
+        oldest = srv.new_handoff()                     # #1
+        second = srv.new_handoff()                     # #2
+        rest = [srv.new_handoff() for _ in range(srv.MAX_HANDOFFS - 1)]   # #3..#33
+        assert srv.token not in self._page(srv, f"?handoff={oldest}")[1],             "溢位一格，最舊的應被淘汰"
+        assert srv.token in self._page(srv, f"?handoff={second}")[1],             "只溢位一格，第二張不該被牽連（整包清掉才會）"
+        assert srv.token in self._page(srv, f"?handoff={rest[-1]}")[1]
+
+    def test_concurrent_redemption_has_exactly_one_winner(self, server, monkeypatch):
+        """同一張券被多執行緒同時兌換時，只能有一個拿到 token。
+
+        這是**安全敏感的併發**：服務是 ThreadingHTTPServer，兩個請求同時打進
+        `_page()` 是真的到得了的路徑，而這種地方壞掉不會有任何徵兆——只會安靜地
+        多發一份能生出行程的 token。
+
+        **必須人工把臨界區撐開**才驗得出東西：原生的「比對→移除」之間只隔幾個
+        bytecode，在 GIL 底下幾乎撞不到，拿掉鎖測試照樣全綠（實測過）。這裡把
+        比對函式換成「比中就先睡一下」，讓兩條執行緒一定同時站在移除之前——
+        拿掉 `_handoff_lock` 這條就會紅。
+        """
+        import threading
+        srv, _ = server
+        nonce = srv.new_handoff()
+
+        real = termserver.secrets.compare_digest
+
+        def slow_compare(a, b):
+            hit = real(a, b)
+            if hit and a == nonce:
+                time.sleep(0.15)      # 撐開「已比中、還沒移除」的那段
+            return hit
+
+        monkeypatch.setattr(termserver.secrets, "compare_digest", slow_compare)
+
+        start = threading.Event()
+        results: list[str] = []        # "token" / "clean" / "error"
+        lock = threading.Lock()
+
+        def race():
+            start.wait()
+            try:
+                code, body = self._page(srv, f"?handoff={nonce}")
+                r = "token" if srv.token in body else ("clean" if code == 200 else "error")
+            except Exception:
+                r = "error"
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=race) for _ in range(6)]
+        for t in threads:
+            t.start()
+        start.set()                    # 一起衝，最大化競態機會
+        for t in threads:
+            t.join(timeout=30)
+        assert len(results) == 6, "有執行緒沒跑完"
+        assert results.count("token") == 1,             f"{results.count('token')} 個執行緒拿到 token，應該只有 1 個"
+        # 輸掉的要拿到一張**乾淨的**無 token 頁面。沒有鎖時它們會同時通過比對、
+        # 接著搶著移除同一張券，第二個之後全部炸成 500——這就是變異測試看的訊號。
+        assert results.count("error") == 0, f"出現 {results.count('error')} 個錯誤：{results}"
+
+    def test_non_ascii_handoff_still_serves_the_page(self, server):
+        """`/` 這條路徑**不需要任何憑證**就打得到，所以它必須對垃圾輸入免疫。
+
+        `secrets.compare_digest` 對 str 只吃 ASCII，非 ASCII 直接 TypeError；
+        而 query 會被 percent-decode，`?handoff=%C3%A9` 就足以觸發。docstring
+        明講「沒帶（或已用掉）也照樣送頁面」，炸掉連線就是違反這個保證。
+        """
+        srv, _ = server
+        srv.new_handoff()      # 券池要**非空**，否則根本走不到比對那行（第一版就漏了）
+        code, body = self._page(srv, "?handoff=%C3%A9%C3%A8")
+        assert code == 200 and srv.token not in body
+
+    def test_non_ascii_token_is_rejected_not_crashed(self, server):
+        """同一個地雷也在 token 那條路上——要回 403，不是把連線炸斷。"""
+        srv, _ = server
+        url = f"http://127.0.0.1:{srv.port}/api/kinds?token=%C3%A9"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as f:
+                code = f.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 403
