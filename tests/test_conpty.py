@@ -196,3 +196,64 @@ def _pid_alive(pid: int) -> bool:
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=20)
     return str(pid) in (r.stdout or "")
+
+
+# ── PATHEXT 蓋子（.cmd / .bat / .ps1）────────────────────────────────────────
+class TestPathextShims:
+    """`claude` / `codex` 用 npm 裝出來是 `.cmd` / `.ps1` 蓋子，不是 `.exe`。
+
+    這是實際回報的當機（2026-08-03，另一台機器）：
+    `開啟失敗：[WinError 2] CreateProcessW 失敗`。原因是可用性檢查與實際啟動
+    用了**兩套不同的解析規則**——`shutil.which()` 照 PATHEXT 找得到 `codex.CMD`，
+    於是 UI 說「已安裝」；但 `CreateProcessW(lpApplicationName=NULL)` 名稱沒有
+    副檔名時**只補 `.exe`、不看 PATHEXT**，直接 ERROR_FILE_NOT_FOUND。
+
+    當初沒測出來是因為開發機的 `claude` 恰好是原生 `.exe`，而 live test 只開過
+    `shell` 與 `claude`，從沒開過 `codex`。
+    """
+
+    def test_resolves_to_full_path(self, monkeypatch, tmp_path):
+        """裸名稱要被換成完整路徑——這正是 CreateProcessW 需要的形式。"""
+        binv = tmp_path / "bin"
+        binv.mkdir()
+        shim = binv / ("mytool.cmd" if IS_WIN else "mytool")
+        shim.write_text("@echo off\n" if IS_WIN else "#!/bin/sh\n", encoding="utf-8")
+        if not IS_WIN:
+            shim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(binv) + os.pathsep + os.environ.get("PATH", ""))
+        if IS_WIN:
+            monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+        out = conpty.resolve_argv(["mytool", "--flag", "帶空白的 引數"])
+        assert Path(out[0]) == shim, f"沒解析成完整路徑：{out[0]}"
+        assert out[1:] == ["--flag", "帶空白的 引數"], "後面的引數不能被動到"
+
+    def test_unknown_command_passes_through(self):
+        """找不到就原樣傳回去，讓 CreateProcessW 自己報錯，不要多發明一種訊息。"""
+        assert conpty.resolve_argv(["絕對不存在的指令-xyz"]) == ["絕對不存在的指令-xyz"]
+
+    def test_empty_argv_is_safe(self):
+        assert conpty.resolve_argv([]) == []
+
+    def test_absolute_path_is_left_alone(self):
+        assert conpty.resolve_argv([sys.executable])[0] == sys.executable
+
+    @pytest.mark.skipif(not IS_WIN, reason="PATHEXT 蓋子是 Windows 專屬問題")
+    @pytest.mark.skipif(not conpty.pty_available(), reason="這台機器開不了 PTY")
+    def test_can_spawn_a_cmd_shim(self, monkeypatch, tmp_path):
+        """真的去啟動一個 `.cmd` 蓋子——沒有解析這一層就是 WinError 2。
+
+        只斷言「啟動得起來」，不斷言輸出：console 繼承會讓輸出跑到父 console
+        （見本檔開頭說明）。而 WinError 2 是在啟動階段就炸，所以這樣就夠了。
+        """
+        binv = tmp_path / "bin"
+        binv.mkdir()
+        (binv / "fakecli.cmd").write_text(
+            "@echo off\r\nping -n 30 127.0.0.1 >nul\r\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", str(binv) + os.pathsep + os.environ.get("PATH", ""))
+
+        sess = conpty.PtySession.spawn(["fakecli"], cwd=str(tmp_path))
+        try:
+            assert sess.alive
+        finally:
+            sess.close()

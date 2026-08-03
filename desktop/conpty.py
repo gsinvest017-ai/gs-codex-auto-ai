@@ -237,7 +237,7 @@ class PtySession:
                 "這台機器開不了 PTY（Windows 需 10 1809 以上）。")
         self = cls()
         if IS_WIN:
-            self._spawn_windows(argv, cwd, env, cols, rows)
+            self._spawn_windows(resolve_argv(argv), cwd, env, cols, rows)
         else:
             self._spawn_posix(argv, cwd, env, cols, rows)
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -545,6 +545,30 @@ def _env_block(env: dict):
 def which(name: str) -> Optional[str]:
     """找可執行檔（Windows 上 claude/codex 是 .cmd 蓋子，shutil.which 找得到）。"""
     return shutil.which(name)
+
+
+def resolve_argv(argv: list[str]) -> list[str]:
+    r"""把 `argv[0]` 解析成完整路徑。**Windows 上這是必要的，不是最佳化。**
+
+    `CreateProcessW`（`lpApplicationName=NULL`）和 shell 用的是兩套不同的規則：
+    名稱沒有副檔名時它**只會補 `.exe`**，完全不看 `PATHEXT`。而 `claude` / `codex`
+    用 npm 裝出來的是 `claude.cmd` / `codex.ps1` 這種蓋子，於是
+
+        shutil.which("codex")  → C:\...
+pm\codex.CMD   （kind 判定為「已安裝」）
+        CreateProcessW("codex …") → ERROR_FILE_NOT_FOUND（WinError 2）
+
+    ——可用性檢查說有、真的要開卻說找不到。改成先解析完整路徑，兩邊就用同一套
+    規則了。實測（2026-08-03）完整路徑的 `.CMD` 是**可以**直接餵給 `CreateProcessW`
+    的，所以不需要包一層 `cmd.exe /c`（包了會多一層行程，還可能吃掉 Ctrl+C 與 TUI）。
+
+    找不到就原樣傳回去，讓 `CreateProcessW` 自己報錯——這裡不該多發明一種錯誤訊息。
+    POSIX 走 `execvpe`，它本來就會查 PATH，不需要這層。
+    """
+    if not argv:
+        return argv
+    found = which(argv[0])
+    return [found, *argv[1:]] if found else list(argv)
 
 
 if __name__ == "__main__":   # 手動煙霧測試：python desktop/conpty.py
