@@ -298,3 +298,60 @@ class TestPathextShims:
             assert sess.alive
         finally:
             sess.close()
+
+
+class TestBatchArgumentInjection:
+    """`.cmd` / `.bat` 目標會被 `CreateProcessW` **偷偷轉交 cmd.exe**，所以後面的
+    參數是被 cmd 的文法解析的。而 session 的需求字串（prompt）就是最後一個參數，
+    且它從 HTTP POST body 直接進來（`termserver._create`），完全沒有清理。
+
+    `list2cmdline` 是 MSVCRT 規則、**只在有空白或引號時才加引號**——所以不含空白的
+    `x&calc` 根本不會被引起來。實測（2026-08-03）這種 payload 真的會執行。
+
+    > 註：第一版驗證用的 payload 全都含空白，因此全被引號保護住、驗不出問題。
+    > 下面刻意用**不含空白**的形狀，那才是會咬人的那種。
+    """
+
+    def test_batch_target_quotes_every_argument(self):
+        """一律加引號——cmd 在雙引號內不解讀 `& | < > ^`。"""
+        line = conpty.build_cmdline([r"C:\x\codex.CMD", "x&calc"])
+        assert line.endswith('"x&calc"'), line
+
+    def test_batch_target_neutralises_quotes(self):
+        """`"` 是唯一能脫出引號的字元，cmd 上沒有能安全表示它的引用方式。"""
+        assert '"' not in conpty._quote_for_batch('a" & calc & "b')[1:-1]
+
+    def test_native_exe_keeps_msvcrt_quoting(self):
+        """原生 exe 不經 cmd，需求字串要能原樣送達，不該被多改一個字。"""
+        line = conpty.build_cmdline([r"C:\x\claude.exe", "價格 $100 & 交期 <7 天"])
+        assert "價格 $100 & 交期 <7 天" in line
+
+    def test_empty_argv(self):
+        assert conpty.build_cmdline([]) == ""
+
+    @pytest.mark.skipif(not IS_WIN, reason="cmd.exe 轉交是 Windows 專屬行為")
+    @pytest.mark.skipif(not conpty.pty_available(), reason="這台機器開不了 PTY")
+    def test_metacharacters_in_prompt_do_not_execute(self, monkeypatch, tmp_path):
+        """端到端：把注入 payload 當 prompt 丟進 `.cmd` 蓋子，不可以真的執行。
+
+        判準是「有沒有生出那個檔」——不靠讀輸出（console 繼承會讓輸出跑掉）。
+        """
+        binv = tmp_path / "bin"
+        binv.mkdir()
+        (binv / "fakecli.cmd").write_text(
+            "@echo off\r\nping -n 3 127.0.0.1 >nul\r\n", encoding="utf-8")
+        monkeypatch.setenv("PATH", str(binv) + os.pathsep + os.environ.get("PATH", ""))
+
+        # 路徑刻意不含空白：有空白會被 list2cmdline 加引號，就測不到東西了
+        target = tmp_path / "M"
+        target.mkdir()
+        marker = target / "pwned.txt"
+        payload = f"x&echo>{marker}"
+
+        sess = conpty.PtySession.spawn(["fakecli", payload], cwd=str(tmp_path))
+        try:
+            time.sleep(2.0)
+        finally:
+            sess.close()
+        time.sleep(0.5)
+        assert not marker.exists(), f"prompt 裡的指令被執行了：{marker}"

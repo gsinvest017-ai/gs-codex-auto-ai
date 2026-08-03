@@ -319,7 +319,7 @@ class PtySession:
             "UpdateProcThreadAttribute")
 
         pi = _PROCESS_INFORMATION()
-        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        cmdline = ctypes.create_unicode_buffer(build_cmdline(argv))
         envblock = _env_block(env) if env else None
         flags = _EXTENDED_STARTUPINFO_PRESENT | (0x00000400 if envblock else 0)  # CREATE_UNICODE_ENVIRONMENT
         check(_k32.CreateProcessW(None, cmdline, None, None, False, flags,
@@ -573,6 +573,40 @@ def resolve_argv(argv: list[str], env: Optional[dict] = None) -> list[str]:
     path = _env_path(env)
     found = which(argv[0]) if path is None else shutil.which(argv[0], path=path)
     return [found, *argv[1:]] if found else list(argv)
+
+
+BATCH_EXTS = (".cmd", ".bat")
+
+
+def _quote_for_batch(arg: str) -> str:
+    r"""把一個參數包成「cmd.exe 一定當成字面值」的形式。
+
+    `CreateProcessW` 遇到 `.cmd` / `.bat` 目標時會**偷偷轉交 cmd.exe**（就算呼叫端
+    從來沒要求過 shell），於是後面的參數是被 cmd 的文法解析的，不是原樣交給程式。
+    而 `subprocess.list2cmdline` 是 MSVCRT 規則、**只在有空白或引號時才加引號**——
+    所以不含空白的 `x&calc` 完全不會被引起來，`&` 就直接生效了。實測（2026-08-03）
+    `x&echo>檔案` 這種 payload 真的會執行（BatBadBut / CVE-2024-27980 同一類）。
+
+    對策是**一律加引號**：cmd 在雙引號內不解讀 `& | < > ^`，沒有引號可脫出就沒有
+    注入。而唯一能脫出的字元就是 `"` 本身——cmd 上不存在能安全表示它的引用方式
+    （`launcher._safe_prompt` 的註解已經記過同一件事），所以直接換成單引號。
+    需求是自由文字，掉一個引號遠比讓它變成可執行的命令好。
+    """
+    return '"' + arg.replace('"', "'") + '"'
+
+
+def build_cmdline(argv: list[str]) -> str:
+    """組出要餵給 `CreateProcessW` 的命令列。
+
+    目標是 `.cmd` / `.bat` 時走 cmd 安全的引用；其餘（原生 exe）維持 MSVCRT 規則的
+    `list2cmdline`，這樣一般情況的需求字串能原樣送達、不會被多改一個字。
+    """
+    if not argv:
+        return ""
+    if argv[0].lower().endswith(BATCH_EXTS):
+        return " ".join([_quote_for_batch(argv[0]),
+                         *(_quote_for_batch(a) for a in argv[1:])])
+    return subprocess.list2cmdline(argv)
 
 
 def _env_path(env: Optional[dict]) -> Optional[str]:
