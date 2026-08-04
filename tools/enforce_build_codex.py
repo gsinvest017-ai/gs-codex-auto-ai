@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-enforce_build_codex.py — PreToolUse 守門員：Phase 3–7 期間禁止 Claude 直接寫
-src/、tests/、docs/（Codex-first 硬分工）。
+enforce_build_codex.py — PreToolUse 守門員：禁止 Claude 直接寫 src/、tests/、docs/
+（Codex-first 硬分工）。
 
 CodexAutoAI 的核心不變式是「Claude 規劃、Codex 實作」（見 CLAUDE.md：你不直接寫程式碼）。
 內容產出必須由 `codex exec --full-auto` 產生——Codex 透過自己的行程寫檔，
@@ -9,12 +9,20 @@ CodexAutoAI 的核心不變式是「Claude 規劃、Codex 實作」（見 CLAUDE
 自己的 Edit/Write/MultiEdit。因此「擋掉 Claude 對這些目錄的 Edit/Write」就等於
 強制所有實作走 Codex。
 
-守門範圍見下方常數：`_ENFORCED_PHASES`（phase3–phase7）、`_GUARDED_DIRS`
-（src/tests/docs）、`_WHITELIST_FILES`（Phase 2 的規劃產物，屬 Claude 職責）。
-Phase 0–2 是規劃期，不擋。
+守門範圍見下方常數：`_GUARDED_DIRS`（src/tests/docs）、`_WHITELIST_FILES`
+（Phase 2 的規劃產物，屬 Claude 職責）。
 
-判斷「正在 build」：讀 `log/state.json`，phase 落在 `_ENFORCED_PHASES` 且
-completed_actions 不含 "phase5-end"（build 結束、無 run、框架自身開發都不擋）。
+**兩個獨立的上膛來源，任一成立就擋**：
+
+1. `log/state.json` 的 phase 落在 `_ENFORCED_PHASES`（phase3–7）且該 phase 尚未
+   `*-end`。這條由 Claude 自己跑 `run_phase.py begin` 寫——**它不跑就不會上膛**，
+   所以不能只靠它。Phase 0–2 是規劃期，這條不擋。
+2. `log/app-run.json` 的心跳還新鮮（`_APP_RUN_TTL`）。由**桌面 App** 在啟動任務時
+   寫、進度輪詢時更新，跟 LLM 有沒有照做無關。這條**不看 phase**：App 一按下
+   啟動就上膛，早於任何 phase 開始。實務上不影響 Phase 0–2，因為那兩個階段
+   Claude 只會寫白名單裡的 `requirements-spec.md`。
+
+沒有任何一個來源成立就放行（無 run、框架自身開發、手動使用都不受影響）。
 
 協定（Claude Code PreToolUse）：
   - 放行：exit 0、無輸出。
