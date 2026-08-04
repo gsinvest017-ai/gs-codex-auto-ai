@@ -668,20 +668,24 @@ class TestFrameworkBootstrap:
 
 
 
-class TestSeedFromSpecArms:
-    """「從 spec 開始」最後也是走 launch_claude 跑同一條 pipeline——少了上膛，
-    這條路啟動的任務完全沒有 Codex-first 守門員。"""
+class TestSpecIsTheOnlyEntryPoint:
+    """「從 spec 開始」是唯一的啟動入口，而且必須跟內嵌面板走同一條路。
+
+    以前它自己直接呼叫 `launch_claude()`，所以永遠開在**視窗外的原生終端機**——
+    跟旁邊那顆「啟動新任務」行為不一致，使用者按了以為會進右邊的面板，結果跳出
+    一個 PowerShell 視窗。
+    """
 
     class _UI:
         on_seed_from_spec = launcher.LauncherUI.on_seed_from_spec
 
-        def __init__(self, req):
-            self._req = req
+        def __init__(self, intent="做個東西"):
+            self.started = []
             self._app_run = False
 
             class _T:
                 def get(self, *a):
-                    return req
+                    return intent
 
             class _S:
                 def config(self, **kw):
@@ -693,24 +697,82 @@ class TestSeedFromSpecArms:
 
             self.req, self.status, self.root = _T(), _S(), _R()
 
-    def test_arms_before_launching(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
-        launcher.set_project_dir(tmp_path / "p")
-        armed = {}
-        monkeypatch.setattr(launcher, "seed_from_spec",
-                            lambda i: armed.setdefault("armed_when_called", ui._app_run) or True)
-        ui = self._UI("做個東西")
-        ui.on_seed_from_spec()
-        assert armed["armed_when_called"] is True, "啟動之前就要上膛"
-        assert (tmp_path / "p" / "log" / "app-run.json").exists()
+        def _start_task(self, req):
+            self.started.append(req)
 
-    def test_disarms_when_seeding_fails(self, monkeypatch, tmp_path):
+    def test_hands_the_spec_prompt_to_the_shared_launcher(self, monkeypatch):
+        monkeypatch.setattr(launcher, "seed_from_spec",
+                            lambda i: "依照規格檔 C:/v/spec.md 開發，跑完整七階段")
+        ui = self._UI()
+        ui.on_seed_from_spec()
+        assert ui.started == ["依照規格檔 C:/v/spec.md 開發，跑完整七階段"],             "沒有走共用的啟動路徑（那條才會進內嵌面板）"
+
+    def test_does_not_launch_when_spec_generation_fails(self, monkeypatch):
+        monkeypatch.setattr(launcher, "seed_from_spec", lambda i: None)
+        ui = self._UI()
+        ui.on_seed_from_spec()
+        assert ui.started == []
+        assert ui._app_run is False, "沒啟動卻上了膛"
+
+
+class TestStartTaskPrefersTheEmbeddedPanel:
+    """`_start_task` 是兩顆按鈕共用的那一段：內嵌優先、不可用才退回外部終端機。"""
+
+    class _UI:
+        _start_task = launcher.LauncherUI._start_task
+
+        def __init__(self, embed=True):
+            self._app_run = False
+            self._app_run_at = 0.0
+            self.msgs = []
+
+            class _V:
+                def __init__(self, v):
+                    self.v = v
+
+                def get(self):
+                    return self.v
+
+            class _S:
+                def __init__(self, out):
+                    self.out = out
+
+                def config(self, **kw):
+                    self.out.append(kw.get("text", ""))
+
+            self.autopilot_var = _V(False)
+            self.embed_var = _V(embed)
+            self.status = _S(self.msgs)
+
+        def show_terminal_pane(self, open_url):
+            return True
+
+    def test_uses_the_embedded_panel_when_available(self, monkeypatch, tmp_path):
         monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
         launcher.set_project_dir(tmp_path / "p")
-        monkeypatch.setattr(launcher, "seed_from_spec", lambda i: False)
-        ui = self._UI("做個東西")
-        ui.on_seed_from_spec()
-        assert ui._app_run is False, "沒啟動成功卻一直上著膛"
+        monkeypatch.setattr(launcher.TERMINAL, "available", lambda: (True, ""))
+        seen = {}
+        monkeypatch.setattr(launcher.TERMINAL, "open",
+                            lambda **kw: seen.update(kw) or True)
+        monkeypatch.setattr(launcher, "launch_claude",
+                            lambda *a, **k: pytest.fail("不該開外部終端機"))
+        ui = self._UI()
+        ui._start_task("依照規格檔 C:/v/spec.md 開發")
+        assert seen.get("kind") == "claude"
+        assert "spec.md" in seen.get("prompt", "")
+        assert ui._app_run is True, "啟動前要上膛"
+
+    def test_falls_back_to_an_external_terminal(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "p")
+        monkeypatch.setattr(launcher.TERMINAL, "available",
+                            lambda: (False, "這台 Windows 太舊"))
+        called = []
+        monkeypatch.setattr(launcher, "launch_claude",
+                            lambda req, autopilot=False: called.append(req) or True)
+        ui = self._UI()
+        ui._start_task("做個東西")
+        assert called == ["做個東西"]
 
 
 def test_switching_project_dir_invalidates_the_cached_root(monkeypatch, tmp_path):
@@ -728,3 +790,36 @@ def test_switching_project_dir_invalidates_the_cached_root(monkeypatch, tmp_path
     launcher.set_project_dir(tmp_path / "new")
     launcher._RESOLVED_ROOT = None          # on_pick_project 會做的事
     assert launcher.active_project_dir() == tmp_path / "new"
+
+
+def test_action_buttons_restore_to_their_original_state():
+    """`_set_actions_enabled` 會記住原狀態再還原。名單裡若有兩個名字指向**同一顆**
+    按鈕，第二次讀到的已經是 disabled，還原後那顆就永遠按不下去了。"""
+    names = ("launch_btn", "term_btn", "collapse_btn", "popout_btn")
+
+    class _Btn:
+        def __init__(self, state):
+            self.state = state
+
+        def cget(self, k):
+            return self.state
+
+        def config(self, **kw):
+            self.state = kw.get("state", self.state)
+
+    class _UI:
+        _set_actions_enabled = launcher.LauncherUI._set_actions_enabled
+
+        def __init__(self):
+            self._btn_state = {}
+            self.launch_btn = _Btn("disabled")     # 環境沒就緒時本來就是停用的
+            self.term_btn = _Btn("normal")
+            self.collapse_btn = _Btn("normal")
+            self.popout_btn = _Btn("normal")
+
+    ui = _UI()
+    ui._set_actions_enabled(False)
+    assert all(getattr(ui, n).state == "disabled" for n in names)
+    ui._set_actions_enabled(True)
+    assert ui.launch_btn.state == "disabled", "環境沒就緒的按鈕不該被還原成可按"
+    assert ui.term_btn.state == "normal"
