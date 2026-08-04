@@ -113,6 +113,72 @@ def set_project_dir(path: Path) -> None:
     save_config(cfg)
 
 
+# App 隨附、pipeline 執行必需的框架檔。專案資料夾裡沒有這些，claude 就讀不到
+# dispatcher 指示（CLAUDE.md）、也載不到那三個 hook（.claude/settings.json）——
+# 等於七階段流程與 Codex-first 守門員全部不存在。
+FRAMEWORK_ENTRIES = (".claude", "CLAUDE.md", "AGENTS.md", "tools", "usage_gate.toml")
+STAMP_NAME = ".codexautoai-framework"
+
+
+def app_version() -> str:
+    try:
+        return (APP_DIR / "desktop" / "VERSION").read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def bootstrap_project(root: Path) -> list[str]:
+    """把框架檔補進專案資料夾，回傳這次複製了哪些。
+
+    **這是把 cwd 從安裝目錄搬走之後的必要條件。** 以前 session 直接跑在 APP_DIR，
+    框架檔本來就在腳下；換成使用者自己的資料夾之後，那裡是空的——沒有 CLAUDE.md
+    就沒有 dispatcher、沒有 `.claude/settings.json` 就一個 hook 都不會載入，
+    七階段與 Codex-first 守門員全部形同不存在。
+
+    版本戳記不同就整批覆蓋：這些檔案是 App 隨附的框架，跟 App 版本必須一致；
+    留著舊的比沒有更難查（指示與實際行為對不上）。
+    """
+    copied: list[str] = []
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = root / STAMP_NAME
+        cur = app_version()
+        try:
+            stale = stamp.read_text(encoding="utf-8").strip() != cur
+        except OSError:
+            stale = True
+        for name in FRAMEWORK_ENTRIES:
+            src = APP_DIR / name
+            dst = root / name
+            if not src.exists():
+                continue
+            if dst.exists() and not stale:
+                continue
+            try:
+                if src.is_dir():
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+                copied.append(name)
+            except Exception:  # noqa: BLE001 — 少一個檔不該擋住啟動
+                pass
+        stamp.write_text(cur, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return copied
+
+
+def prepare_project_dir() -> Path:
+    """取得專案資料夾並確保它可用（建目錄 + 補框架檔）。建不出來就退回安裝目錄。"""
+    root = project_dir()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        return APP_DIR
+    bootstrap_project(root)
+    return root
+
+
 class EmbeddedTerminal:
     """內嵌終端機：在 App 內用分頁管理 Claude / Codex session。
 
@@ -154,11 +220,7 @@ class EmbeddedTerminal:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             import sessions as sessions_mod   # noqa: PLC0415
             import termserver                 # noqa: PLC0415
-            root = project_dir()
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-            except Exception:  # noqa: BLE001 — 建不出來就退回安裝目錄，別讓 App 開不起來
-                root = APP_DIR
+            root = prepare_project_dir()
             self._mgr = sessions_mod.SessionManager(default_cwd=str(root))
             self._srv = termserver.TerminalServer(self._mgr).start()
             return self._srv
@@ -563,11 +625,7 @@ def launch_claude(requirement: str, autopilot: bool = False) -> bool:
     prompt = f"/autopilot on {req}".strip() if autopilot else req
     # 外部終端機這條路以前寫死安裝目錄——內嵌那條改吃專案資料夾之後，只要使用者
     # 取消勾選內嵌、或這台機器 PTY 不可用，產出照樣會落回 App 的安裝目錄。
-    root = project_dir()
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except Exception:  # noqa: BLE001
-        root = APP_DIR
+    root = prepare_project_dir()
     try:
         if IS_WIN:
             # claude 在 Windows 是 .cmd 蓋子，必須由 cmd 執行；argv list 交給

@@ -528,3 +528,62 @@ class TestExternalTerminalUsesProjectDir:
         assert launcher.launch_claude("做個東西") is True
         argv = calls[0][0]
         assert str(tmp_path / "myproj") in argv, argv
+
+
+class TestFrameworkBootstrap:
+    """把 session 的 cwd 從安裝目錄搬到使用者的專案資料夾之後，那個資料夾**必須**
+    也有框架檔——沒有 `CLAUDE.md` 就沒有 dispatcher（七階段不會跑），沒有
+    `.claude/settings.json` 就一個 hook 都不會載入（Codex-first 守門員、進度、
+    autopilot 全部不存在）。等於這次修法把自己要保護的東西關掉了。
+    """
+
+    def _fake_app(self, monkeypatch, tmp_path):
+        app = tmp_path / "app"
+        (app / ".claude").mkdir(parents=True)
+        (app / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+        (app / "tools").mkdir()
+        (app / "tools" / "enforce_build_codex.py").write_text("# x", encoding="utf-8")
+        (app / "CLAUDE.md").write_text("# dispatcher", encoding="utf-8")
+        (app / "desktop").mkdir()
+        (app / "desktop" / "VERSION").write_text("9.9.9", encoding="utf-8")
+        monkeypatch.setattr(launcher, "APP_DIR", app)
+        return app
+
+    def test_fresh_project_dir_gets_the_framework(self, monkeypatch, tmp_path):
+        self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "proj"
+        launcher.bootstrap_project(proj)
+        assert (proj / ".claude" / "settings.json").exists(), "沒有 hooks＝守門員不存在"
+        assert (proj / "CLAUDE.md").exists(), "沒有 CLAUDE.md＝dispatcher 不存在"
+        assert (proj / "tools" / "enforce_build_codex.py").exists()
+
+    def test_does_not_clobber_on_every_launch(self, monkeypatch, tmp_path):
+        """版本沒變就別一直覆蓋——使用者可能在專案裡改過東西。"""
+        self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "proj"
+        launcher.bootstrap_project(proj)
+        (proj / "CLAUDE.md").write_text("# 我改過的", encoding="utf-8")
+        assert launcher.bootstrap_project(proj) == []
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "# 我改過的"
+
+    def test_refreshes_when_app_version_changes(self, monkeypatch, tmp_path):
+        """App 升級後框架檔要跟上——留著舊的比沒有更難查（指示與行為對不上）。"""
+        app = self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "proj"
+        launcher.bootstrap_project(proj)
+        (app / "CLAUDE.md").write_text("# 新版 dispatcher", encoding="utf-8")
+        (app / "desktop" / "VERSION").write_text("9.9.10", encoding="utf-8")
+        assert "CLAUDE.md" in launcher.bootstrap_project(proj)
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "# 新版 dispatcher"
+
+    def test_prepare_returns_a_usable_dir(self, monkeypatch, tmp_path):
+        self._fake_app(monkeypatch, tmp_path)
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "proj")
+        root = launcher.prepare_project_dir()
+        assert root == tmp_path / "proj"
+        assert (root / ".claude" / "settings.json").exists()
+
+    def test_never_raises(self, monkeypatch, tmp_path):
+        self._fake_app(monkeypatch, tmp_path)
+        launcher.bootstrap_project(Path("\x00不可能建出來的路徑"))

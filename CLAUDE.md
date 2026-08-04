@@ -58,10 +58,16 @@
   hook 就 fail-open 放行，核心不變式最後還是靠 LLM 自律。後者跟 LLM 有沒有照做無關：
   App 開著＝任務在跑＝上膛。App 一關心跳自然過期（TTL 180 秒），所以框架自身開發、
   手動在別的目錄用 Claude 都不受影響。
-- **產出落在專案資料夾，不是安裝目錄**：桌面 App 的 session cwd、進度卡讀的
-  `log/events.jsonl`、中止旗標都吃 `project_dir()`（設定存 `~/.codexautoai/desktop.json`，
-  預設 `~/CodexAutoAI`，UI 可改）。以前寫死安裝目錄，使用者的專案會被寫進 App 自己的
-  安裝路徑、每個任務共用同一份 `log/`（上一輪的 Phase 進度會被下一輪看到）。
+- **產出落在專案資料夾，不是安裝目錄**：桌面 App 的 session cwd（內嵌與外部終端機
+  兩條路都是）、進度卡讀的 `log/events.jsonl`、中止旗標都吃 `project_dir()`
+  （設定存 `~/.codexautoai/desktop.json`，預設 `~/CodexAutoAI`，UI 可改）。以前寫死
+  安裝目錄，使用者的專案會被寫進 App 自己的安裝路徑、每個任務共用同一份 `log/`
+  （上一輪的 Phase 進度會被下一輪看到）。
+  **搬走 cwd 就必須把框架檔一起帶過去**：`bootstrap_project()` 會把 `.claude/`、
+  `CLAUDE.md`、`AGENTS.md`、`tools/`、`usage_gate.toml` 複製進專案資料夾（版本戳記
+  不同就整批更新）。少了它們，claude 讀不到 dispatcher 指示、`.claude/settings.json`
+  的三個 hook 一個都不會載入——七階段與 Codex-first 守門員等於全部不存在。這是
+  舊行為（cwd=安裝目錄）本來就成立、換路徑之後才需要補的前提。
 
 ## 生態定位（重要：決定什麼該進來、什麼不該）
 
