@@ -216,6 +216,11 @@ def trust_project_dir(root: Path) -> bool:
     只標記**使用者自己在 App 裡選的**那個資料夾，不碰其他任何專案。回傳有沒有
     真的寫入（已經是信任狀態、或不該自動信任就回 False）。
 
+    這是對共用檔案的 read-modify-write，沒有上鎖：同一時間別的 claude 行程也在寫
+    的話，它那次的變更會被覆蓋掉（原子 replace 只保證檔案不會壞，不保證不掉更新）。
+    接受這個風險是因為窗口極窄——只在 `prepare_project_dir()` 啟動時跑一次；跨平台
+    檔案鎖的複雜度不值得為這個換。
+
     **界線：只自動信任「`.claude/` 是我們放的」資料夾。** `.claude/settings.json`
     裡的 hook 會執行任意 shell 指令，那正是 claude 要跳信任確認的原因。使用者
     把 App 指向一個**本來就有自己 `.claude/`** 的既有專案時（bootstrap 刻意不覆蓋
