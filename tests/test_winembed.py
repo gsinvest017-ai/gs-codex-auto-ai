@@ -11,6 +11,7 @@
    量不到畫布時得回傳 0 讓呼叫端走 DPI 估計值，而不是亂裁。
 """
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -391,3 +392,40 @@ class TestAliveFollowsTheWindow:
         emb.profile_dir = str(tmp_path / "p")
         emb.close()
         assert killed == [999]
+
+
+class TestGraceExpired:
+    """行程死了**而且**寬限期內視窗也沒出現——這才是真正的啟動失敗。
+
+    這條分支最容易安靜地退化（比較符號寫反、`close()` 被拿掉），而退化的後果
+    就是原本那個 bug 整個回來：孤兒視窗 + fallback 視窗 = 兩個。
+    """
+
+    @pytest.fixture
+    def stubbed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(winembed, "available", lambda: (True, ""))
+        monkeypatch.setattr(winembed, "browser_path", lambda: "fake")
+        monkeypatch.setattr(winembed.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(winembed.subprocess, "Popen", lambda argv: _DeadProc())
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [])   # 視窗永遠不出現
+        monkeypatch.setattr(winembed, "_HANDOFF_GRACE", 0.5)         # 別讓測試等 6 秒
+        return winembed.EmbeddedBrowser()
+
+    def test_reports_failure_after_grace(self, stubbed):
+        ok = stubbed.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
+        assert ok is False
+        assert "沒有出現它的視窗" in stubbed.error, stubbed.error
+
+    def test_gives_up_after_grace_not_after_the_full_timeout(self, stubbed):
+        """要在寬限期後就放棄，不是苦等到 attach 的 25 秒逾時。"""
+        t0 = time.time()
+        stubbed.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
+        assert time.time() - t0 < 5, "拖到逾時才放棄"
+
+    def test_cleans_up_on_grace_failure(self, stubbed, monkeypatch):
+        """失敗一定要收乾淨——沒收就是使用者看到的那個孤兒視窗。"""
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        stubbed.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
+        assert stubbed.nonce == "", "close() 沒被呼叫"
+        assert stubbed.profile_dir is None
