@@ -54,6 +54,9 @@ MUTED = "#8b949e"
 LEFT_W = 560
 TERM_W = 900
 
+# 內嵌診斷檔最多保留幾行（見 _note_embed）。
+_EMBED_LOG_LINES = 200
+
 
 def app_dir() -> Path:
     """框架檔（.claude/ CLAUDE.md tools/ setup.*）所在目錄。
@@ -184,8 +187,11 @@ def _note_embed(msg: str) -> None:
     try:
         from datetime import datetime
         p = Path(tempfile.gettempdir()) / "codexautoai-embed.log"
-        with p.open("a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat(timespec='seconds')}  {msg}\n")
+        line = f"{datetime.now().isoformat(timespec='seconds')}  {msg}\n"
+        # 只留最後 N 行。診斷檔沒有輪替機制的話會隨 App 的壽命無限長大，
+        # 而要診斷的本來就只有最近幾次。
+        old = p.read_text(encoding="utf-8").splitlines(keepends=True) if p.exists() else []
+        p.write_text("".join(old[-(_EMBED_LOG_LINES - 1):]) + line, encoding="utf-8")
     except Exception:  # noqa: BLE001 — 診斷紀錄不該成為新的故障點
         pass
 

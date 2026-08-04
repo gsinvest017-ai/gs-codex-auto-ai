@@ -386,6 +386,7 @@ class TestAliveFollowsTheWindow:
         monkeypatch.setattr(winembed, "_enum_windows",
                             lambda: [(1, 999, CHROME, "CodexAutoAI 終端機")])  # 沒有 nonce
         monkeypatch.setattr(winembed, "_is_window", lambda h: True)
+        monkeypatch.setattr(winembed, "_window_class", lambda h: CHROME)
         monkeypatch.setattr(winembed, "_window_pid", lambda h: 999)
         emb = winembed.EmbeddedBrowser()
         emb.proc = None
@@ -476,3 +477,21 @@ class TestRecycledPidDuringAttach:
         ok = emb.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
         assert ok is False, "抓到了不屬於我們的視窗"
         assert reparented == [], f"把別人的視窗 reparent 進來了：{reparented}"
+
+
+def test_close_ignores_a_reused_hwnd_that_is_no_longer_chromium(monkeypatch, tmp_path):
+    """HWND 也會被回收（比 pid 罕見）。視窗還在、但已經不是 Chromium 了就別動它。"""
+    killed = []
+    monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+    monkeypatch.setattr(winembed, "_enum_windows", lambda: [])
+    monkeypatch.setattr(winembed, "_is_window", lambda h: True)
+    monkeypatch.setattr(winembed, "_window_class", lambda h: "Notepad")
+    monkeypatch.setattr(winembed, "_window_pid",
+                        lambda h: pytest.fail("不是 Chromium 還去問 pid"))
+    emb = winembed.EmbeddedBrowser()
+    emb.proc = None
+    emb.nonce = "n1"
+    emb.hwnd = 4242
+    emb.profile_dir = str(tmp_path / "p")
+    emb.close()
+    assert killed == []

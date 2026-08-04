@@ -208,6 +208,11 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
     def _is_window(hwnd: int) -> bool:
         return bool(_u32.IsWindow(hwnd))
 
+    def _window_class(hwnd: int) -> str:
+        buf = ctypes.create_unicode_buffer(256)
+        _u32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
     def _window_pid(hwnd: int) -> int:
         """視窗屬於哪個行程。"""
         pid = wintypes.DWORD()
@@ -244,6 +249,9 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
 
     def _is_window(hwnd: int) -> bool:  # type: ignore[misc]
         return False
+
+    def _window_class(hwnd: int) -> str:  # type: ignore[misc]
+        return ""
 
     def _rect(hwnd: int) -> tuple[int, int, int, int]:  # type: ignore[misc]
         return (0, 0, 0, 0)
@@ -500,7 +508,9 @@ class EmbeddedBrowser:
         # **當下**去問視窗的擁有者，不要用 attach 當時記下來的 pid：那個行程若已經
         # 結束，Windows 很快就會把同一個 pid 配給別人，照著殺會誤傷不相干的行程樹。
         # 先確認視窗還在，再問它現在屬於誰。
-        if hwnd and _is_window(hwnd):
+        # HWND 也會被回收（比 pid 罕見，要 handle table 繞一圈才會撞上），所以
+        # 除了確認視窗還在，再確認它**還是個 Chromium 視窗**才動手。
+        if hwnd and _is_window(hwnd) and _window_class(hwnd).startswith("Chrome_WidgetWin"):
             owner = _window_pid(hwnd)
             if owner:
                 pids.append(owner)

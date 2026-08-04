@@ -303,3 +303,14 @@ class TestEmbedDiagnosticLog:
             raise OSError("寫不進去")
         monkeypatch.setattr(launcher.tempfile, "gettempdir", boom, raising=False)
         launcher._note_embed("whatever")      # 不該拋
+
+    def test_caps_the_file(self, tmp_path, monkeypatch):
+        """沒有輪替的話診斷檔會隨 App 壽命無限長大，而要看的只有最近幾次。"""
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        monkeypatch.setattr(launcher, "_EMBED_LOG_LINES", 5)
+        for i in range(20):
+            launcher._note_embed(f"第 {i} 次")
+        lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 5, f"沒有截斷：{len(lines)} 行"
+        assert "第 19 次" in lines[-1], "留錯了，該留最後幾行"
