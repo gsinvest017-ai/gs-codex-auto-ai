@@ -164,8 +164,12 @@ class EmbeddedTerminal:
             return self._srv
 
     def open(self, *, kind: str | None = None, prompt: str = "",
-             shell=None) -> None:
+             shell=None) -> bool:
         """開啟（或聚焦）終端機；可順便先建一個 session。
+
+        回傳「呼叫端要的事情有沒有成功」——建 session 失敗時回 False。以前失敗只
+        跳一個 messagebox 就正常返回，呼叫端無從得知，於是照樣回報「已開啟 Claude
+        分頁」、守門員也一直上著膛，實際上一個 session 都沒有。
 
         **刻意不回傳 URL**：這個方法的用途常常是「給我一個 URL 丟給外面的東西開」，
         而唯一該外流的是 handoff 券。以前回 `srv.url`（帶真 token）沒被利用只是因為
@@ -185,15 +189,17 @@ class EmbeddedTerminal:
                 self._mgr.create(kind=kind, prompt=prompt)
             except Exception as exc:  # noqa: BLE001
                 messagebox.showerror("CodexAutoAI", f"開啟 {kind} session 失敗：{exc}")
+                return False
         # 交給另一個行程（瀏覽器外殼）開的 URL 一律用 handoff nonce——命令列在
         # Windows 上同機任何帳號都讀得到，token 放上去等於公開。見 termserver 說明。
         if shell is not None:
             try:
                 if shell(lambda: srv.handoff_url):
-                    return
+                    return True
             except Exception:  # noqa: BLE001 — 內嵌只是體驗升級，壞了就走舊路
                 pass
         self._show(srv.handoff_url)
+        return True
 
     def _show(self, url: str) -> None:
         """退路：優先開原生視窗（pywebview），沒有就用預設瀏覽器。"""
@@ -1014,7 +1020,10 @@ class LauncherUI:
         進度卡看的又是第三個地方，比不給換更難懂。
         """
         from tkinter import filedialog  # noqa: PLC0415 — 只有按下去才需要
-        if TERMINAL.has_live_sessions():
+        # `has_live_sessions()` 只看得到內嵌的 session；外部終端機那條路 App 完全
+        # 觀察不到，所以再看一次上膛旗標，否則換了資料夾之後舊目錄的標記會在
+        # 180 秒內過期，而外部終端機還在寫 src/。
+        if TERMINAL.has_live_sessions() or getattr(self, "_app_run", False):
             messagebox.showinfo(
                 "CodexAutoAI",
                 "還有 session 在執行中。請先關掉它們再換專案資料夾——"
@@ -1058,9 +1067,15 @@ class LauncherUI:
             if ok:
                 prompt = f"/autopilot on {_safe_prompt(req)}".strip() if autopilot \
                     else _safe_prompt(req)
-                TERMINAL.open(kind="claude", prompt=prompt, shell=self.show_terminal_pane)
-                self.status.config(
-                    text=f"已在內嵌終端機開啟 Claude 分頁（{mode}）", fg=GREEN)
+                if TERMINAL.open(kind="claude", prompt=prompt,
+                                 shell=self.show_terminal_pane):
+                    self.status.config(
+                        text=f"已在內嵌終端機開啟 Claude 分頁（{mode}）", fg=GREEN)
+                    return
+                # 建 session 失敗（claude 不見了、session 數到上限、pty 起不來）。
+                # 錯誤訊息 open() 已經跳過了，這裡只要收膛＋別謊報成功。
+                self._app_run = False
+                self.status.config(text="開啟 Claude session 失敗，任務未啟動", fg=RED)
                 return
             # 不可用就誠實說明並降級，不要靜默地換一種行為
             self.status.config(text=f"內嵌終端機不可用（{why}），改用外部終端機", fg=GOLD)

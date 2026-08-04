@@ -274,11 +274,27 @@ class TestOpenDoesNotHandBackTheToken:
     """`open()` 的用途常是「給我一個能丟給外面開的 URL」，所以它不該回傳帶真
     token 的那一個——那是等著被下一個呼叫者踩的坑。"""
 
-    def test_open_returns_nothing(self, monkeypatch):
+    def test_open_reports_success_not_a_url(self, monkeypatch):
+        """回 bool 而不是 URL：真 token 不該被交出去，但呼叫端要知道成不成功。"""
         srv = _FakeSrv()
         term, _ = _term(monkeypatch, srv)
-        assert term.open(shell=lambda open_url: True) is None
-        assert term.open() is None
+        assert term.open(shell=lambda open_url: True) is True
+        assert term.open() is True
+
+    def test_open_reports_failure_when_the_session_cannot_start(self, monkeypatch):
+        """以前失敗只跳 messagebox 就正常返回，呼叫端無從得知，於是照樣回報
+        「已開啟 Claude 分頁」、守門員也一直上著膛，實際上一個 session 都沒有。"""
+        srv = _FakeSrv()
+        term, shown = _term(monkeypatch, srv)
+
+        class _Mgr:
+            def create(self, **kw):
+                raise RuntimeError("同時開啟的 session 已達上限 12")
+
+        term._mgr = _Mgr()
+        monkeypatch.setattr(launcher.messagebox, "showerror", lambda *a, **k: None)
+        assert term.open(kind="claude", shell=lambda open_url: True) is False
+        assert shown == [], "建 session 失敗就不該再去開視窗"
 
 
 class TestEmbedDiagnosticLog:
