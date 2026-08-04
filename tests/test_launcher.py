@@ -277,3 +277,29 @@ class TestOpenDoesNotHandBackTheToken:
         term, _ = _term(monkeypatch, srv)
         assert term.open(shell=lambda open_url: True) is None
         assert term.open() is None
+
+
+class TestEmbedDiagnosticLog:
+    """內嵌失敗的原因要留得下來。
+
+    狀態列那行是**瞬間**的——使用者回報「跳出兩個視窗」時往往已經看不到原因，
+    只能靠猜（這次就猜了很久）。所以另外寫一份到固定位置。
+    """
+
+    def test_appends_with_timestamp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        launcher._note_embed("失敗：找不到視窗")
+        launcher._note_embed("失敗：第二次")
+        log = tmp_path / "codexautoai-embed.log"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2, "要用附加的，不能把上一次蓋掉"
+        assert "找不到視窗" in lines[0] and "第二次" in lines[1]
+        assert lines[0][:4].isdigit(), f"每行要有時間戳：{lines[0]!r}"
+
+    def test_never_raises(self, monkeypatch):
+        """診斷紀錄自己不該變成新的故障點（例如目錄唯讀）。"""
+        def boom():
+            raise OSError("寫不進去")
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", boom, raising=False)
+        launcher._note_embed("whatever")      # 不該拋

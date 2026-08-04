@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 from pathlib import Path
@@ -181,7 +182,6 @@ def _note_embed(msg: str) -> None:
     之後要診斷就是一句「把這個檔貼給我」。
     """
     try:
-        import tempfile
         from datetime import datetime
         p = Path(tempfile.gettempdir()) / "codexautoai-embed.log"
         with p.open("a", encoding="utf-8") as f:

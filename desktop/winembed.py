@@ -464,13 +464,12 @@ class EmbeddedBrowser:
                 # 行程已經退場（handoff），只能靠 nonce 認出它留下的視窗
                 pass
         pids.extend(self._orphan_pids())
-        for pid in dict.fromkeys(pids):          # 去重、保持順序
+        # 去重：handoff 之後 popen 的 pid 與視窗擁有者可能是同一個，`taskkill` 每次
+        # 最長會擋 15 秒且是**同步跑在呼叫端執行緒**上（收合面板就是 UI 執行緒），
+        # 重複收同一棵樹等於把最壞情況乘二。`_kill_tree` 已經涵蓋整棵樹，收完就好，
+        # 不必再補一次 `proc.kill()`。
+        for pid in dict.fromkeys(pids):
             _kill_tree(pid)
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
         self.nonce = ""
         if self.profile_dir:
             shutil.rmtree(self.profile_dir, ignore_errors=True)
