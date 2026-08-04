@@ -555,6 +555,13 @@ def launch_claude(requirement: str, autopilot: bool = False) -> bool:
         return False
     req = _safe_prompt(requirement)
     prompt = f"/autopilot on {req}".strip() if autopilot else req
+    # 外部終端機這條路以前寫死安裝目錄——內嵌那條改吃專案資料夾之後，只要使用者
+    # 取消勾選內嵌、或這台機器 PTY 不可用，產出照樣會落回 App 的安裝目錄。
+    root = project_dir()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        root = APP_DIR
     try:
         if IS_WIN:
             # claude 在 Windows 是 .cmd 蓋子，必須由 cmd 執行；argv list 交給
@@ -562,15 +569,15 @@ def launch_claude(requirement: str, autopilot: bool = False) -> bool:
             tail = ["cmd", "/k", "claude"] + ([prompt] if prompt else [])
             wt = _which("wt")
             if wt:             # 優先 Windows Terminal
-                subprocess.Popen([wt, "-d", str(APP_DIR)] + tail)
+                subprocess.Popen([wt, "-d", str(root)] + tail)
             else:
                 # `start` 是 cmd 內建，需要 cmd 承載；第二個引數是視窗標題。
                 subprocess.Popen(["cmd", "/c", "start", "CodexAutoAI"] + tail,
-                                cwd=str(APP_DIR))
+                                cwd=str(root))
         else:
             # 需求走位置參數 $2，永遠不被 bash 解析成程式碼。
             script = 'cd "$1" && exec claude ${2:+"$2"}'
-            argv = ["bash", "-lc", script, "bash", str(APP_DIR), prompt]
+            argv = ["bash", "-lc", script, "bash", str(root), prompt]
             for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
                 path = _which(term)
                 if path:
@@ -1060,6 +1067,11 @@ class LauncherUI:
 
         if launch_claude(req, autopilot=autopilot):
             self.status.config(text=f"已開啟外部終端機（{mode}），在新視窗執行中…", fg=GREEN)
+        else:
+            # 沒啟動成功就要收膛。上膛刻意放在啟動**之前**（守門員要趕在 Claude 有
+            # 機會寫第一個檔之前生效），代價就是失敗路徑必須自己收回來——否則那個
+            # 資料夾會一直上著膛卻沒有任何任務在跑，而且完全沒有徵兆。
+            self._app_run = False
 
     def on_open_terminal(self) -> None:
         """只開終端機視窗，不建 session——使用者自己在裡面按「＋ 新增」。"""

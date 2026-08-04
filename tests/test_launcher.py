@@ -482,3 +482,33 @@ class TestArmingDisarms:
     def test_missing_model_keeps_it_armed(self, tmp_path):
         ui, _ = self._ui(tmp_path, "done", log_mtime_offset=+5)
         assert ui._run_finished(None) is False
+
+
+class TestExternalTerminalUsesProjectDir:
+    """外部終端機這條路以前寫死安裝目錄。只要使用者取消勾選內嵌、或這台機器
+    PTY 不可用，產出就照樣落回 App 的安裝目錄——修了一半等於沒修。"""
+
+    def _spy(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "myproj")
+        monkeypatch.setattr(launcher, "_which",
+                            lambda n: f"/usr/bin/{n}" if n in ("claude", "wt", "xterm") else None)
+        calls = []
+        monkeypatch.setattr(launcher.subprocess, "Popen",
+                            lambda argv, **kw: calls.append((argv, kw)) or object())
+        return calls
+
+    def test_windows_terminal_opens_in_project_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "IS_WIN", True)
+        calls = self._spy(monkeypatch, tmp_path)
+        assert launcher.launch_claude("做個東西") is True
+        argv = calls[0][0]
+        assert str(tmp_path / "myproj") in argv, argv
+        assert str(launcher.APP_DIR) not in argv
+
+    def test_posix_terminal_opens_in_project_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "IS_WIN", False)
+        calls = self._spy(monkeypatch, tmp_path)
+        assert launcher.launch_claude("做個東西") is True
+        argv = calls[0][0]
+        assert str(tmp_path / "myproj") in argv, argv
