@@ -382,22 +382,27 @@ def check_python() -> tuple[bool, str]:
     autopilot 的 arm/cont 全部靜默失敗，pipeline 照跑，但「Claude 不直接寫程式碼」
     這條核心不變式就沒人守了。所以這項是 **critical**。
     """
+    too_old = ""
     for name in ("python", "python3"):
         path = _which(name)
         if not path:
             continue
-        rc, out = _run(f'"{path}" -c "import sys;print(sys.version_info[:2])"')
+        rc, out = _run(f'"{path}" -c "import sys;print(*sys.version_info[:2])"')
         if rc != 0:
             continue
         try:
-            major, minor = eval(out.strip().splitlines()[-1])  # noqa: S307 — 自己產的 tuple
-        except Exception:  # noqa: BLE001
+            major, minor = (int(x) for x in out.strip().splitlines()[-1].split())
+        except Exception:  # noqa: BLE001 — 版本判讀不出來就別擋人，有 python 比沒有好
             return True, f"已安裝（{path}，版本判讀失敗）"
         if (major, minor) < MIN_PY:
-            return False, (f"版本太舊 {major}.{minor}（需要 "
-                           f"{MIN_PY[0]}.{MIN_PY[1]}+）— hooks 會失效")
+            # **記下來繼續找下一個候選**，不能就此放棄：Linux 上 `python` 常常是
+            # 舊的、真正能用的是 `python3`。這項現在是 critical，提早 return 會
+            # 讓一台其實裝了 3.12 的機器按不下「啟動」。
+            too_old = too_old or (f"版本太舊 {major}.{minor}（需要 "
+                                  f"{MIN_PY[0]}.{MIN_PY[1]}+）— hooks 會失效")
+            continue
         return True, f"已安裝（{path}，{major}.{minor}）"
-    return False, "未安裝 — hooks 需要它，缺了 Codex-first 守門員會失效"
+    return False, too_old or "未安裝 — hooks 需要它，缺了 Codex-first 守門員會失效"
 
 
 def gather_checks() -> list[dict]:

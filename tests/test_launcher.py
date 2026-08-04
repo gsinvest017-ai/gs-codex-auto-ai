@@ -340,17 +340,44 @@ class TestPythonCheck:
     def test_reports_missing_python(self, monkeypatch):
         monkeypatch.setattr(launcher, "_which", lambda n: None)
         ok, msg = launcher.check_python()
-        assert ok is False and "hook" in msg.lower() or "hooks" in msg
+        # 括號不能省：`a and b or c` 會 parse 成 `(a and b) or c`，而訊息裡本來就有
+        # "hooks"，右邊恆真——那樣寫的話 ok=True 也照樣通過，等於沒驗到。
+        assert ok is False and ("hook" in msg.lower() or "hooks" in msg)
 
     def test_rejects_too_old(self, monkeypatch):
         monkeypatch.setattr(launcher, "_which", lambda n: r"C:\py\python.exe")
-        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 8)"))
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "3 8"))
         ok, msg = launcher.check_python()
         assert ok is False and "3.8" in msg
 
+    def test_old_python_but_new_python3(self, monkeypatch):
+        """Linux 上 `python` 常常是舊的、能用的是 `python3`。
+
+        這項是 critical，所以「看到舊的就放棄」會讓一台其實裝了 3.12 的機器
+        按不下「啟動」。
+        """
+        monkeypatch.setattr(launcher, "_which", lambda n: f"/usr/bin/{n}")
+
+        def run(cmd, timeout=10):
+            # 路徑在指令裡是**帶引號**的，比對要連引號一起看——否則
+            # `/usr/bin/python` 這個前綴也會命中 `/usr/bin/python3`，兩個候選
+            # 拿到同一個版本，測試就變成永遠會過（第一版就是這樣）。
+            return (0, "3 8") if '"/usr/bin/python"' in cmd else (0, "3 12")
+
+        monkeypatch.setattr(launcher, "_run", run)
+        ok, msg = launcher.check_python()
+        assert ok is True, f"有可用的 python3 卻回報不可用：{msg}"
+        assert "3.12" in msg
+
+    def test_all_candidates_too_old_reports_the_version(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_which", lambda n: f"/usr/bin/{n}")
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "3 8"))
+        ok, msg = launcher.check_python()
+        assert ok is False and "3.8" in msg, msg
+
     def test_accepts_new_enough(self, monkeypatch):
         monkeypatch.setattr(launcher, "_which", lambda n: r"C:\py\python.exe")
-        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 12)"))
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "3 12"))
         ok, msg = launcher.check_python()
         assert ok is True and "3.12" in msg
 
@@ -362,7 +389,7 @@ class TestPythonCheck:
             return "/usr/bin/python3" if n == "python3" else None
 
         monkeypatch.setattr(launcher, "_which", which)
-        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 11)"))
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "3 11"))
         ok, _ = launcher.check_python()
         assert ok is True and seen == ["python", "python3"]
 
