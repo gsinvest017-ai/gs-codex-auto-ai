@@ -5,6 +5,7 @@
 `` `...` `` / `&` 的需求會被那層 shell 當成指令執行。
 """
 import json
+import os
 import time
 import shutil
 import subprocess
@@ -437,3 +438,47 @@ class TestProjectDir:
     def test_touch_never_raises(self, tmp_path):
         """寫不進去只是少一層保護，不該擋住任務啟動。"""
         launcher.touch_app_run(tmp_path / "不存在" / "而且不可寫" / "\x00")
+
+
+class TestArmingDisarms:
+    """守門員上膛之後也要收得回來——不然交付之後只要 App 還開著，Claude 連手動
+    改一行都會被擋，而且沒有任何徵兆（跟 state.json 那條路的語意也不一致）。"""
+
+    class _UI:
+        """只借 LauncherUI 的兩個方法，不建真的 Tk 視窗。"""
+
+        def __init__(self, log: Path, started_at: float):
+            self._app_run = True
+            self._app_run_at = started_at
+            self._log = log
+
+        _run_finished = launcher.LauncherUI._run_finished
+
+        def _events_log(self):
+            return self._log
+
+    def _ui(self, tmp_path, state, log_mtime_offset, started_offset=0.0):
+        log = tmp_path / "events.jsonl"
+        log.write_text("{}", encoding="utf-8")
+        now = time.time()
+        os.utime(log, (now + log_mtime_offset, now + log_mtime_offset))
+        ui = self._UI(log, now + started_offset)
+        return ui, {"state": state}
+
+    def test_disarms_when_this_run_finished(self, tmp_path):
+        ui, model = self._ui(tmp_path, "done", log_mtime_offset=+5)
+        assert ui._run_finished(model) is True
+
+    def test_stays_armed_while_running(self, tmp_path):
+        ui, model = self._ui(tmp_path, "running", log_mtime_offset=+5)
+        assert ui._run_finished(model) is False
+
+    def test_stale_log_from_a_previous_run_does_not_disarm(self, tmp_path):
+        """剛按下啟動時 events.jsonl 還是上一輪的，狀態多半已是 done——
+        只看 state 的話下一次輪詢就收膛，保護在最需要的時候消失。"""
+        ui, model = self._ui(tmp_path, "done", log_mtime_offset=-60)
+        assert ui._run_finished(model) is False
+
+    def test_missing_model_keeps_it_armed(self, tmp_path):
+        ui, _ = self._ui(tmp_path, "done", log_mtime_offset=+5)
+        assert ui._run_finished(None) is False

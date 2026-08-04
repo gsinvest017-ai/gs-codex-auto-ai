@@ -909,14 +909,37 @@ class LauncherUI:
     def _events_log(self) -> Path:
         return project_dir() / "log" / "events.jsonl"
 
+    def _run_finished(self, model) -> bool:
+        """這次 App 啟動的任務跑完了嗎。
+
+        **不能只看 `model["state"]`**：剛按下啟動的那一刻，`events.jsonl` 還是上一輪
+        留下的，狀態多半已經是 done——下一次輪詢（2 秒後）就會把守門員收膛，等於
+        整個保護在最需要的時候消失。所以還要求「事件檔在我們啟動之後真的被寫過」，
+        確認看到的是這一輪的結果而不是上一輪的殘影。
+        """
+        if not model or model.get("state") not in {"done", "escalated"}:
+            return False
+        try:
+            return self._events_log().stat().st_mtime > getattr(self, "_app_run_at", 0)
+        except OSError:
+            return False
+
     def poll_progress(self) -> None:
         """每 2 秒讀一次 events.jsonl 更新進度卡（唯讀，不干擾 pipeline）。"""
-        if getattr(self, "_app_run", False):
-            touch_app_run(project_dir())      # 心跳：App 還開著＝任務還在跑
         try:
             model = load_progress_model(self._events_log())
         except Exception:  # noqa: BLE001
             model = None
+        if getattr(self, "_app_run", False):
+            if self._run_finished(model):
+                # 跑完就收膛，跟 state.json 那條路的語意一致（`build 已結束一律放行`）。
+                # 不收的話，交付之後只要 App 還開著，Claude 連手動改一行都會被擋，
+                # 而且沒有任何徵兆。
+                self._app_run = False
+            else:
+                touch_app_run(project_dir())   # 心跳：App 還開著＝任務還在跑
+
+
 
         if not model or not model.get("log_exists"):
             self.prog_bar.config(text="尚未開始", fg=MUTED)
@@ -995,6 +1018,9 @@ class LauncherUI:
         if not picked:
             return
         set_project_dir(Path(picked))
+        # 也要收膛：不收的話下一次心跳（2 秒後）會在**新的**資料夾寫下標記，
+        # 那裡根本還沒啟動過任何任務，守門員卻已經上膛。
+        self._app_run = False
         TERMINAL.reset_workdir()
         self._refresh_project_label()
         self.status.config(text=f"專案資料夾已改為 {picked}", fg=GREEN)
@@ -1017,6 +1043,7 @@ class LauncherUI:
         mode = "非停（autopilot）" if autopilot else "一般"
         # 先上膛再啟動：守門員要在 Claude 有機會寫第一個檔之前就生效
         self._app_run = True
+        self._app_run_at = time.time()
         touch_app_run(project_dir(), prompt=req)
 
         if self.embed_var.get():
