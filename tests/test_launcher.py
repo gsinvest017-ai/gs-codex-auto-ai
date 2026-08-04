@@ -666,3 +666,48 @@ class TestFrameworkBootstrap:
         launcher.bootstrap_project(proj)
         assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "既有內容"
 
+
+
+class TestSeedFromSpecArms:
+    """「從 spec 開始」最後也是走 launch_claude 跑同一條 pipeline——少了上膛，
+    這條路啟動的任務完全沒有 Codex-first 守門員。"""
+
+    class _UI:
+        on_seed_from_spec = launcher.LauncherUI.on_seed_from_spec
+
+        def __init__(self, req):
+            self._req = req
+            self._app_run = False
+
+            class _T:
+                def get(self, *a):
+                    return req
+
+            class _S:
+                def config(self, **kw):
+                    pass
+
+            class _R:
+                def update_idletasks(self):
+                    pass
+
+            self.req, self.status, self.root = _T(), _S(), _R()
+
+    def test_arms_before_launching(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "p")
+        armed = {}
+        monkeypatch.setattr(launcher, "seed_from_spec",
+                            lambda i: armed.setdefault("armed_when_called", ui._app_run) or True)
+        ui = self._UI("做個東西")
+        ui.on_seed_from_spec()
+        assert armed["armed_when_called"] is True, "啟動之前就要上膛"
+        assert (tmp_path / "p" / "log" / "app-run.json").exists()
+
+    def test_disarms_when_seeding_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "p")
+        monkeypatch.setattr(launcher, "seed_from_spec", lambda i: False)
+        ui = self._UI("做個東西")
+        ui.on_seed_from_spec()
+        assert ui._app_run is False, "沒啟動成功卻一直上著膛"

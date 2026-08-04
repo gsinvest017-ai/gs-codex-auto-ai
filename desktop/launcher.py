@@ -1187,7 +1187,14 @@ class LauncherUI:
             self._app_run = False
 
     def on_open_terminal(self) -> None:
-        """只開終端機視窗，不建 session——使用者自己在裡面按「＋ 新增」。"""
+        """只開終端機視窗，不建 session——使用者自己在裡面按「＋ 新增」。
+
+        **刻意不上膛**（與「啟動新任務」「從 spec 開始」不同）：這裡只是開一個空
+        面板，使用者可能只是想開個 shell 看東西。在這裡上膛的話，守門員會一直
+        掛著到 App 關閉為止（沒有 pipeline 事件可以判斷「跑完了」），連帶把純
+        shell 用途也擋住。從面板手動開的 session 與下拉選單的 Codex 一樣，屬於
+        自負其責的手動逃生口。
+        """
         ok, why = TERMINAL.available()
         if not ok:
             messagebox.showerror("CodexAutoAI", f"內嵌終端機不可用：{why}")
@@ -1199,8 +1206,15 @@ class LauncherUI:
         intent = self.req.get("1.0", "end").strip()
         self.status.config(text="spec-forge 產生 spec 中…", fg=GOLD)
         self.root.update_idletasks()
+        # 這條路最後也是走 launch_claude 跑同一條 pipeline，所以一樣要先上膛——
+        # 少了這行，「從 spec 開始」啟動的任務完全沒有 Codex-first 守門員。
+        self._app_run = True
+        self._app_run_at = time.time()
+        touch_app_run(prepare_project_dir(), prompt=intent)
         if seed_from_spec(intent):
             self.status.config(text="已產 spec 並開啟終端機跑 pipeline…", fg=GREEN)
+        else:
+            self._app_run = False
 
     # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
     def start_update_check(self) -> None:
