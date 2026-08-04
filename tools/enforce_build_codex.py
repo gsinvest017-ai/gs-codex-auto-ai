@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -90,6 +91,34 @@ def _run_active(root: Path) -> bool:
     return bool(phase) and f"{phase}-end" not in completed
 
 
+# App 心跳標記的有效期。桌面 App 每 2 秒更新一次（進度輪詢那圈順手做），
+# 所以只要 App 還開著就一定是新的；App 一關就自然過期。
+_APP_RUN_TTL = 180.0
+
+
+def _app_run_active(root: Path) -> bool:
+    """桌面 App 是否正在跑一個任務。
+
+    **這是機械式的武裝來源。** 原本 `_is_building()` 只認 `log/state.json`，而那個
+    檔案是靠 Claude 自己照 dispatcher.md 去跑 `run_phase.py begin` 寫出來的——
+    等於「Claude 不直接寫程式碼」這條核心不變式，最後一道防線還是要 Claude 先
+    自首才會生效；它沒跑，hook 就 fail-open 放行。
+
+    改成由**App** 在啟動任務時寫下標記、並在進度輪詢裡持續更新心跳。App 開著
+    ＝任務在跑 ＝ 守門員上膛，跟 LLM 有沒有照做完全無關。
+
+    心跳而不是 pid：pid 存活檢查在 Windows 要另外走 ctypes（`os.kill(pid, 0)` 在
+    Windows 會真的把行程殺掉，不能用），時間戳單純得多，而且 App 崩潰時同樣會
+    自動失效。
+    """
+    try:
+        st = json.loads((root / "log" / "app-run.json").read_text(encoding="utf-8"))
+        updated = float(st.get("updated_at") or 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    return (time.time() - updated) < _APP_RUN_TTL
+
+
 def _under_src(root: Path, file_path: str) -> bool:
     """目標是否落在受管目錄（src/tests/docs）下；白名單檔案放行。"""
     try:
@@ -117,14 +146,14 @@ def evaluate(payload: dict, root: Path) -> Optional[str]:
     tool = payload.get("tool_name") or ""
     # 非停：pipeline 進行中禁止把選擇丟回使用者
     if tool == "AskUserQuestion":
-        return _DENY_ASK_REASON if _run_active(root) else None
+        return _DENY_ASK_REASON if (_run_active(root) or _app_run_active(root)) else None
     if tool not in _GUARDED_TOOLS:
         return None
     tin = payload.get("tool_input") or {}
     file_path = tin.get("file_path") or tin.get("path") or ""
     if not file_path:
         return None
-    if not _is_building(root):
+    if not (_is_building(root) or _app_run_active(root)):
         return None
     if not _under_src(root, file_path):
         return None

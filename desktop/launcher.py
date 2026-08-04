@@ -13,12 +13,14 @@ App 取代不了 claude / codex / node 這些 CLI 本身（登入要開瀏覽器
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -69,6 +71,47 @@ def app_dir() -> Path:
 APP_DIR = app_dir()
 IS_WIN = os.name == "nt"
 
+# 設定檔：記住使用者選的專案資料夾。放在 App 目錄外，重裝 / 升級都不會被蓋掉。
+CONFIG_PATH = Path.home() / ".codexautoai" / "desktop.json"
+
+
+def default_project_dir() -> Path:
+    r"""預設的專案資料夾。
+
+    **刻意不是安裝目錄**：以前所有 session 都跑在 `%LOCALAPPDATA%\CodexAutoAI`，
+    於是使用者的產出被寫進 App 的安裝目錄，而且每個任務共用同一份 `log/`——
+    上一輪的 Phase 進度會被下一輪看到（進度卡顯示「Phase 7/7 已完成 [0..7]」
+    就是這樣來的），解除安裝還會把人家的專案一起帶走。
+    """
+    return Path.home() / "CodexAutoAI"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 設定壞掉就當預設，不擋啟動
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def project_dir() -> Path:
+    p = load_config().get("project_dir")
+    return Path(p) if p else default_project_dir()
+
+
+def set_project_dir(path: Path) -> None:
+    cfg = load_config()
+    cfg["project_dir"] = str(path)
+    save_config(cfg)
+
 
 class EmbeddedTerminal:
     """內嵌終端機：在 App 內用分頁管理 Claude / Codex session。
@@ -111,7 +154,12 @@ class EmbeddedTerminal:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             import sessions as sessions_mod   # noqa: PLC0415
             import termserver                 # noqa: PLC0415
-            self._mgr = sessions_mod.SessionManager(default_cwd=str(APP_DIR))
+            root = project_dir()
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except Exception:  # noqa: BLE001 — 建不出來就退回安裝目錄，別讓 App 開不起來
+                root = APP_DIR
+            self._mgr = sessions_mod.SessionManager(default_cwd=str(root))
             self._srv = termserver.TerminalServer(self._mgr).start()
             return self._srv
 
@@ -160,6 +208,25 @@ class EmbeddedTerminal:
         except Exception:  # noqa: BLE001
             webbrowser.open(url)
 
+    def has_live_sessions(self) -> bool:
+        with self._lock:
+            mgr = self._mgr
+        return bool(mgr and mgr.alive_sessions())
+
+    def reset_workdir(self) -> None:
+        """換了專案資料夾之後，讓下一次 open() 重建服務。
+
+        `default_cwd` 是 `SessionManager` 建構時就決定的，服務又是延遲啟動且只建
+        一次——不重置的話，換資料夾在 UI 上看起來成功了，session 卻還是開在舊路徑。
+        """
+        with self._lock:
+            srv, self._srv, self._mgr = self._srv, None, None
+        if srv is not None:
+            try:
+                srv.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
     def shutdown(self) -> None:
         """App 結束時收乾淨——不收的話 pty 子行程（claude/node）會變孤兒。"""
         with self._lock:
@@ -175,6 +242,34 @@ class EmbeddedTerminal:
                 srv.stop()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def touch_app_run(root: Path, prompt: str = "") -> None:
+    """寫 / 更新「App 正在跑一個任務」的標記。
+
+    這是 `tools/enforce_build_codex.py` 的**機械式武裝來源**：原本守門員只認
+    `log/state.json`，而那是靠 Claude 自己去跑 `run_phase.py begin` 寫的——它不寫，
+    守門員就 fail-open 放行，等於「Claude 不直接寫程式碼」最後還是靠 Claude 自律。
+    改由 App 寫這個檔（啟動任務時建立、進度輪詢時更新心跳），跟 LLM 有沒有照做無關。
+
+    寫失敗只是少一層保護，不該擋住任務啟動，所以全程吞例外。
+    """
+    try:
+        log = root / "log"
+        log.mkdir(parents=True, exist_ok=True)
+        f = log / "app-run.json"
+        try:
+            cur = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            cur = {}
+        if prompt:
+            cur["prompt"] = prompt[:200]
+            cur["started_at"] = time.time()
+        cur["updated_at"] = time.time()
+        cur["pid"] = os.getpid()
+        f.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _note_embed(msg: str) -> None:
@@ -272,20 +367,54 @@ def check_simple(name: str, label: str) -> tuple[bool, str]:
     return (bool(p), f"已安裝（{p}）" if p else f"未安裝 — 需要 {label}")
 
 
+MIN_PY = (3, 11)
+
+
+def check_python() -> tuple[bool, str]:
+    """PATH 上有沒有**外部** Python ≥ 3.11。
+
+    凍結版以前直接回報「內建於 App」就過關——那是錯的，而且錯得很安靜。exe 自己
+    嵌的 runtime 只給 App 用；`.claude/settings.json` 的三個 hook 全都是
+    `python "$CLAUDE_PROJECT_DIR/tools/…"`，要另外開行程，吃的是 PATH。
+
+    沒有它的後果不是「某個功能不能用」，而是**整套保證失效而且沒有徵兆**：
+    enforce_build_codex（Codex-first 硬分工的守門員）、dispatch_hook（進度）、
+    autopilot 的 arm/cont 全部靜默失敗，pipeline 照跑，但「Claude 不直接寫程式碼」
+    這條核心不變式就沒人守了。所以這項是 **critical**。
+    """
+    for name in ("python", "python3"):
+        path = _which(name)
+        if not path:
+            continue
+        rc, out = _run(f'"{path}" -c "import sys;print(sys.version_info[:2])"')
+        if rc != 0:
+            continue
+        try:
+            major, minor = eval(out.strip().splitlines()[-1])  # noqa: S307 — 自己產的 tuple
+        except Exception:  # noqa: BLE001
+            return True, f"已安裝（{path}，版本判讀失敗）"
+        if (major, minor) < MIN_PY:
+            return False, (f"版本太舊 {major}.{minor}（需要 "
+                           f"{MIN_PY[0]}.{MIN_PY[1]}+）— hooks 會失效")
+        return True, f"已安裝（{path}，{major}.{minor}）"
+    return False, "未安裝 — hooks 需要它，缺了 Codex-first 守門員會失效"
+
+
 def gather_checks() -> list[dict]:
     claude_ok, claude_msg = check_claude()
     codex_ok, codex_msg = check_codex()
     node_ok, node_msg = check_simple("node", "Node.js（Codex 需要）")
     git_ok, git_msg = check_simple("git", "Git")
     gh_ok, gh_msg = check_gh()
-    py_ok, py_msg = check_simple("python", "Python 3.11+") if not getattr(sys, "frozen", False) else (True, "內建於 App")
+    py_ok, py_msg = check_python()
     return [
         {"key": "claude", "name": "Claude Code", "ok": claude_ok, "msg": claude_msg, "critical": True},
         {"key": "codex", "name": "OpenAI Codex", "ok": codex_ok, "msg": codex_msg, "critical": True},
         {"key": "node", "name": "Node.js", "ok": node_ok, "msg": node_msg, "critical": False},
         {"key": "git", "name": "Git", "ok": git_ok, "msg": git_msg, "critical": False},
         {"key": "gh", "name": "GitHub CLI", "ok": gh_ok, "msg": gh_msg, "critical": False},
-        {"key": "python", "name": "Python", "ok": py_ok, "msg": py_msg, "critical": False},
+        # critical：hooks 全靠它，缺了整套 Codex-first 保證會靜默失效（見 check_python）
+        {"key": "python", "name": "Python", "ok": py_ok, "msg": py_msg, "critical": True},
     ]
 
 
@@ -526,6 +655,20 @@ class LauncherUI:
         tk.Button(btns, text="↻ 重新檢查", command=self.refresh, font=self.h2,
                   bg="#21262d", fg=CHAMPAGNE, relief="flat", padx=12, pady=4).pack(side="left", padx=8)
 
+        # 專案資料夾：pipeline 的產出（src/ tests/ docs/ log/）都落在這裡。
+        # 以前寫死成安裝目錄，使用者的專案會被寫進 App 自己的安裝路徑。
+        proj = tk.Frame(self.left, bg=CARD)
+        proj.pack(fill="x", padx=22, pady=(14, 0))
+        head = tk.Frame(proj, bg=CARD)
+        head.pack(fill="x", padx=14, pady=(10, 2))
+        tk.Label(head, text="專案資料夾", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(side="left")
+        tk.Button(head, text="📂 變更", command=self.on_pick_project, font=self.mono,
+                  bg="#21262d", fg=CHAMPAGNE, relief="flat", padx=10).pack(side="right")
+        self.proj_label = tk.Label(proj, text="", font=self.mono, fg=MUTED, bg=CARD,
+                                   anchor="w", justify="left", wraplength=LEFT_W - 60)
+        self.proj_label.pack(fill="x", padx=14, pady=(0, 10))
+        self._refresh_project_label()
+
         # 需求 + 啟動
         tk.Label(self.left, text="你想做什麼？", font=self.h2, fg=CHAMPAGNE, bg=BG).pack(anchor="w", padx=24, pady=(18, 4))
         self.req = tk.Text(self.left, height=3, font=self.h2, bg=CARD, fg=CHAMPAGNE,
@@ -759,10 +902,12 @@ class LauncherUI:
 
     # ── 進度輪詢 ────────────────────────────────────────────────────────────
     def _events_log(self) -> Path:
-        return APP_DIR / "log" / "events.jsonl"
+        return project_dir() / "log" / "events.jsonl"
 
     def poll_progress(self) -> None:
         """每 2 秒讀一次 events.jsonl 更新進度卡（唯讀，不干擾 pipeline）。"""
+        if getattr(self, "_app_run", False):
+            touch_app_run(project_dir())      # 心跳：App 還開著＝任務還在跑
         try:
             model = load_progress_model(self._events_log())
         except Exception:  # noqa: BLE001
@@ -802,7 +947,7 @@ class LauncherUI:
         ):
             return
         try:
-            flag = APP_DIR / "log" / "abort.flag"
+            flag = project_dir() / "log" / "abort.flag"
             flag.parent.mkdir(parents=True, exist_ok=True)
             flag.write_text("", encoding="utf-8")
             self.status.config(text="已送出中止，將於下一個回合邊界停止", fg=GOLD)
@@ -824,6 +969,31 @@ class LauncherUI:
             self.launch_btn.config(state="disabled", bg="#3a3a3a")
             self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
 
+    def _refresh_project_label(self) -> None:
+        self.proj_label.config(text=str(project_dir()))
+
+    def on_pick_project(self) -> None:
+        """換專案資料夾。
+
+        已經有 session 在跑時**不換**——換了只會讓新舊 session 跑在不同目錄、
+        進度卡看的又是第三個地方，比不給換更難懂。
+        """
+        from tkinter import filedialog  # noqa: PLC0415 — 只有按下去才需要
+        if TERMINAL.has_live_sessions():
+            messagebox.showinfo(
+                "CodexAutoAI",
+                "還有 session 在執行中。請先關掉它們再換專案資料夾——"
+                "否則新舊 session 會跑在不同目錄。")
+            return
+        picked = filedialog.askdirectory(title="選擇專案資料夾",
+                                         initialdir=str(project_dir()))
+        if not picked:
+            return
+        set_project_dir(Path(picked))
+        TERMINAL.reset_workdir()
+        self._refresh_project_label()
+        self.status.config(text=f"專案資料夾已改為 {picked}", fg=GREEN)
+
     def on_setup(self) -> None:
         # 環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
         checks = gather_checks()
@@ -840,6 +1010,9 @@ class LauncherUI:
         req = self.req.get("1.0", "end").strip()
         autopilot = self.autopilot_var.get()
         mode = "非停（autopilot）" if autopilot else "一般"
+        # 先上膛再啟動：守門員要在 Claude 有機會寫第一個檔之前就生效
+        self._app_run = True
+        touch_app_run(project_dir(), prompt=req)
 
         if self.embed_var.get():
             ok, why = TERMINAL.available()

@@ -132,3 +132,62 @@ def test_main_allows_silently(tmp_path, monkeypatch, capsys):
     rc = enf.main()
     out = capsys.readouterr().out
     assert rc == 0 and out.strip() == ""
+
+
+# ── App 心跳武裝 ─────────────────────────────────────────────────────────────
+def _write_app_run(root: Path, age_seconds: float = 0.0):
+    import time
+    log = root / "log"
+    log.mkdir(parents=True, exist_ok=True)
+    (log / "app-run.json").write_text(json.dumps({
+        "prompt": "做一個記帳 CLI", "started_at": time.time() - age_seconds,
+        "updated_at": time.time() - age_seconds, "pid": 1234,
+    }), encoding="utf-8")
+
+
+class TestAppRunArming:
+    """守門員原本只認 `log/state.json`，而那是靠 Claude 自己去跑
+    `run_phase.py begin` 寫出來的——它沒跑，hook 就 fail-open 放行，等於
+    「Claude 不直接寫程式碼」這條核心不變式最後還是靠 Claude 自律。
+
+    改由**桌面 App** 在啟動任務時寫下心跳標記，跟 LLM 有沒有照做無關。
+    """
+
+    def test_blocks_src_write_with_only_the_app_marker(self, tmp_path):
+        """沒有 state.json（Claude 還沒自首）也要擋——這就是修的那個洞。"""
+        _write_app_run(tmp_path)
+        assert enf.evaluate(_payload("Write", tmp_path), tmp_path) is not None
+
+    def test_blocks_tests_dir_too(self, tmp_path):
+        _write_app_run(tmp_path)
+        assert enf.evaluate(_payload("Write", tmp_path, "tests/t.py"), tmp_path) is not None
+
+    def test_whitelist_still_passes(self, tmp_path):
+        """Phase 2 的規劃產物是 Claude 的職責，武裝了也不能擋。"""
+        _write_app_run(tmp_path)
+        assert enf.evaluate(
+            _payload("Write", tmp_path, "docs/requirements-spec.md"), tmp_path) is None
+
+    def test_non_guarded_dir_still_passes(self, tmp_path):
+        _write_app_run(tmp_path)
+        assert enf.evaluate(_payload("Write", tmp_path, "log/note.md"), tmp_path) is None
+
+    def test_stale_marker_does_not_arm(self, tmp_path):
+        """App 關掉之後標記要自然過期，否則那個資料夾會被永久鎖住。"""
+        _write_app_run(tmp_path, age_seconds=enf._APP_RUN_TTL + 60)
+        assert enf.evaluate(_payload("Write", tmp_path), tmp_path) is None
+
+    def test_no_marker_at_all_still_fails_open(self, tmp_path):
+        """框架自身開發 / 手動使用不受影響——沒有 App 標記就不武裝。"""
+        assert enf.evaluate(_payload("Write", tmp_path), tmp_path) is None
+
+    def test_disable_flag_still_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEXAUTOAI_NO_BUILD_ENFORCE", "1")
+        _write_app_run(tmp_path)
+        assert enf.evaluate(_payload("Write", tmp_path), tmp_path) is None
+
+    def test_ask_user_question_blocked_by_app_marker(self, tmp_path):
+        """非停原則同理：App 說任務在跑，就不准把選擇丟回使用者。"""
+        assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is None
+        _write_app_run(tmp_path)
+        assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is not None

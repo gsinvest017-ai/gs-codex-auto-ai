@@ -152,6 +152,19 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ---
 
+## 專案資料夾
+
+pipeline 的產出（`src/` `tests/` `docs/` `log/`）都落在**專案資料夾**，預設是
+`~/CodexAutoAI`，可以在主畫面的「專案資料夾」卡片按「📂 變更」改。設定記在
+`~/.codexautoai/desktop.json`，重裝 App 不會掉。
+
+> 舊版寫死成 App 的安裝目錄，所以你的專案會被寫進 `%LOCALAPPDATA%\CodexAutoAI`，
+> 而且每個任務共用同一份 `log/`——進度卡會顯示上一輪殘留的 Phase。現在不會了。
+
+還有 session 在跑時不能換（換了新舊 session 會跑在不同目錄），請先關掉再改。
+
+---
+
 ## 內嵌終端機
 
 以前每開一個 session 就會跳出一個**外部的原生終端機視窗**：開三個任務就有三個視窗

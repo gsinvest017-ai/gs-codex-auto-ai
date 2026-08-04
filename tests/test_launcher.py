@@ -5,6 +5,7 @@
 `` `...` `` / `&` 的需求會被那層 shell 當成指令執行。
 """
 import json
+import time
 import shutil
 import subprocess
 import sys
@@ -325,3 +326,87 @@ class TestEmbedDiagnosticLog:
             launcher._note_embed(f"第 {i} 次")
         lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1 and "第 4 次" in lines[0]
+
+
+class TestPythonCheck:
+    """凍結版以前直接回報「內建於 App」就過關——那是錯的，而且錯得很安靜。
+
+    exe 嵌的 runtime 只給 App 自己用；`.claude/settings.json` 的三個 hook 都是
+    `python "$CLAUDE_PROJECT_DIR/tools/…"`，另外開行程、吃 PATH。沒有它的後果
+    不是「某個功能不能用」，而是 Codex-first 守門員、進度、autopilot 全部靜默
+    失效——pipeline 照跑，但核心不變式沒人守。
+    """
+
+    def test_reports_missing_python(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_which", lambda n: None)
+        ok, msg = launcher.check_python()
+        assert ok is False and "hook" in msg.lower() or "hooks" in msg
+
+    def test_rejects_too_old(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_which", lambda n: r"C:\py\python.exe")
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 8)"))
+        ok, msg = launcher.check_python()
+        assert ok is False and "3.8" in msg
+
+    def test_accepts_new_enough(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_which", lambda n: r"C:\py\python.exe")
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 12)"))
+        ok, msg = launcher.check_python()
+        assert ok is True and "3.12" in msg
+
+    def test_falls_back_to_python3(self, monkeypatch):
+        seen = []
+
+        def which(n):
+            seen.append(n)
+            return "/usr/bin/python3" if n == "python3" else None
+
+        monkeypatch.setattr(launcher, "_which", which)
+        monkeypatch.setattr(launcher, "_run", lambda cmd, timeout=10: (0, "(3, 11)"))
+        ok, _ = launcher.check_python()
+        assert ok is True and seen == ["python", "python3"]
+
+    def test_python_is_critical(self, monkeypatch):
+        """不是 critical 的話環境檢查照樣全綠、「啟動」按得下去——等於白檢查。"""
+        monkeypatch.setattr(launcher, "check_claude", lambda: (True, ""))
+        monkeypatch.setattr(launcher, "check_codex", lambda: (True, ""))
+        monkeypatch.setattr(launcher, "check_gh", lambda: (True, ""))
+        monkeypatch.setattr(launcher, "check_simple", lambda n, l: (True, ""))
+        monkeypatch.setattr(launcher, "check_python", lambda: (False, "沒裝"))
+        row = next(c for c in launcher.gather_checks() if c["key"] == "python")
+        assert row["critical"] is True and row["ok"] is False
+
+
+class TestProjectDir:
+    """以前所有 session 都跑在安裝目錄，使用者的產出被寫進 App 自己的安裝路徑，
+    而且每個任務共用同一份 log/（上一輪的 Phase 進度會被下一輪看到）。"""
+
+    def test_default_is_not_the_install_dir(self):
+        assert launcher.default_project_dir() != launcher.APP_DIR
+
+    def test_round_trips_through_config(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "desktop.json")
+        target = tmp_path / "我的專案"
+        launcher.set_project_dir(target)
+        assert launcher.project_dir() == target
+
+    def test_broken_config_falls_back_to_default(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "desktop.json"
+        cfg.write_text("{ 這不是 JSON", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CONFIG_PATH", cfg)
+        assert launcher.project_dir() == launcher.default_project_dir()
+
+    def test_app_run_marker_is_written_and_refreshed(self, tmp_path):
+        launcher.touch_app_run(tmp_path, prompt="做一個記帳 CLI")
+        f = tmp_path / "log" / "app-run.json"
+        first = json.loads(f.read_text(encoding="utf-8"))
+        assert first["prompt"] == "做一個記帳 CLI" and first["updated_at"] > 0
+        time.sleep(0.01)
+        launcher.touch_app_run(tmp_path)          # 心跳：不帶 prompt
+        second = json.loads(f.read_text(encoding="utf-8"))
+        assert second["updated_at"] > first["updated_at"]
+        assert second["prompt"] == "做一個記帳 CLI", "心跳不該把原本的需求洗掉"
+
+    def test_touch_never_raises(self, tmp_path):
+        """寫不進去只是少一層保護，不該擋住任務啟動。"""
+        launcher.touch_app_run(tmp_path / "不存在" / "而且不可寫" / "\x00")
