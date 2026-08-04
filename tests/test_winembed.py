@@ -380,18 +380,39 @@ class TestAliveFollowsTheWindow:
 
     def test_close_kills_the_window_owner_even_without_a_nonce_match(
             self, monkeypatch, tmp_path):
-        """頁面載入完標題就不含 nonce 了，屆時只剩 win_pid 認得出擁有者。"""
+        """頁面載入完標題就不含 nonce 了，屆時只剩 hwnd 認得出擁有者。"""
         killed = []
         monkeypatch.setattr(winembed, "_kill_tree", killed.append)
         monkeypatch.setattr(winembed, "_enum_windows",
                             lambda: [(1, 999, CHROME, "CodexAutoAI 終端機")])  # 沒有 nonce
+        monkeypatch.setattr(winembed, "_is_window", lambda h: True)
+        monkeypatch.setattr(winembed, "_window_pid", lambda h: 999)
         emb = winembed.EmbeddedBrowser()
         emb.proc = None
         emb.nonce = "n1"
-        emb.win_pid = 999
+        emb.hwnd = 4242
         emb.profile_dir = str(tmp_path / "p")
         emb.close()
         assert killed == [999]
+
+    def test_close_does_not_kill_a_recycled_pid(self, monkeypatch, tmp_path):
+        """視窗已經不在了就**不准**再去殺 attach 當時記下的那個 pid。
+
+        Windows 很快就會把結束行程的 pid 配給別人，照著殺會誤傷不相干的行程樹。
+        """
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [])
+        monkeypatch.setattr(winembed, "_is_window", lambda h: False)   # 視窗早就沒了
+        monkeypatch.setattr(winembed, "_window_pid",
+                            lambda h: pytest.fail("視窗都不在了還去問它的 pid"))
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = None
+        emb.nonce = "n1"
+        emb.hwnd = 4242
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        assert killed == []
 
 
 class TestGraceExpired:
