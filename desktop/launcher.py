@@ -190,6 +190,21 @@ _RESOLVED_ROOT: Optional[Path] = None
 CLAUDE_STATE = Path.home() / ".claude.json"
 
 
+def _claude_dir_is_ours(root: Path) -> bool:
+    """那個資料夾的 `.claude/` 是我們 bootstrap 放進去的嗎。
+
+    戳記裡記著我們實際複製過哪些項目（見 `bootstrap_project`）。沒有 `.claude/`
+    也算安全——那時 claude 沒有任何預先核准的 hook 可以跑。
+    """
+    if not (root / ".claude" / "settings.json").exists():
+        return True
+    try:
+        meta = json.loads((root / STAMP_NAME).read_text(encoding="utf-8"))
+        return ".claude" in (meta.get("installed") or [])
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def trust_project_dir(root: Path) -> bool:
     """把專案資料夾標記成「已信任」，讓 claude 不再跳資料夾信任確認。
 
@@ -199,8 +214,16 @@ def trust_project_dir(root: Path) -> bool:
     ——而內嵌面板現在還沒辦法接受鍵盤輸入，等於直接卡死。
 
     只標記**使用者自己在 App 裡選的**那個資料夾，不碰其他任何專案。回傳有沒有
-    真的寫入（已經是信任狀態就回 False）。
+    真的寫入（已經是信任狀態、或不該自動信任就回 False）。
+
+    **界線：只自動信任「`.claude/` 是我們放的」資料夾。** `.claude/settings.json`
+    裡的 hook 會執行任意 shell 指令，那正是 claude 要跳信任確認的原因。使用者
+    把 App 指向一個**本來就有自己 `.claude/`** 的既有專案時（bootstrap 刻意不覆蓋
+    它），那份設定的內容我們一無所知——替他跳過確認等於把同意權拿掉。這種情況
+    保留原本的確認流程，由使用者自己看過再決定。
     """
+    if not _claude_dir_is_ours(root):
+        return False
     try:
         try:
             data = json.loads(CLAUDE_STATE.read_text(encoding="utf-8"))

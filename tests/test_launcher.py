@@ -844,9 +844,15 @@ class TestTrustProjectDir:
         state = tmp_path / ".claude.json"
         state.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
-        launcher.trust_project_dir(Path(r"C:\Users\User\CodexAutoAI"))
+        # 用 tmp_path 底下的路徑，不要寫死真實路徑——第一版寫了
+        # `C:\Users\User\CodexAutoAI`，那在開發機上是**真的存在**的資料夾，
+        # 測試結果會被那台機器當下的狀態左右（後來加了「.claude 是誰的」檢查就紅了）。
+        proj = tmp_path / "a" / "b"
+        launcher.trust_project_dir(proj)
         d = json.loads(state.read_text(encoding="utf-8"))
-        assert "C:/Users/User/CodexAutoAI" in d["projects"]
+        key = str(proj).replace("\\", "/")
+        assert key in d["projects"], list(d["projects"])
+        assert "\\" not in key
 
     def test_keeps_other_projects_untouched(self, tmp_path, monkeypatch):
         state = tmp_path / ".claude.json"
@@ -884,3 +890,39 @@ class TestTrustProjectDir:
                             lambda self, target: (_ for _ in ()).throw(OSError("boom")))
         launcher.trust_project_dir(tmp_path / "proj")
         assert state.read_text(encoding="utf-8") == original, "原檔被破壞了"
+
+    def test_does_not_trust_a_folder_with_someone_elses_claude_dir(
+            self, tmp_path, monkeypatch):
+        """`.claude/settings.json` 的 hook 會跑任意 shell 指令，那正是 claude 要跳
+        信任確認的原因。使用者指向一個本來就有自己 `.claude/` 的既有專案時，
+        那份設定我們一無所知——替他跳過確認等於把同意權拿掉。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "theirs"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+        # 戳記說我們沒放過 .claude
+        (proj / launcher.STAMP_NAME).write_text(
+            json.dumps({"version": "1", "installed": ["tools"]}), encoding="utf-8")
+        assert launcher.trust_project_dir(proj) is False
+        assert json.loads(state.read_text(encoding="utf-8")).get("projects", {}) == {}
+
+    def test_trusts_when_the_claude_dir_is_ours(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "ours"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+        (proj / launcher.STAMP_NAME).write_text(
+            json.dumps({"version": "1", "installed": [".claude", "tools"]}),
+            encoding="utf-8")
+        assert launcher.trust_project_dir(proj) is True
+
+    def test_trusts_a_folder_with_no_claude_dir(self, tmp_path, monkeypatch):
+        """沒有 .claude/ 就沒有預先核准的 hook 可以跑，信任是安全的。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        assert launcher.trust_project_dir(tmp_path / "empty") is True
