@@ -205,6 +205,12 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
         walk(parent)
         return out
 
+    def _window_pid(hwnd: int) -> int:
+        """視窗屬於哪個行程。"""
+        pid = wintypes.DWORD()
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+
     def _enum_windows() -> list[tuple[int, int, str, str]]:
         """(hwnd, pid, class, title) 的可見頂層視窗清單。"""
         out: list[tuple[int, int, str, str]] = []
@@ -229,6 +235,9 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
 
     def _child_windows(parent: int) -> list[tuple[int, str]]:  # type: ignore[misc]
         return []
+
+    def _window_pid(hwnd: int) -> int:  # type: ignore[misc]
+        return 0
 
     def _rect(hwnd: int) -> tuple[int, int, int, int]:  # type: ignore[misc]
         return (0, 0, 0, 0)
@@ -297,6 +306,7 @@ class EmbeddedBrowser:
         # 這次啟動的識別碼。**收尾一定要靠它**：我們 Popen 的那個行程不一定是最後
         # 擁有視窗的那個（瀏覽器會 handoff），只認 pid 會收不乾淨。
         self.nonce = ""
+        self.win_pid = 0        # 視窗真正的擁有者（handoff 後跟 Popen 的 pid 不同）
 
     # -- 建立 ---------------------------------------------------------------
     def attach(self, parent_hwnd: int, url: str, *, width: int, height: int,
@@ -368,6 +378,7 @@ class EmbeddedBrowser:
             self.close()
             return False
         self.hwnd = hwnd
+        self.win_pid = _window_pid(hwnd)
         self._measure_inset(pump)
         # `_measure_inset` 還會再 pump 最多 6 秒——同一條取消路徑在這裡一樣到得了，
         # 而且瀏覽器也可能自己掛掉。**不重新確認就 return True** 的話，呼叫端會
@@ -441,6 +452,22 @@ class EmbeddedBrowser:
     # -- 收尾 ---------------------------------------------------------------
     @property
     def alive(self) -> bool:
+        """還活著嗎——**以視窗為準，不是我們 Popen 的那個行程**。
+
+        handoff 的定義就是「啟動器 stub 生出真正的 browser process 之後自己退場」，
+        所以拿 stub 的存活狀態當判準，在 handoff 情境下必然是 False：視窗明明已經
+        找到、也 reparent 進來了，`attach()` 最後那道存活確認還是會把它砍掉、回傳
+        False，呼叫端照樣去開 fallback 視窗——正是這次要修的症狀。
+
+        已經有 hwnd 就看視窗還在不在；還沒拿到 hwnd（正在等視窗出現）才看行程。
+        """
+        if self.hwnd:
+            if not IS_WIN:
+                return True
+            try:
+                return bool(_u32.IsWindow(self.hwnd))
+            except Exception:  # noqa: BLE001
+                return True
         return self.proc is not None and self.proc.poll() is None
 
     def close(self) -> None:
@@ -463,6 +490,8 @@ class EmbeddedBrowser:
             else:
                 # 行程已經退場（handoff），只能靠 nonce 認出它留下的視窗
                 pass
+        if self.win_pid:
+            pids.append(self.win_pid)
         pids.extend(self._orphan_pids())
         # 去重：handoff 之後 popen 的 pid 與視窗擁有者可能是同一個，`taskkill` 每次
         # 最長會擋 15 秒且是**同步跑在呼叫端執行緒**上（收合面板就是 UI 執行緒），
@@ -471,6 +500,7 @@ class EmbeddedBrowser:
         for pid in dict.fromkeys(pids):
             _kill_tree(pid)
         self.nonce = ""
+        self.win_pid = 0
         if self.profile_dir:
             shutil.rmtree(self.profile_dir, ignore_errors=True)
             self.profile_dir = None

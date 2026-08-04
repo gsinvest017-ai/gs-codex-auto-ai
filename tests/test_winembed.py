@@ -310,7 +310,15 @@ class TestOrphanCleanup:
                             lambda self, pump=None: None)
         monkeypatch.setattr(winembed.EmbeddedBrowser, "fit",
                             lambda self, w, h: None)
-        monkeypatch.setattr(winembed.EmbeddedBrowser, "alive", True)
+        monkeypatch.setattr(winembed, "_window_pid", lambda h: 777)
+        # hwnd 是假的，真的 `IsWindow()` 當然說它不存在——把平台旗標關掉讓 `alive`
+        # 走非 Windows 分支（有 hwnd 就算活著）。這裡要驗的是「stub 行程退場不影響
+        # 判定」，不是 Win32 API 本身。
+        monkeypatch.setattr(winembed, "IS_WIN", False)
+        # **刻意不 mock `alive`**：第一版就是把它 mock 成 True，結果掩蓋了真正的
+        # bug——`alive` 當時看的是「我們 Popen 的那個行程」，而 handoff 的定義就是
+        # 那個行程會退場，所以 attach() 最後那道存活確認必然失敗、把剛嵌好的視窗
+        # 砍掉。測試綠燈、功能其實沒好。
 
         calls = {"n": 0}
 
@@ -346,3 +354,40 @@ class _DeadProc:
 
     def kill(self):
         pass
+
+
+class TestAliveFollowsTheWindow:
+    """`alive` 要看**視窗**，不是我們 Popen 的那個行程。
+
+    handoff 的定義就是「啟動器 stub 生出真正的 browser process 後自己退場」。
+    拿 stub 的存活狀態當判準，在 handoff 情境下必然是 False——視窗明明已經嵌好，
+    `attach()` 最後那道存活確認還是會把它砍掉。
+    """
+
+    def test_dead_stub_but_live_window_counts_as_alive(self, monkeypatch):
+        monkeypatch.setattr(winembed, "IS_WIN", False)   # 走非 Windows 的分支
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = _DeadProc()
+        emb.hwnd = 42
+        assert emb.alive is True
+
+    def test_without_a_window_it_falls_back_to_the_process(self):
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = _DeadProc()
+        emb.hwnd = None
+        assert emb.alive is False
+
+    def test_close_kills_the_window_owner_even_without_a_nonce_match(
+            self, monkeypatch, tmp_path):
+        """頁面載入完標題就不含 nonce 了，屆時只剩 win_pid 認得出擁有者。"""
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(1, 999, CHROME, "CodexAutoAI 終端機")])  # 沒有 nonce
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = None
+        emb.nonce = "n1"
+        emb.win_pid = 999
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        assert killed == [999]
