@@ -314,3 +314,14 @@ class TestEmbedDiagnosticLog:
         lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 5, f"沒有截斷：{len(lines)} 行"
         assert "第 19 次" in lines[-1], "留錯了，該留最後幾行"
+
+    def test_cap_of_one_keeps_exactly_one_line(self, tmp_path, monkeypatch):
+        """上限是 1 時 `-(1-1)` 會變成 `-0 == 0`，`old[0:]` 整份留下來
+        ——截斷會安靜地失效。"""
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        monkeypatch.setattr(launcher, "_EMBED_LOG_LINES", 1)
+        for i in range(5):
+            launcher._note_embed(f"第 {i} 次")
+        lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1 and "第 4 次" in lines[0]

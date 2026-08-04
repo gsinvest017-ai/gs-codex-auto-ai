@@ -191,7 +191,10 @@ def _note_embed(msg: str) -> None:
         # 只留最後 N 行。診斷檔沒有輪替機制的話會隨 App 的壽命無限長大，
         # 而要診斷的本來就只有最近幾次。
         old = p.read_text(encoding="utf-8").splitlines(keepends=True) if p.exists() else []
-        p.write_text("".join(old[-(_EMBED_LOG_LINES - 1):]) + line, encoding="utf-8")
+        # max(..., 0)：上限若是 1，`-(1-1)` 會變成 `-0 == 0`，`old[0:]` 整份留下來
+        # ——截斷會安靜地失效。
+        keep = max(_EMBED_LOG_LINES - 1, 0)
+        p.write_text(("".join(old[-keep:]) if keep else "") + line, encoding="utf-8")
     except Exception:  # noqa: BLE001 — 診斷紀錄不該成為新的故障點
         pass
 
