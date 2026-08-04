@@ -450,3 +450,29 @@ class TestGraceExpired:
         stubbed.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
         assert stubbed.nonce == "", "close() 沒被呼叫"
         assert stubbed.profile_dir is None
+
+
+class TestRecycledPidDuringAttach:
+    """啟動器退場後它的 pid 隨時會被配給別人。拿那個 pid 去比對視窗，可能挑中
+    **不相干的 Chromium 視窗**，然後把別人的瀏覽器 SetParent 進我們的欄位裡。
+    行程死了就只認 nonce。"""
+
+    def test_does_not_grab_an_unrelated_window_owned_by_a_recycled_pid(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(winembed, "available", lambda: (True, ""))
+        monkeypatch.setattr(winembed, "browser_path", lambda: "fake")
+        monkeypatch.setattr(winembed.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(winembed.subprocess, "Popen", lambda argv: _DeadProc())
+        monkeypatch.setattr(winembed, "_kill_tree", lambda pid: None)
+        monkeypatch.setattr(winembed, "_HANDOFF_GRACE", 0.5)
+        reparented = []
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "_reparent",
+                            lambda self, h, p: reparented.append(h))
+        # 使用者自己的 Edge，剛好用到被回收的那個 pid，標題**沒有**我們的 nonce
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(1234, _DeadProc.pid, CHROME, "使用者的網銀")])
+
+        emb = winembed.EmbeddedBrowser()
+        ok = emb.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
+        assert ok is False, "抓到了不屬於我們的視窗"
+        assert reparented == [], f"把別人的視窗 reparent 進來了：{reparented}"

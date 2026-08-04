@@ -357,7 +357,11 @@ class EmbeddedBrowser:
                 self.error = "開啟途中被取消"
                 self.close()
                 return False
-            hwnd = pick_window(_enum_windows(), proc.pid, nonce)
+            # 行程還活著才信得過它的 pid。已經退場的話那個 pid 隨時會被 Windows
+            # 配給別人，拿它去比對可能挑中**不相干的 Chromium 視窗**，然後把別人
+            # 的瀏覽器 SetParent 進我們的欄位裡。死了就只認 nonce。
+            proc_pid = proc.pid if proc.poll() is None else -1
+            hwnd = pick_window(_enum_windows(), proc_pid, nonce)
             if hwnd:
                 break
             # **啟動器行程先退場是正常的**（瀏覽器 handoff：stub 生出真正的 browser
