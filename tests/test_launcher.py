@@ -410,6 +410,15 @@ class TestPythonCheck:
         ok, _ = launcher.check_python()
         assert ok is True and seen == ["python", "python3"]
 
+    def test_version_probe_survives_banner_noise(self, monkeypatch):
+        """`_run` 把 stdout 與 stderr 串在一起，pyenv / sitecustomize 的 banner 會
+        混進來。只看最後一行的話一個 banner 就讓這道 critical 檢查靜默降級。"""
+        monkeypatch.setattr(launcher, "_which", lambda n: "/usr/bin/python")
+        monkeypatch.setattr(launcher, "_run",
+                            lambda cmd, timeout=10: (0, "3 12\nsome pyenv banner\n"))
+        ok, msg = launcher.check_python()
+        assert ok is True and "3.12" in msg, msg
+
     def test_python_is_critical(self, monkeypatch):
         """不是 critical 的話環境檢查照樣全綠、「啟動」按得下去——等於白檢查。"""
         monkeypatch.setattr(launcher, "check_claude", lambda: (True, ""))
@@ -618,3 +627,42 @@ class TestFrameworkBootstrap:
         root = launcher.prepare_project_dir()
         assert root == app
         assert launcher.active_project_dir() == app
+
+    def test_upgrade_does_not_clobber_files_we_never_installed(
+            self, monkeypatch, tmp_path):
+        """保護不能只擋第一次。
+
+        使用者自己的 `CLAUDE.md` 在第一次接管時被正確保留了，但如果戳記只記版本，
+        下一次 App 升級（版本變了）就會把它一起蓋掉。
+        """
+        app = self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "existing"
+        proj.mkdir()
+        (proj / "CLAUDE.md").write_text("我自己的專案規則", encoding="utf-8")
+
+        launcher.bootstrap_project(proj)                 # 第一次接管：保留
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "我自己的專案規則"
+        assert (proj / "tools" / "enforce_build_codex.py").exists()
+
+        # App 升級
+        (app / "desktop" / "VERSION").write_text("9.9.10", encoding="utf-8")
+        (app / "CLAUDE.md").write_text("# 新版 dispatcher", encoding="utf-8")
+        (app / "tools" / "enforce_build_codex.py").write_text("# 新版", encoding="utf-8")
+        launcher.bootstrap_project(proj)
+
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "我自己的專案規則", \
+            "升級把使用者自己的檔蓋掉了"
+        assert (proj / "tools" / "enforce_build_codex.py").read_text(encoding="utf-8") == "# 新版", \
+            "我們自己放的框架檔升級時該跟上"
+
+    def test_legacy_plain_version_stamp_is_treated_conservatively(
+            self, monkeypatch, tmp_path):
+        """舊格式的戳記（純版本字串）讀不出 installed，保守起見一律不覆蓋。"""
+        app = self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "old"
+        proj.mkdir()
+        (proj / launcher.STAMP_NAME).write_text("9.9.8", encoding="utf-8")
+        (proj / "CLAUDE.md").write_text("既有內容", encoding="utf-8")
+        launcher.bootstrap_project(proj)
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "既有內容"
+

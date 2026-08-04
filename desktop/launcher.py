@@ -148,17 +148,24 @@ def bootstrap_project(root: Path) -> list[str]:
         # 自己現有的專案，而那裡可能已經有他自己的 `CLAUDE.md` / `.claude/` /
         # `tools/`——同名就蓋掉是無聲的資料破壞。只有「這個資料夾是我們裝的」
         # （戳記存在）而且版本變了，才更新我們自己放的那份。
-        first_time = not stamp.exists()
+        # 戳記記下「版本」與「哪些是我們放的」。只靠版本不夠：使用者自己的
+        # `CLAUDE.md` 在第一次接管時被正確保留了，但沒有記錄的話，下次 App 升級
+        # （版本變了）就會把它一起蓋掉——保護只擋得住第一次。
         try:
-            stale = (not first_time) and stamp.read_text(encoding="utf-8").strip() != cur
-        except OSError:
-            stale = False
+            meta = json.loads(stamp.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict):
+                meta = {}
+        except (OSError, ValueError):
+            meta = {}          # 舊格式（純版本字串）或不存在 → 當成沒裝過，保守不覆蓋
+        installed = set(meta.get("installed") or [])
+        upgraded = bool(meta.get("version")) and meta.get("version") != cur
         for name in FRAMEWORK_ENTRIES:
             src = APP_DIR / name
             dst = root / name
             if not src.exists():
                 continue
-            if dst.exists() and (first_time or not stale):
+            # 只有「這份是我們放的」而且「App 版本變了」才更新；其餘一律不碰。
+            if dst.exists() and not (upgraded and name in installed):
                 continue
             try:
                 if src.is_dir():
@@ -166,9 +173,12 @@ def bootstrap_project(root: Path) -> list[str]:
                 else:
                     shutil.copy2(src, dst)
                 copied.append(name)
+                installed.add(name)
             except Exception:  # noqa: BLE001 — 少一個檔不該擋住啟動
                 pass
-        stamp.write_text(cur, encoding="utf-8")
+        stamp.write_text(json.dumps({"version": cur,
+                                     "installed": sorted(installed)},
+                                    ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
     return copied
@@ -481,10 +491,17 @@ def check_python() -> tuple[bool, str]:
         rc, out = _run(f'"{path}" -c "import sys;print(*sys.version_info[:2])"')
         if rc != 0:
             continue
-        try:
-            major, minor = (int(x) for x in out.strip().splitlines()[-1].split())
-        except Exception:  # noqa: BLE001 — 版本判讀不出來就別擋人，有 python 比沒有好
+        # `_run` 會把 stdout 與 stderr 串在一起，pyenv / sitecustomize 之類的 banner
+        # 會混進來——只看最後一行的話一個 banner 就讓解析失敗，而這一關現在是
+        # critical，失敗會靜默降級成「版本判讀失敗但放行」。改成掃每一行找得出來的。
+        ver = None
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and all(x.isdigit() for x in parts):
+                ver = (int(parts[0]), int(parts[1]))
+        if ver is None:
             return True, f"已安裝（{path}，版本判讀失敗）"
+        major, minor = ver
         if (major, minor) < MIN_PY:
             # **記下來繼續找下一個候選**，不能就此放棄：Linux 上 `python` 常常是
             # 舊的、真正能用的是 `python3`。這項現在是 critical，提早 return 會
