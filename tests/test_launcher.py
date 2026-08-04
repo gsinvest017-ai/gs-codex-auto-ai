@@ -277,3 +277,51 @@ class TestOpenDoesNotHandBackTheToken:
         term, _ = _term(monkeypatch, srv)
         assert term.open(shell=lambda open_url: True) is None
         assert term.open() is None
+
+
+class TestEmbedDiagnosticLog:
+    """內嵌失敗的原因要留得下來。
+
+    狀態列那行是**瞬間**的——使用者回報「跳出兩個視窗」時往往已經看不到原因，
+    只能靠猜（這次就猜了很久）。所以另外寫一份到固定位置。
+    """
+
+    def test_appends_with_timestamp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        launcher._note_embed("失敗：找不到視窗")
+        launcher._note_embed("失敗：第二次")
+        log = tmp_path / "codexautoai-embed.log"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2, "要用附加的，不能把上一次蓋掉"
+        assert "找不到視窗" in lines[0] and "第二次" in lines[1]
+        assert lines[0][:4].isdigit(), f"每行要有時間戳：{lines[0]!r}"
+
+    def test_never_raises(self, monkeypatch):
+        """診斷紀錄自己不該變成新的故障點（例如目錄唯讀）。"""
+        def boom():
+            raise OSError("寫不進去")
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", boom, raising=False)
+        launcher._note_embed("whatever")      # 不該拋
+
+    def test_caps_the_file(self, tmp_path, monkeypatch):
+        """沒有輪替的話診斷檔會隨 App 壽命無限長大，而要看的只有最近幾次。"""
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        monkeypatch.setattr(launcher, "_EMBED_LOG_LINES", 5)
+        for i in range(20):
+            launcher._note_embed(f"第 {i} 次")
+        lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 5, f"沒有截斷：{len(lines)} 行"
+        assert "第 19 次" in lines[-1], "留錯了，該留最後幾行"
+
+    def test_cap_of_one_keeps_exactly_one_line(self, tmp_path, monkeypatch):
+        """上限是 1 時 `-(1-1)` 會變成 `-0 == 0`，`old[0:]` 整份留下來
+        ——截斷會安靜地失效。"""
+        monkeypatch.setattr(launcher.tempfile, "gettempdir", lambda: str(tmp_path),
+                            raising=False)
+        monkeypatch.setattr(launcher, "_EMBED_LOG_LINES", 1)
+        for i in range(5):
+            launcher._note_embed(f"第 {i} 次")
+        lines = (tmp_path / "codexautoai-embed.log").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1 and "第 4 次" in lines[0]

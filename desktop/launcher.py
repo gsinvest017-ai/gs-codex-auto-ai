@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 from pathlib import Path
@@ -52,6 +53,9 @@ MUTED = "#8b949e"
 # 版面：左邊控制欄的固定寬度、右邊終端機欄展開時要多給的寬度。
 LEFT_W = 560
 TERM_W = 900
+
+# 內嵌診斷檔最多保留幾行（見 _note_embed）。
+_EMBED_LOG_LINES = 200
 
 
 def app_dir() -> Path:
@@ -171,6 +175,28 @@ class EmbeddedTerminal:
                 srv.stop()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _note_embed(msg: str) -> None:
+    """把視窗內嵌失敗的原因寫到一個固定位置。
+
+    狀態列那行是**瞬間**的：使用者回報「跳出兩個視窗」時往往已經看不到原因，
+    只能靠猜。寫進 temp 目錄（一定寫得進去，不像 Program Files 底下的 log/），
+    之後要診斷就是一句「把這個檔貼給我」。
+    """
+    try:
+        from datetime import datetime
+        p = Path(tempfile.gettempdir()) / "codexautoai-embed.log"
+        line = f"{datetime.now().isoformat(timespec='seconds')}  {msg}\n"
+        # 只留最後 N 行。診斷檔沒有輪替機制的話會隨 App 的壽命無限長大，
+        # 而要診斷的本來就只有最近幾次。
+        old = p.read_text(encoding="utf-8").splitlines(keepends=True) if p.exists() else []
+        # max(..., 0)：上限若是 1，`-(1-1)` 會變成 `-0 == 0`，`old[0:]` 整份留下來
+        # ——截斷會安靜地失效。
+        keep = max(_EMBED_LOG_LINES - 1, 0)
+        p.write_text(("".join(old[-keep:]) if keep else "") + line, encoding="utf-8")
+    except Exception:  # noqa: BLE001 — 診斷紀錄不該成為新的故障點
+        pass
 
 
 TERMINAL = EmbeddedTerminal()
@@ -609,6 +635,7 @@ class LauncherUI:
         ok, why = winembed.available() if winembed else (False, "缺少 winembed 模組")
         if not ok:
             self.status.config(text=f"視窗內嵌不可用（{why}），改用瀏覽器開啟", fg=GOLD)
+            _note_embed(f"不可用：{why}")
             return False
         if self._embed_busy:
             self.status.config(text="內嵌終端機正在開啟中…", fg=GOLD)
@@ -642,6 +669,7 @@ class LauncherUI:
                 self._collapse_window()
                 self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟",
                                    fg=GOLD)
+                _note_embed(f"失敗：{emb.error}")
                 return False
             self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
             return True

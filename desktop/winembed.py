@@ -205,6 +205,20 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
         walk(parent)
         return out
 
+    def _is_window(hwnd: int) -> bool:
+        return bool(_u32.IsWindow(hwnd))
+
+    def _window_class(hwnd: int) -> str:
+        buf = ctypes.create_unicode_buffer(256)
+        _u32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
+    def _window_pid(hwnd: int) -> int:
+        """視窗屬於哪個行程。"""
+        pid = wintypes.DWORD()
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+
     def _enum_windows() -> list[tuple[int, int, str, str]]:
         """(hwnd, pid, class, title) 的可見頂層視窗清單。"""
         out: list[tuple[int, int, str, str]] = []
@@ -230,6 +244,15 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
     def _child_windows(parent: int) -> list[tuple[int, str]]:  # type: ignore[misc]
         return []
 
+    def _window_pid(hwnd: int) -> int:  # type: ignore[misc]
+        return 0
+
+    def _is_window(hwnd: int) -> bool:  # type: ignore[misc]
+        return False
+
+    def _window_class(hwnd: int) -> str:  # type: ignore[misc]
+        return ""
+
     def _rect(hwnd: int) -> tuple[int, int, int, int]:  # type: ignore[misc]
         return (0, 0, 0, 0)
 
@@ -239,8 +262,24 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
 # （使用者按下關閉鈕就會把嵌進來的視窗關掉，右欄變成一塊空白）。
 # 對策：把子視窗往上挪 inset px、高度補回 inset——子視窗被父 frame 裁切，
 # 標題列就被裁到看不見的地方去了。
+# 啟動器行程退場後，還要再等多久視窗才算真的不會出現。
+# 代價：真正的啟動失敗（執行檔壞掉之類）也要等完這段才回報，而不是像以前那樣瞬間失敗。
+# 這是刻意的取捨：這段期間 UI 不會凍（`pump` 持續跑）、狀態列還寫著「正在開啟…」，
+# 而誤判 handoff 的代價是使用者永遠偵不到內嵌、還多一個孤兒視窗。瀏覽器 handoff
+# （stub 生出 browser process 後自己結束）通常一兩秒內就冒出視窗。
+_HANDOFF_GRACE = 6.0
+
 RENDER_WIDGET_CLASS = "Chrome_RenderWidgetHostHWND"
 FALLBACK_INSET_96DPI = 33      # 量不到時的退路，之後再按 DPI 縮放
+
+
+def _kill_tree(pid: int) -> None:
+    """收掉一整棵行程樹。Chromium 是多行程的，只殺一個會留下一票孤兒。"""
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=15)
+    except Exception:  # noqa: BLE001 — 收尾不該再拋例外
+        pass
 
 
 def content_inset(parent_rect, widget_rect) -> int:
@@ -281,6 +320,9 @@ class EmbeddedBrowser:
         self.profile_dir: str | None = None
         self.error = ""
         self.inset = 0          # 要往上裁掉的 Chromium 自繪標題列高度
+        # 這次啟動的識別碼。**收尾一定要靠它**：我們 Popen 的那個行程不一定是最後
+        # 擁有視窗的那個（瀏覽器會 handoff），只認 pid 會收不乾淨。
+        self.nonce = ""
 
     # -- 建立 ---------------------------------------------------------------
     def attach(self, parent_hwnd: int, url: str, *, width: int, height: int,
@@ -294,7 +336,7 @@ class EmbeddedBrowser:
             self.error = why
             return False
         browser = browser_path()
-        nonce = uuid.uuid4().hex[:12]
+        nonce = self.nonce = uuid.uuid4().hex[:12]
         self.profile_dir = os.path.join(tempfile.gettempdir(),
                                         f"codexautoai-embed-{nonce}")
         argv = build_argv(browser, with_nonce(url, nonce), self.profile_dir,
@@ -305,7 +347,8 @@ class EmbeddedBrowser:
             self.error = f"啟動瀏覽器外殼失敗：{exc}"
             return False
 
-        deadline = time.time() + timeout
+        started = time.time()
+        deadline = started + timeout
         hwnd = None
         while time.time() < deadline:
             time.sleep(0.25)
@@ -320,13 +363,26 @@ class EmbeddedBrowser:
             proc = self.proc
             if proc is None:
                 self.error = "開啟途中被取消"
+                self.close()
                 return False
-            if proc.poll() is not None:
-                self.error = "瀏覽器外殼啟動後立刻結束了"
-                return False
-            hwnd = pick_window(_enum_windows(), proc.pid, nonce)
+            # 行程還活著才信得過它的 pid。已經退場的話那個 pid 隨時會被 Windows
+            # 配給別人，拿它去比對可能挑中**不相干的 Chromium 視窗**，然後把別人
+            # 的瀏覽器 SetParent 進我們的欄位裡。死了就只認 nonce。
+            proc_pid = proc.pid if proc.poll() is None else -1
+            hwnd = pick_window(_enum_windows(), proc_pid, nonce)
             if hwnd:
                 break
+            # **啟動器行程先退場是正常的**（瀏覽器 handoff：stub 生出真正的 browser
+            # process 之後自己結束），視窗照樣會出現，只是屬於別的 pid——nonce 那條
+            # 退路就是為了這種情況存在的。原本一看到 poll() 有值就立刻放棄，等於
+            # 在 0.3 秒內丟下一個已經啟動、之後才會冒出視窗的瀏覽器不管：
+            # 呼叫端接著開 fallback 視窗，使用者就同時看到兩個視窗（實測會殘留
+            # 25 個 msedge 行程）。所以只有「行程死了**而且**寬限期內也沒等到
+            # 視窗」才算真的失敗。
+            if proc.poll() is not None and time.time() - started > _HANDOFF_GRACE:
+                self.error = "瀏覽器外殼結束了，也沒有出現它的視窗"
+                self.close()
+                return False
         if not hwnd:
             self.error = "找不到瀏覽器外殼的視窗（逾時）"
             self.close()
@@ -415,6 +471,22 @@ class EmbeddedBrowser:
     # -- 收尾 ---------------------------------------------------------------
     @property
     def alive(self) -> bool:
+        """還活著嗎——**以視窗為準，不是我們 Popen 的那個行程**。
+
+        handoff 的定義就是「啟動器 stub 生出真正的 browser process 之後自己退場」，
+        所以拿 stub 的存活狀態當判準，在 handoff 情境下必然是 False：視窗明明已經
+        找到、也 reparent 進來了，`attach()` 最後那道存活確認還是會把它砍掉、回傳
+        False，呼叫端照樣去開 fallback 視窗——正是這次要修的症狀。
+
+        已經有 hwnd 就看視窗還在不在；還沒拿到 hwnd（正在等視窗出現）才看行程。
+        """
+        if self.hwnd:
+            if not IS_WIN:
+                return True
+            try:
+                return bool(_u32.IsWindow(self.hwnd))
+            except Exception:  # noqa: BLE001
+                return True
         return self.proc is not None and self.proc.poll() is None
 
     def close(self) -> None:
@@ -422,21 +494,47 @@ class EmbeddedBrowser:
 
         Chromium 是多行程的（browser + gpu + 每個 renderer），只 `terminate()`
         父行程會留下一票孤兒，所以走 `taskkill /T`。
+
+        **光殺我們 Popen 的那個 pid 不夠**：瀏覽器會 handoff，最後擁有視窗的
+        很可能是別的行程，而它一旦不在我們的行程樹裡，`/T` 就掃不到——留下一個
+        沒人管的視窗浮在桌面上（實測殘留 25 個 msedge 行程）。所以再用 nonce
+        掃一次視窗，把真正擁有它的行程一起收掉。
         """
         proc, self.proc = self.proc, None
-        self.hwnd = None
+        hwnd, self.hwnd = self.hwnd, None
+        pids = []
         if proc is not None and proc.poll() is None:
-            try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                               capture_output=True, timeout=15)
-            except Exception:  # noqa: BLE001
-                try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+            pids.append(proc.pid)
+        # **當下**去問視窗的擁有者，不要用 attach 當時記下來的 pid：那個行程若已經
+        # 結束，Windows 很快就會把同一個 pid 配給別人，照著殺會誤傷不相干的行程樹。
+        # 先確認視窗還在，再問它現在屬於誰。
+        # HWND 也會被回收（比 pid 罕見，要 handle table 繞一圈才會撞上），所以
+        # 除了確認視窗還在，再確認它**還是個 Chromium 視窗**才動手。
+        if hwnd and _is_window(hwnd) and _window_class(hwnd).startswith("Chrome_WidgetWin"):
+            owner = _window_pid(hwnd)
+            if owner:
+                pids.append(owner)
+        pids.extend(self._orphan_pids())
+        # 去重：handoff 之後 popen 的 pid 與視窗擁有者可能是同一個，`taskkill` 每次
+        # 最長會擋 15 秒且是**同步跑在呼叫端執行緒**上（收合面板就是 UI 執行緒），
+        # 重複收同一棵樹等於把最壞情況乘二。`_kill_tree` 已經涵蓋整棵樹，收完就好，
+        # 不必再補一次 `proc.kill()`。
+        for pid in dict.fromkeys(pids):
+            _kill_tree(pid)
+        self.nonce = ""
         if self.profile_dir:
             shutil.rmtree(self.profile_dir, ignore_errors=True)
             self.profile_dir = None
+
+    def _orphan_pids(self) -> list[int]:
+        """還掛著我們 nonce 的視窗，各自屬於哪個行程。"""
+        if not self.nonce:
+            return []
+        try:
+            return [pid for _h, pid, cls, title in _enum_windows()
+                    if cls.startswith("Chrome_WidgetWin") and self.nonce in title]
+        except Exception:  # noqa: BLE001 — 收尾不該再拋例外
+            return []
 
 
 if __name__ == "__main__":  # 手動檢查用：python desktop/winembed.py
