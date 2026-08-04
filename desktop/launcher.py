@@ -187,6 +187,47 @@ def bootstrap_project(root: Path) -> list[str]:
 _RESOLVED_ROOT: Optional[Path] = None
 
 
+CLAUDE_STATE = Path.home() / ".claude.json"
+
+
+def trust_project_dir(root: Path) -> bool:
+    """把專案資料夾標記成「已信任」，讓 claude 不再跳資料夾信任確認。
+
+    Claude Code 把這個狀態記在 `~/.claude.json` 的
+    `projects["<路徑>"].hasTrustDialogAccepted`（路徑用正斜線）。不設的話，每個
+    新資料夾第一次開 session 都會停在「Yes, I trust this folder」等人按 Enter
+    ——而內嵌面板現在還沒辦法接受鍵盤輸入，等於直接卡死。
+
+    只標記**使用者自己在 App 裡選的**那個資料夾，不碰其他任何專案。回傳有沒有
+    真的寫入（已經是信任狀態就回 False）。
+    """
+    try:
+        try:
+            data = json.loads(CLAUDE_STATE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            return False
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            return False
+        key = str(root).replace("\\", "/")
+        entry = projects.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+        if entry.get("hasTrustDialogAccepted") is True:
+            return False
+        entry["hasTrustDialogAccepted"] = True
+        projects[key] = entry
+        # 先寫暫存再換掉：這個檔有 170 KB 的使用者狀態，寫到一半掛掉會全毀。
+        tmp = CLAUDE_STATE.with_suffix(".json.codexautoai-tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(CLAUDE_STATE)
+        return True
+    except Exception:  # noqa: BLE001 — 信任設定失敗不該擋住啟動
+        return False
+
+
 def prepare_project_dir() -> Path:
     """取得專案資料夾並確保它可用（建目錄 + 補框架檔）。建不出來就退回安裝目錄。"""
     global _RESOLVED_ROOT
@@ -197,6 +238,7 @@ def prepare_project_dir() -> Path:
         root = APP_DIR
     else:
         bootstrap_project(root)
+        trust_project_dir(root)
     _RESOLVED_ROOT = root
     return root
 
@@ -877,6 +919,10 @@ class LauncherUI:
         self.term_host = tk.Frame(self.termpane, bg="#0f1115")
         self.term_host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.term_host.bind("<Configure>", self._on_term_resize)
+        # 點終端機區就把鍵盤焦點交給嵌進來的瀏覽器——reparent 進別的行程之後，
+        # 前景視窗是 tk 的 toplevel，按鍵預設進 tk 的佇列，不會自己過去。
+        self.term_host.bind("<Button-1>", self._focus_embed, add="+")
+        self.termpane.bind("<Button-1>", self._focus_embed, add="+")
 
         self._embed = None
         self._resize_job = None
@@ -933,6 +979,7 @@ class LauncherUI:
                                    fg=GOLD)
                 _note_embed(f"失敗：{emb.error}")
                 return False
+            emb.focus()          # 省得使用者還要多點一下才能打字
             self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
             return True
         finally:
@@ -995,6 +1042,10 @@ class LauncherUI:
         self.termpane.pack_forget()
         self.root.minsize(520, 840)
         self.root.geometry(f"{LEFT_W}x{max(self.root.winfo_height(), 900)}")
+
+    def _focus_embed(self, _event=None) -> None:
+        if self._embed is not None and self._embed.alive:
+            self._embed.focus()
 
     def _on_term_resize(self, _event=None) -> None:
         """跟著欄位調整內嵌視窗大小。

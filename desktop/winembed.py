@@ -205,6 +205,29 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
         walk(parent)
         return out
 
+    _k32 = ctypes.WinDLL("kernel32")
+    _u32.SetFocus.argtypes = [wintypes.HWND]
+    _u32.SetFocus.restype = wintypes.HWND
+    _u32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    _u32.AttachThreadInput.restype = wintypes.BOOL
+
+    def _focus_across_processes(hwnd: int) -> None:
+        """跨行程把鍵盤焦點交給 hwnd。
+
+        `SetFocus` 只在**同一個輸入佇列**裡有效；瀏覽器是另一個行程，不先
+        `AttachThreadInput` 把兩邊的佇列接起來就是無效呼叫（回 NULL，也不報錯）。
+        """
+        me = _k32.GetCurrentThreadId()
+        tid = _u32.GetWindowThreadProcessId(hwnd, None)
+        if tid and tid != me:
+            _u32.AttachThreadInput(me, tid, True)
+            try:
+                _u32.SetFocus(hwnd)
+            finally:
+                _u32.AttachThreadInput(me, tid, False)
+        else:
+            _u32.SetFocus(hwnd)
+
     def _is_window(hwnd: int) -> bool:
         return bool(_u32.IsWindow(hwnd))
 
@@ -246,6 +269,9 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
 
     def _window_pid(hwnd: int) -> int:  # type: ignore[misc]
         return 0
+
+    def _focus_across_processes(hwnd: int) -> None:  # type: ignore[misc]
+        return None
 
     def _is_window(hwnd: int) -> bool:  # type: ignore[misc]
         return False
@@ -466,6 +492,24 @@ class EmbeddedBrowser:
                               _RDW_INVALIDATE | _RDW_ERASE
                               | _RDW_ALLCHILDREN | _RDW_UPDATENOW)
         except Exception:  # noqa: BLE001
+            pass
+
+    def focus(self) -> None:
+        """把鍵盤焦點交給嵌進來的瀏覽器。
+
+        **reparent 進別的行程之後鍵盤不會自己過來**：tk 的 toplevel 才是前景視窗，
+        按鍵預設進 tk 的佇列。使用者點了終端機卻打不了字就是這個原因。
+
+        焦點要下在**畫布**（`Chrome_RenderWidgetHostHWND`）而不是外框——外框拿到
+        焦點時 Chromium 不一定會把它轉交給 renderer。
+        """
+        if not self.hwnd:
+            return
+        try:
+            target = next((h for h, cls in _child_windows(self.hwnd)
+                           if cls.startswith(RENDER_WIDGET_CLASS)), self.hwnd)
+            _focus_across_processes(target)
+        except Exception:  # noqa: BLE001 — 對不到焦點不該讓 App 出錯
             pass
 
     # -- 收尾 ---------------------------------------------------------------

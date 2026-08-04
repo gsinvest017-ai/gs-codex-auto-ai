@@ -823,3 +823,64 @@ def test_action_buttons_restore_to_their_original_state():
     ui._set_actions_enabled(True)
     assert ui.launch_btn.state == "disabled", "環境沒就緒的按鈕不該被還原成可按"
     assert ui.term_btn.state == "normal"
+
+
+class TestTrustProjectDir:
+    """新資料夾第一次開 session 會停在「Yes, I trust this folder」等人按 Enter。
+    內嵌面板目前還沒辦法接受鍵盤輸入，所以那一步等於直接卡死。"""
+
+    def test_marks_the_folder_trusted(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "proj"
+        assert launcher.trust_project_dir(proj) is True
+        d = json.loads(state.read_text(encoding="utf-8"))
+        key = str(proj).replace("\\", "/")
+        assert d["projects"][key]["hasTrustDialogAccepted"] is True
+
+    def test_uses_forward_slashes(self, tmp_path, monkeypatch):
+        """Claude Code 的鍵是正斜線格式；用反斜線寫進去等於另開一筆、不會生效。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        launcher.trust_project_dir(Path(r"C:\Users\User\CodexAutoAI"))
+        d = json.loads(state.read_text(encoding="utf-8"))
+        assert "C:/Users/User/CodexAutoAI" in d["projects"]
+
+    def test_keeps_other_projects_untouched(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text(json.dumps({
+            "projects": {"C:/別人的專案": {"hasTrustDialogAccepted": False, "x": 1}},
+            "其他設定": "保留",
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        launcher.trust_project_dir(tmp_path / "mine")
+        d = json.loads(state.read_text(encoding="utf-8"))
+        assert d["projects"]["C:/別人的專案"] == {"hasTrustDialogAccepted": False, "x": 1}
+        assert d["其他設定"] == "保留"
+
+    def test_is_idempotent(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "proj"
+        assert launcher.trust_project_dir(proj) is True
+        assert launcher.trust_project_dir(proj) is False, "已經信任了不該重寫"
+
+    def test_never_raises_on_broken_state(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{ 這不是 JSON", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        launcher.trust_project_dir(tmp_path / "proj")     # 不該拋
+
+    def test_does_not_lose_the_file_on_a_failed_write(self, tmp_path, monkeypatch):
+        """那個檔有 170 KB 的使用者狀態，寫到一半掛掉會全毀，所以要先寫暫存再換。"""
+        state = tmp_path / ".claude.json"
+        original = json.dumps({"projects": {"a": {"hasTrustDialogAccepted": True}}})
+        state.write_text(original, encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        monkeypatch.setattr(launcher.Path, "replace",
+                            lambda self, target: (_ for _ in ()).throw(OSError("boom")))
+        launcher.trust_project_dir(tmp_path / "proj")
+        assert state.read_text(encoding="utf-8") == original, "原檔被破壞了"
