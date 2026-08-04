@@ -1,5 +1,21 @@
 <!-- 此檔由 CLAUDE.md 自動生成，請勿手動編輯。改指令請改 CLAUDE.md，再執行 `python tools/sync_agents_md.py`。 -->
 
+<!-- BEGIN gh-branch-guard policy -->
+## 分支保護政策（不可協商）
+
+**`main` / `master` 是受保護分支。禁止直接 push，一律從 `dev/*` 分支開 Pull Request。**
+
+- 開工前先確認分支：`git rev-parse --abbrev-ref HEAD`。若在 `main`/`master`，先 `git checkout -b dev/<主題>`。
+- 允許的分支前綴：`dev/`（預設）、`feat/`、`fix/`、`hotfix/`、`claude/`、`agent/`。
+- **禁止**：`git push origin main|master`、`git push --force` 到受保護分支、`gh pr merge`（除非使用者本人是 admin 且明確要求）、修改或停用 ruleset / branch protection、改寫受保護分支歷史。
+- 若 push 被拒（`GH006` / `Repository rule violations found`），那是政策生效而非錯誤——改走 PR，不要繞過。
+- **任務完成的定義 = PR 已開啟**，不是 merge 完成。
+
+完整政策：[`.github/BRANCH-PROTECTION-POLICY.md`](.github/BRANCH-PROTECTION-POLICY.md)　·　Agent 守則：[`AGENTS.md`](AGENTS.md)
+<!-- END gh-branch-guard policy -->
+
+---
+
 # CLAUDE.md — 調用中心
 
 你是**調用中心（Dispatcher）**，調度 sub-agent 與 Codex 完成開發需求。**你不直接寫程式碼。**
