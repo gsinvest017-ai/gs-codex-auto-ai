@@ -823,3 +823,106 @@ def test_action_buttons_restore_to_their_original_state():
     ui._set_actions_enabled(True)
     assert ui.launch_btn.state == "disabled", "環境沒就緒的按鈕不該被還原成可按"
     assert ui.term_btn.state == "normal"
+
+
+class TestTrustProjectDir:
+    """新資料夾第一次開 session 會停在「Yes, I trust this folder」等人按 Enter。
+    內嵌面板目前還沒辦法接受鍵盤輸入，所以那一步等於直接卡死。"""
+
+    def test_marks_the_folder_trusted(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "proj"
+        assert launcher.trust_project_dir(proj) is True
+        d = json.loads(state.read_text(encoding="utf-8"))
+        key = str(proj).replace("\\", "/")
+        assert d["projects"][key]["hasTrustDialogAccepted"] is True
+
+    def test_uses_forward_slashes(self, tmp_path, monkeypatch):
+        """Claude Code 的鍵是正斜線格式；用反斜線寫進去等於另開一筆、不會生效。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        # 用 tmp_path 底下的路徑，不要寫死真實路徑——第一版寫了
+        # `C:\Users\User\CodexAutoAI`，那在開發機上是**真的存在**的資料夾，
+        # 測試結果會被那台機器當下的狀態左右（後來加了「.claude 是誰的」檢查就紅了）。
+        proj = tmp_path / "a" / "b"
+        launcher.trust_project_dir(proj)
+        d = json.loads(state.read_text(encoding="utf-8"))
+        key = str(proj).replace("\\", "/")
+        assert key in d["projects"], list(d["projects"])
+        assert "\\" not in key
+
+    def test_keeps_other_projects_untouched(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text(json.dumps({
+            "projects": {"C:/別人的專案": {"hasTrustDialogAccepted": False, "x": 1}},
+            "其他設定": "保留",
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        launcher.trust_project_dir(tmp_path / "mine")
+        d = json.loads(state.read_text(encoding="utf-8"))
+        assert d["projects"]["C:/別人的專案"] == {"hasTrustDialogAccepted": False, "x": 1}
+        assert d["其他設定"] == "保留"
+
+    def test_is_idempotent(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "proj"
+        assert launcher.trust_project_dir(proj) is True
+        assert launcher.trust_project_dir(proj) is False, "已經信任了不該重寫"
+
+    def test_never_raises_on_broken_state(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{ 這不是 JSON", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        launcher.trust_project_dir(tmp_path / "proj")     # 不該拋
+
+    def test_does_not_lose_the_file_on_a_failed_write(self, tmp_path, monkeypatch):
+        """那個檔有 170 KB 的使用者狀態，寫到一半掛掉會全毀，所以要先寫暫存再換。"""
+        state = tmp_path / ".claude.json"
+        original = json.dumps({"projects": {"a": {"hasTrustDialogAccepted": True}}})
+        state.write_text(original, encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        monkeypatch.setattr(launcher.Path, "replace",
+                            lambda self, target: (_ for _ in ()).throw(OSError("boom")))
+        launcher.trust_project_dir(tmp_path / "proj")
+        assert state.read_text(encoding="utf-8") == original, "原檔被破壞了"
+
+    def test_does_not_trust_a_folder_with_someone_elses_claude_dir(
+            self, tmp_path, monkeypatch):
+        """`.claude/settings.json` 的 hook 會跑任意 shell 指令，那正是 claude 要跳
+        信任確認的原因。使用者指向一個本來就有自己 `.claude/` 的既有專案時，
+        那份設定我們一無所知——替他跳過確認等於把同意權拿掉。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "theirs"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+        # 戳記說我們沒放過 .claude
+        (proj / launcher.STAMP_NAME).write_text(
+            json.dumps({"version": "1", "installed": ["tools"]}), encoding="utf-8")
+        assert launcher.trust_project_dir(proj) is False
+        assert json.loads(state.read_text(encoding="utf-8")).get("projects", {}) == {}
+
+    def test_trusts_when_the_claude_dir_is_ours(self, tmp_path, monkeypatch):
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        proj = tmp_path / "ours"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text('{"hooks":{}}', encoding="utf-8")
+        (proj / launcher.STAMP_NAME).write_text(
+            json.dumps({"version": "1", "installed": [".claude", "tools"]}),
+            encoding="utf-8")
+        assert launcher.trust_project_dir(proj) is True
+
+    def test_trusts_a_folder_with_no_claude_dir(self, tmp_path, monkeypatch):
+        """沒有 .claude/ 就沒有預先核准的 hook 可以跑，信任是安全的。"""
+        state = tmp_path / ".claude.json"
+        state.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
+        assert launcher.trust_project_dir(tmp_path / "empty") is True

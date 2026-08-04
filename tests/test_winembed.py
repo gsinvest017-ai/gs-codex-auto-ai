@@ -495,3 +495,41 @@ def test_close_ignores_a_reused_hwnd_that_is_no_longer_chromium(monkeypatch, tmp
     emb.profile_dir = str(tmp_path / "p")
     emb.close()
     assert killed == []
+
+
+class TestCrossProcessFocus:
+    """reparent 進別的行程之後鍵盤不會自己過來——前景視窗是 tk 的 toplevel，
+    按鍵預設進 tk 的佇列。使用者點了終端機卻打不了字就是這個原因。"""
+
+    def test_focus_targets_the_canvas_not_the_frame(self, monkeypatch):
+        """焦點要下在畫布：外框拿到焦點時 Chromium 不一定會轉交給 renderer。"""
+        focused = []
+        monkeypatch.setattr(winembed, "_focus_across_processes", focused.append)
+        monkeypatch.setattr(winembed, "_child_windows",
+                            lambda h: [(11, "Intermediate D3D Window"),
+                                       (22, "Chrome_RenderWidgetHostHWND")])
+        emb = winembed.EmbeddedBrowser()
+        emb.hwnd = 99
+        emb.focus()
+        assert focused == [22]
+
+    def test_falls_back_to_the_frame_when_no_canvas(self, monkeypatch):
+        focused = []
+        monkeypatch.setattr(winembed, "_focus_across_processes", focused.append)
+        monkeypatch.setattr(winembed, "_child_windows", lambda h: [])
+        emb = winembed.EmbeddedBrowser()
+        emb.hwnd = 99
+        emb.focus()
+        assert focused == [99]
+
+    def test_no_window_is_a_noop(self, monkeypatch):
+        monkeypatch.setattr(winembed, "_focus_across_processes",
+                            lambda h: pytest.fail("沒有視窗還去設焦點"))
+        winembed.EmbeddedBrowser().focus()
+
+    def test_never_raises(self, monkeypatch):
+        monkeypatch.setattr(winembed, "_child_windows",
+                            lambda h: (_ for _ in ()).throw(OSError("boom")))
+        emb = winembed.EmbeddedBrowser()
+        emb.hwnd = 99
+        emb.focus()      # 不該拋
