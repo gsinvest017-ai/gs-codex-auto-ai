@@ -66,7 +66,24 @@
   `python tools/codex_runner.py --prompt "…" [--expect 產出檔…] [--model m]`——它以
   stdin=DEVNULL 啟動（根治 openai/codex#20919 的沉默掛死），並以 session 心跳看門狗
   判死自動重派（≤3 次）。builder 派工**序列優先**（並行時心跳歸屬只能近似）。
-- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 會在 **Phase 3–7 進行中**擋下 Claude 對 `src/`、`tests/`、`docs/` 的直接 `Edit/Write/MultiEdit`（白名單：`docs/requirements-spec.md` 屬 Phase 2 規劃產物）——內容一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。其他情境不受影響；停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
+- **實作只走 Codex（執行期強制）**：PreToolUse hook `tools/enforce_build_codex.py` 擋下 Claude 對 `src/`、`tests/`、`docs/` 的直接 `Edit/Write/MultiEdit`（白名單：`docs/requirements-spec.md` 屬 Phase 2 規劃產物）——內容一律由 `codex exec --full-auto` 產生（Codex 寫檔不經工具層，故不受擋）。停用設 `CODEXAUTOAI_NO_BUILD_ENFORCE=1`。
+  **兩個獨立的上膛來源，缺一不可**：
+  * `log/state.json` 的 phase 落在 phase3–7（由 Claude 跑 `run_phase.py begin` 寫）。
+  * `log/app-run.json` 的心跳還新鮮（由**桌面 App** 在啟動任務時寫、進度輪詢時更新）。
+  只有前者的話，守門員等於要 Claude **先自首**才會生效——它不跑 `run_phase.py begin`，
+  hook 就 fail-open 放行，核心不變式最後還是靠 LLM 自律。後者跟 LLM 有沒有照做無關：
+  App 開著＝任務在跑＝上膛。App 一關心跳自然過期（TTL 180 秒），所以框架自身開發、
+  手動在別的目錄用 Claude 都不受影響。
+- **產出落在專案資料夾，不是安裝目錄**：桌面 App 的 session cwd（內嵌與外部終端機
+  兩條路都是）、進度卡讀的 `log/events.jsonl`、中止旗標都吃 `project_dir()`
+  （設定存 `~/.codexautoai/desktop.json`，預設 `~/CodexAutoAI`，UI 可改）。以前寫死
+  安裝目錄，使用者的專案會被寫進 App 自己的安裝路徑、每個任務共用同一份 `log/`
+  （上一輪的 Phase 進度會被下一輪看到）。
+  **搬走 cwd 就必須把框架檔一起帶過去**：`bootstrap_project()` 會把 `.claude/`、
+  `CLAUDE.md`、`AGENTS.md`、`tools/`、`usage_gate.toml` 複製進專案資料夾（版本戳記
+  不同就整批更新）。少了它們，claude 讀不到 dispatcher 指示、`.claude/settings.json`
+  的三個 hook 一個都不會載入——七階段與 Codex-first 守門員等於全部不存在。這是
+  舊行為（cwd=安裝目錄）本來就成立、換路徑之後才需要補的前提。
 
 ## 生態定位（重要：決定什麼該進來、什麼不該）
 
