@@ -572,11 +572,15 @@ def _spec_forge_candidates() -> list[tuple[str, dict]]:
     return cands
 
 
-def seed_from_spec(intent: str) -> bool:
-    """先用 gs-spec-forge 產 spec，再把 spec 當需求丟進既有 launch_claude（純附加）。
+def seed_from_spec(intent: str) -> Optional[str]:
+    """用 gs-spec-forge 把一句意圖變成規格檔，回傳「要交給 claude 的需求字串」。
+
+    **只負責產 spec，不負責啟動。** 以前它直接呼叫 `launch_claude()`，於是這條路
+    永遠開在視窗外的原生終端機——內嵌面板那條路只有另一顆按鈕接得到。怎麼啟動
+    （內嵌優先、外部終端機為退路）由 UI 決定，兩顆按鈕才會有一致的行為。
 
     候選鏈見 _spec_forge_candidates()；SPEC_VAULT 指定 vault（預設 ~/gs-vault，
-    否則 App 目錄下 vault/）。
+    否則 App 目錄下 vault/）。失敗回 None（錯誤訊息已經跳過了）。
     """
     cands = _spec_forge_candidates()
     if not cands:
@@ -584,7 +588,7 @@ def seed_from_spec(intent: str) -> bool:
             "CodexAutoAI",
             "找不到 spec-forge 也沒有內建快照。請先安裝 gs-spec-forge（跑其 install-spec-forge.ps1），"
             "或設環境變數 SPECFORGE_CMD 指到 spec-forge 執行檔。")
-        return False
+        return None
     vault = os.environ.get("SPEC_VAULT")
     if not vault:
         home_vault = Path.home() / "gs-vault"
@@ -592,7 +596,7 @@ def seed_from_spec(intent: str) -> bool:
     safe = _safe_prompt(intent)     # 下面走 shell=True，只換掉 `"` 擋不住 $(...) / `...` / &
     if not safe:
         messagebox.showerror("CodexAutoAI", "請先在需求框輸入要開發的功能意圖。")
-        return False
+        return None
     last_detail = ""
     for cmd, extra_env in cands:
         env = dict(os.environ)
@@ -607,14 +611,13 @@ def seed_from_spec(intent: str) -> bool:
         out = (p.stdout or "").strip()
         spec_path = out.splitlines()[-1].strip() if out else ""
         if p.returncode == 0 and spec_path.lower().endswith(".md"):
-            # 路徑轉正斜線：它要穿過 launch_claude 的 _safe_prompt，反斜線會被清掉。
-            return launch_claude(
-                f"依照規格檔 {spec_path.replace(chr(92), '/')} 開發，跑完整七階段")
+            # 路徑轉正斜線：它之後要穿過 `_safe_prompt`，反斜線會被清掉。
+            return f"依照規格檔 {spec_path.replace(chr(92), '/')} 開發，跑完整七階段"
         last_detail = (p.stderr or p.stdout or "").strip()[:300]
     hint = ("疑似找不到 Python——請先按「設定 / 修復」。" if "python" in last_detail.lower()
             else "")
     messagebox.showerror("CodexAutoAI", f"產生 spec 失敗。{hint}{last_detail}")
-    return False
+    return None
 
 
 # shell / cmd 語法字元 → 安全替代。需求是自由文字（多半是中文），所以在 prose 裡
@@ -812,15 +815,15 @@ class LauncherUI:
             anchor="w",
         ).pack(fill="x", padx=24, pady=(2, 0))
 
-        self.launch_btn = tk.Button(self.left, text="🚀 啟動新任務", command=self.on_launch,
-                                    font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
+        # 唯一的啟動入口：先產規格再跑七階段。以前還有一顆「直接把需求丟給
+        # claude」的按鈕，但那條路跳過了規格階段，等於繞開本框架的前半段；
+        # 兩顆並排也只會讓人不知道該按哪顆。
+        self.launch_btn = tk.Button(
+            self.left, text="🚀 啟動新任務（先產規格再開發）",
+            command=self.on_seed_from_spec,
+            font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
         self.launch_btn.pack(fill="x", padx=22, pady=(10, 6))
-
-        # 啟動新任務：從 spec 開始（gs-spec-forge 整合，純附加）：先產 spec 再跑同一條 pipeline。
-        self.seed_btn = tk.Button(self.left, text="▶ 啟動新任務：從 spec 開始（gs-spec-forge）",
-                                  command=self.on_seed_from_spec, font=self.h2,
-                                  bg="#21262d", fg=CHAMPAGNE, relief="flat", pady=6)
-        self.seed_btn.pack(fill="x", padx=22, pady=(0, 6))
+        self.seed_btn = self.launch_btn      # 停用/還原邏輯沿用同一顆
 
         # 直接開終端機（不建 session）：想手動開 codex 或一般 shell 分頁時用。
         self.term_btn = tk.Button(self.left, text="🖥 開啟內嵌終端機（分頁管理 Claude / Codex）",
@@ -942,8 +945,9 @@ class LauncherUI:
         「啟動新任務」的正常狀態由 `refresh()` 依環境檢查決定，所以這裡記住原本的
         狀態再還原，不要自作主張把它打開。
         """
-        for name in ("launch_btn", "seed_btn", "term_btn",
-                     "collapse_btn", "popout_btn"):
+        # 每個名字必須對應**不同**的 widget：同一顆掛兩個名字的話，第一次讀到的是
+        # 原本狀態、第二次讀到的已經是 disabled，還原時就會把它留在 disabled。
+        for name in ("launch_btn", "term_btn", "collapse_btn", "popout_btn"):
             btn = getattr(self, name, None)
             if btn is None:
                 continue
@@ -1154,9 +1158,12 @@ class LauncherUI:
         run_setup()
         self.status.config(text="設定視窗已開啟，完成後請按「↻ 重新檢查」", fg=GOLD)
 
-    def on_launch(self) -> None:
-        """啟動新任務。預設走**內嵌終端機**（分頁管理），PTY 不可用才退回外部終端機。"""
-        req = self.req.get("1.0", "end").strip()
+    def _start_task(self, req: str) -> None:
+        """把需求交出去執行。**內嵌面板優先**，PTY 不可用才退回外部終端機。
+
+        「啟動新任務」與「從 spec 開始」共用這一段——以前 spec 那條路自己直接呼叫
+        `launch_claude()`，所以永遠開在視窗外的原生終端機，兩顆按鈕行為不一致。
+        """
         autopilot = self.autopilot_var.get()
         mode = "非停（autopilot）" if autopilot else "一般"
         # 先上膛再啟動：守門員要在 Claude 有機會寫第一個檔之前就生效
@@ -1207,18 +1214,16 @@ class LauncherUI:
         self.status.config(text="已開啟內嵌終端機（可用分頁管理多個 session）", fg=GREEN)
 
     def on_seed_from_spec(self) -> None:
+        """主要入口：一句意圖 → gs-spec-forge 產規格 → 在內嵌面板跑七階段。"""
         intent = self.req.get("1.0", "end").strip()
         self.status.config(text="spec-forge 產生 spec 中…", fg=GOLD)
         self.root.update_idletasks()
-        # 這條路最後也是走 launch_claude 跑同一條 pipeline，所以一樣要先上膛——
-        # 少了這行，「從 spec 開始」啟動的任務完全沒有 Codex-first 守門員。
-        self._app_run = True
-        self._app_run_at = time.time()
-        touch_app_run(prepare_project_dir(), prompt=intent)
-        if seed_from_spec(intent):
-            self.status.config(text="已產 spec 並開啟終端機跑 pipeline…", fg=GREEN)
-        else:
-            self._app_run = False
+        req = seed_from_spec(intent)
+        if not req:
+            self.status.config(text="產生 spec 失敗，任務未啟動", fg=RED)
+            return
+        # 走跟「直接啟動」同一條路：內嵌面板優先，不可用才退回外部終端機。
+        self._start_task(req)
 
     # ── 版本檢查 / 更新 ──────────────────────────────────────────────────────
     def start_update_check(self) -> None:
