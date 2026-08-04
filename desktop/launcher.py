@@ -1132,6 +1132,10 @@ class LauncherUI:
         if not picked:
             return
         set_project_dir(Path(picked))
+        # 快取的解析結果也要作廢，否則 `active_project_dir()`（心跳 / 進度卡 /
+        # 中止旗標）會繼續指著**舊**資料夾，跟 session 實際跑的地方分家。
+        global _RESOLVED_ROOT
+        _RESOLVED_ROOT = None
         # 也要收膛：不收的話下一次心跳（2 秒後）會在**新的**資料夾寫下標記，
         # 那裡根本還沒啟動過任何任務，守門員卻已經上膛。
         self._app_run = False

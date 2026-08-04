@@ -711,3 +711,20 @@ class TestSeedFromSpecArms:
         ui = self._UI("做個東西")
         ui.on_seed_from_spec()
         assert ui._app_run is False, "沒啟動成功卻一直上著膛"
+
+
+def test_switching_project_dir_invalidates_the_cached_root(monkeypatch, tmp_path):
+    """換資料夾之後，心跳 / 進度卡 / 中止旗標不能還指著舊的那個。
+
+    `active_project_dir()` 讀的是 `prepare_project_dir()` 快取下來的結果；不作廢
+    的話它會跟 session 實際跑的地方分家——守門員在 session 那邊找不到標記就
+    fail-open，而且沒有徵兆。
+    """
+    monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+    launcher.set_project_dir(tmp_path / "old")
+    launcher.prepare_project_dir()
+    assert launcher.active_project_dir() == tmp_path / "old"
+
+    launcher.set_project_dir(tmp_path / "new")
+    launcher._RESOLVED_ROOT = None          # on_pick_project 會做的事
+    assert launcher.active_project_dir() == tmp_path / "new"
