@@ -587,3 +587,34 @@ class TestFrameworkBootstrap:
     def test_never_raises(self, monkeypatch, tmp_path):
         self._fake_app(monkeypatch, tmp_path)
         launcher.bootstrap_project(Path("\x00不可能建出來的路徑"))
+
+    def test_first_adoption_never_clobbers_an_existing_project(
+            self, monkeypatch, tmp_path):
+        """使用者很自然會直接指向自己現有的專案，而那裡可能已經有他自己的
+        `CLAUDE.md` / `.claude/`——同名就蓋掉是無聲的資料破壞。"""
+        self._fake_app(monkeypatch, tmp_path)
+        proj = tmp_path / "existing"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text("我自己的設定", encoding="utf-8")
+        (proj / "CLAUDE.md").write_text("我自己的專案規則", encoding="utf-8")
+
+        launcher.bootstrap_project(proj)
+
+        assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "我自己的專案規則"
+        assert (proj / ".claude" / "settings.json").read_text(encoding="utf-8") == "我自己的設定"
+        # 沒有的那些還是要補進去，否則等於什麼都沒做
+        assert (proj / "tools" / "enforce_build_codex.py").exists()
+
+    def test_resolved_root_is_what_the_session_actually_uses(
+            self, monkeypatch, tmp_path):
+        """建不出目錄時 `prepare_project_dir()` 會退回安裝目錄；心跳與進度卡若還
+        看 `project_dir()`，就會跟 session 跑的地方不一致——守門員在 session 那邊
+        找不到標記就 fail-open，而且沒有徵兆。"""
+        app = self._fake_app(monkeypatch, tmp_path)
+        monkeypatch.setattr(launcher, "CONFIG_PATH", tmp_path / "c.json")
+        launcher.set_project_dir(tmp_path / "nope")
+        monkeypatch.setattr(launcher.Path, "mkdir",
+                            lambda self, **kw: (_ for _ in ()).throw(OSError("唯讀")))
+        root = launcher.prepare_project_dir()
+        assert root == app
+        assert launcher.active_project_dir() == app

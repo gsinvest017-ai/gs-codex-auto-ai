@@ -23,6 +23,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 import tkinter as tk
 from tkinter import font as tkfont
@@ -143,16 +144,21 @@ def bootstrap_project(root: Path) -> list[str]:
         root.mkdir(parents=True, exist_ok=True)
         stamp = root / STAMP_NAME
         cur = app_version()
+        # **第一次接管一個資料夾時絕不覆蓋任何既有檔案。** 使用者很自然會直接指向
+        # 自己現有的專案，而那裡可能已經有他自己的 `CLAUDE.md` / `.claude/` /
+        # `tools/`——同名就蓋掉是無聲的資料破壞。只有「這個資料夾是我們裝的」
+        # （戳記存在）而且版本變了，才更新我們自己放的那份。
+        first_time = not stamp.exists()
         try:
-            stale = stamp.read_text(encoding="utf-8").strip() != cur
+            stale = (not first_time) and stamp.read_text(encoding="utf-8").strip() != cur
         except OSError:
-            stale = True
+            stale = False
         for name in FRAMEWORK_ENTRIES:
             src = APP_DIR / name
             dst = root / name
             if not src.exists():
                 continue
-            if dst.exists() and not stale:
+            if dst.exists() and (first_time or not stale):
                 continue
             try:
                 if src.is_dir():
@@ -168,15 +174,32 @@ def bootstrap_project(root: Path) -> list[str]:
     return copied
 
 
+_RESOLVED_ROOT: Optional[Path] = None
+
+
 def prepare_project_dir() -> Path:
     """取得專案資料夾並確保它可用（建目錄 + 補框架檔）。建不出來就退回安裝目錄。"""
+    global _RESOLVED_ROOT
     root = project_dir()
     try:
         root.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001
-        return APP_DIR
-    bootstrap_project(root)
+        root = APP_DIR
+    else:
+        bootstrap_project(root)
+    _RESOLVED_ROOT = root
     return root
+
+
+def active_project_dir() -> Path:
+    """session 實際跑在哪。
+
+    **不能直接用 `project_dir()`**：那是使用者設定的值，而 `prepare_project_dir()`
+    在建不出目錄時會退回安裝目錄。兩邊不一致的話，session 跑在 A、心跳與進度卡
+    寫/讀 B——守門員在 A 找不到標記就 fail-open，Claude 可以直接寫 App 自己的
+    `src/`，而且完全沒有徵兆。
+    """
+    return _RESOLVED_ROOT or project_dir()
 
 
 class EmbeddedTerminal:
@@ -978,7 +1001,7 @@ class LauncherUI:
 
     # ── 進度輪詢 ────────────────────────────────────────────────────────────
     def _events_log(self) -> Path:
-        return project_dir() / "log" / "events.jsonl"
+        return active_project_dir() / "log" / "events.jsonl"
 
     def _run_finished(self, model) -> bool:
         """這次 App 啟動的任務跑完了嗎。
@@ -1008,7 +1031,7 @@ class LauncherUI:
                 # 而且沒有任何徵兆。
                 self._app_run = False
             else:
-                touch_app_run(project_dir())   # 心跳：App 還開著＝任務還在跑
+                touch_app_run(active_project_dir())   # 心跳：App 還開著＝任務還在跑
 
 
 
@@ -1046,7 +1069,7 @@ class LauncherUI:
         ):
             return
         try:
-            flag = project_dir() / "log" / "abort.flag"
+            flag = active_project_dir() / "log" / "abort.flag"
             flag.parent.mkdir(parents=True, exist_ok=True)
             flag.write_text("", encoding="utf-8")
             self.status.config(text="已送出中止，將於下一個回合邊界停止", fg=GOLD)
@@ -1118,7 +1141,7 @@ class LauncherUI:
         # 先上膛再啟動：守門員要在 Claude 有機會寫第一個檔之前就生效
         self._app_run = True
         self._app_run_at = time.time()
-        touch_app_run(project_dir(), prompt=req)
+        touch_app_run(prepare_project_dir(), prompt=req)
 
         if self.embed_var.get():
             ok, why = TERMINAL.available()
