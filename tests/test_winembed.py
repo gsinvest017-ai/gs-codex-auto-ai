@@ -207,3 +207,142 @@ class TestCloseDuringAttach:
         assert ok is False, "被取消了卻回報成功"
         assert emb.error
         assert emb.hwnd is None and not emb.alive
+
+
+class TestOrphanCleanup:
+    """使用者回報：按下「開啟內嵌終端機」後跳出**兩個**視窗——一個獨立的終端機
+    視窗，加上一個瀏覽器分頁。
+
+    成因是失敗路徑沒把已經啟動的瀏覽器收掉：
+      1. `attach()` 一看到 `proc.poll()` 有值就在 0.3 秒內放棄，**而且沒呼叫
+         `close()`**；但瀏覽器 handoff（啟動器 stub 生出真正的 browser process
+         後自己退場）本來就會讓 poll() 有值，視窗一兩秒後才冒出來。
+      2. 就算呼叫了 `close()`，它只 taskkill 我們 Popen 的那個 pid；handoff 之後
+         擁有視窗的行程不在那棵樹裡，`/T` 掃不到。
+    於是那個視窗變孤兒留在桌面上，呼叫端又去開 fallback 視窗 = 兩個。
+
+    實測（2026-08-04）舊行為殘留 25 個 msedge 行程。
+    """
+
+    def test_orphan_pids_matches_our_nonce(self, monkeypatch):
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [
+            (1, 111, CHROME, "CodexAutoAI 終端機 ·abc123"),
+            (2, 222, CHROME, "別人的 Edge"),
+            (3, 333, "Notepad", "abc123"),          # 不是 Chromium，不能碰
+        ])
+        emb = winembed.EmbeddedBrowser()
+        emb.nonce = "abc123"
+        assert emb._orphan_pids() == [111]
+
+    def test_empty_nonce_never_sweeps(self, monkeypatch):
+        """**這條是安全閥**：nonce 是空字串時 `"" in title` 恆真，掃下去會把
+        使用者自己開的每一個 Chromium 視窗都殺掉。"""
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [
+            (1, 111, CHROME, "使用者的網銀"),
+            (2, 222, CHROME, "使用者的 Gmail"),
+        ])
+        emb = winembed.EmbeddedBrowser()
+        emb.nonce = ""
+        assert emb._orphan_pids() == []
+
+    def test_close_kills_handed_off_window_owner(self, monkeypatch, tmp_path):
+        """handoff 之後我們手上沒有那個行程的 handle，只剩 nonce——還是要收得掉。"""
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(1, 999, CHROME, "CodexAutoAI 終端機 ·n1")])
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = None                    # 啟動器早就退場了
+        emb.nonce = "n1"
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        assert killed == [999]
+
+    def test_close_kills_both_our_pid_and_the_window_owner(self, monkeypatch, tmp_path):
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(1, 999, CHROME, "CodexAutoAI 終端機 ·n1")])
+
+        class _Live:
+            pid = 555
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = _Live()
+        emb.nonce = "n1"
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        assert killed == [555, 999]
+
+    def test_close_clears_nonce_so_a_second_close_is_a_noop(self, monkeypatch, tmp_path):
+        """關閉路徑有兩個入口，close() 會被呼叫兩次——第二次不該再去掃視窗。"""
+        killed = []
+        monkeypatch.setattr(winembed, "_kill_tree", killed.append)
+        monkeypatch.setattr(winembed, "_enum_windows",
+                            lambda: [(1, 999, CHROME, "CodexAutoAI 終端機 ·n1")])
+        emb = winembed.EmbeddedBrowser()
+        emb.proc = None
+        emb.nonce = "n1"
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        emb.close()
+        assert killed == [999]
+
+    def test_early_exit_does_not_abort_before_grace(self, monkeypatch, tmp_path):
+        """啟動器行程先退場是正常的（handoff），不能在那一瞬間就放棄。
+
+        這裡讓行程「一開始就死」但視窗在第 3 次輪詢才出現——舊行為會在第一次
+        輪詢就 return False，新行為要等到視窗出現。
+        """
+        monkeypatch.setattr(winembed, "available", lambda: (True, ""))
+        monkeypatch.setattr(winembed, "browser_path", lambda: "fake")
+        monkeypatch.setattr(winembed.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(winembed.subprocess, "Popen", lambda argv: _DeadProc())
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "_reparent",
+                            lambda self, h, p: None)
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "_measure_inset",
+                            lambda self, pump=None: None)
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "fit",
+                            lambda self, w, h: None)
+        monkeypatch.setattr(winembed.EmbeddedBrowser, "alive", True)
+
+        calls = {"n": 0}
+
+        def late_windows():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return []
+            return [(42, 777, CHROME, f"CodexAutoAI 終端機 ·{winembed._CURRENT[0]}")]
+
+        # attach 產生的 nonce 只有它自己知道，借一個共用格子把它傳出來
+        winembed._CURRENT = [""]
+        real_with_nonce = winembed.with_nonce
+
+        def spy(url, nonce):
+            winembed._CURRENT[0] = nonce
+            return real_with_nonce(url, nonce)
+
+        monkeypatch.setattr(winembed, "with_nonce", spy)
+        monkeypatch.setattr(winembed, "_enum_windows", late_windows)
+
+        emb = winembed.EmbeddedBrowser()
+        ok = emb.attach(1, "http://127.0.0.1:1/", width=800, height=600, timeout=10)
+        assert ok is True, f"提早放棄了：{emb.error!r}"
+        assert emb.hwnd == 42
+
+
+class _DeadProc:
+    """啟動器 stub：生出瀏覽器後立刻退場。"""
+    pid = 4242
+
+    def poll(self):
+        return 0
+
+    def kill(self):
+        pass

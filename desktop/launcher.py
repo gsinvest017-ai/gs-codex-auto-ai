@@ -173,6 +173,23 @@ class EmbeddedTerminal:
                 pass
 
 
+def _note_embed(msg: str) -> None:
+    """把視窗內嵌失敗的原因寫到一個固定位置。
+
+    狀態列那行是**瞬間**的：使用者回報「跳出兩個視窗」時往往已經看不到原因，
+    只能靠猜。寫進 temp 目錄（一定寫得進去，不像 Program Files 底下的 log/），
+    之後要診斷就是一句「把這個檔貼給我」。
+    """
+    try:
+        import tempfile
+        from datetime import datetime
+        p = Path(tempfile.gettempdir()) / "codexautoai-embed.log"
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')}  {msg}\n")
+    except Exception:  # noqa: BLE001 — 診斷紀錄不該成為新的故障點
+        pass
+
+
 TERMINAL = EmbeddedTerminal()
 
 
@@ -609,6 +626,7 @@ class LauncherUI:
         ok, why = winembed.available() if winembed else (False, "缺少 winembed 模組")
         if not ok:
             self.status.config(text=f"視窗內嵌不可用（{why}），改用瀏覽器開啟", fg=GOLD)
+            _note_embed(f"不可用：{why}")
             return False
         if self._embed_busy:
             self.status.config(text="內嵌終端機正在開啟中…", fg=GOLD)
@@ -642,6 +660,7 @@ class LauncherUI:
                 self._collapse_window()
                 self.status.config(text=f"視窗內嵌失敗（{emb.error}），改用瀏覽器開啟",
                                    fg=GOLD)
+                _note_embed(f"失敗：{emb.error}")
                 return False
             self.status.config(text="終端機已嵌在右邊欄位", fg=GREEN)
             return True
