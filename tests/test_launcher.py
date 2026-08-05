@@ -928,59 +928,58 @@ class TestTrustProjectDir:
         assert launcher.trust_project_dir(tmp_path / "empty") is True
 
 
+# **不要用「建一個 Tk root 試試看」來偵測**：在 Windows 上建完再 destroy 之後，
+# 後續的 `tk.Tk()` 會壞成 `Can't find a usable init.tcl`，等於為了偵測把要測的
+# 東西弄壞。看環境變數就夠了——Linux CI 沒有 DISPLAY，Windows 一定有桌面。
+requires_display = pytest.mark.skipif(
+    os.name != "nt" and not os.environ.get("DISPLAY"),
+    reason="需要圖形介面（Linux CI 是 headless；verify-windows 會跑）")
+
+
+@requires_display
 class TestPrimaryButton:
     """`tk.Button` 只吃單一字型，做不出「大標＋小字說明」，暗色主題下自帶的邊框
     也很突兀。改用 Frame + 兩個 Label 自己組，但對外要維持 tk.Button 的介面，
     `refresh()` / `_set_actions_enabled()` 才不用改。"""
 
-    def _btn(self):
+    @pytest.fixture(scope="class")
+    def root(self):
         import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
+        r = tk.Tk()
+        r.withdraw()
+        yield r
+        r.destroy()
+
+    def _btn(self, root, clicks):
         from tkinter import font as tkfont
-        b = launcher.PrimaryButton(root, "啟動新任務", "先產規格 → 七階段自動開發",
-                                   lambda: clicks.append(1),
-                                   tkfont.Font(size=14), tkfont.Font(size=9))
-        return root, b
+        return launcher.PrimaryButton(root, "啟動新任務", "先產規格 → 七階段自動開發",
+                                      lambda: clicks.append(1),
+                                      tkfont.Font(size=14), tkfont.Font(size=9))
 
-    def test_state_round_trips_like_tk_button(self):
-        global clicks
-        clicks = []
-        root, b = self._btn()
-        try:
-            assert b.cget("state") == "normal"
-            b.config(state="disabled")
-            assert b.cget("state") == "disabled"
-            b.config(state="normal")
-            assert b.cget("state") == "normal"
-        finally:
-            root.destroy()
+    def test_state_round_trips_like_tk_button(self, root):
+        b = self._btn(root, [])
+        assert b.cget("state") == "normal"
+        b.config(state="disabled")
+        assert b.cget("state") == "disabled"
+        b.config(state="normal")
+        assert b.cget("state") == "normal"
 
-    def test_disabled_button_does_not_fire(self):
-        global clicks
+    def test_disabled_button_does_not_fire(self, root):
         clicks = []
-        root, b = self._btn()
-        try:
-            b.config(state="disabled")
-            b._click()
-            assert clicks == [], "停用了還是被按下去"
-            b.config(state="normal")
-            b._click()
-            assert clicks == [1]
-        finally:
-            root.destroy()
+        b = self._btn(root, clicks)
+        b.config(state="disabled")
+        b._click()
+        assert clicks == [], "停用了還是被按下去"
+        b.config(state="normal")
+        b._click()
+        assert clicks == [1]
 
-    def test_hover_is_ignored_while_disabled(self):
-        global clicks
-        clicks = []
-        root, b = self._btn()
-        try:
-            b.config(state="disabled")
-            off = b.frame.cget("bg")
-            b._paint(launcher.GOLD_HOVER)
-            assert b.frame.cget("bg") == off, "停用中還會 hover 變色"
-        finally:
-            root.destroy()
+    def test_hover_is_ignored_while_disabled(self, root):
+        b = self._btn(root, [])
+        b.config(state="disabled")
+        off = b.frame.cget("bg")
+        b._paint(launcher.GOLD_HOVER)
+        assert b.frame.cget("bg") == off, "停用中還會 hover 變色"
 
 
 class TestChecksRunOffTheUiThread:
