@@ -1351,7 +1351,10 @@ class LauncherUI:
                 bits.append(f"${model['cost_usd']:.4f}")
             if model["errors"]:
                 bits.append(f"錯誤：{model['errors'][-1]['reason']}")
-            self.prog_detail.config(text="　".join(bits) or "執行中…")
+            # 沒有細節可講時的墊字要跟狀態一致——一律寫「執行中…」的話，
+            # 跑完了下面還說執行中，跟上面那條變綠的進度條互相矛盾。
+            idle = {"done": "已完成", "escalated": "已中止"}.get(model["state"], "執行中…")
+            self.prog_detail.config(text="　".join(bits) or idle)
             running = model["state"] == "running"
             self.abort_btn.config(state="normal" if running else "disabled",
                                   fg=CHAMPAGNE if running else MUTED)
