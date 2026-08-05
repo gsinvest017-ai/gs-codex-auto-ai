@@ -236,6 +236,10 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
 
     _u32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
     _u32.GetAncestor.restype = wintypes.HWND
+    # restype 一定要宣告：不宣告的話 ctypes 當成 32 位元 c_int 收，64 位元的 HWND
+    # 會被截斷／變號。這道守門是負責任的（比對錯就會去搶別的程式的鍵盤），
+    # 不能靠「handle 通常夠小所以剛好沒事」。
+    _u32.GetForegroundWindow.restype = wintypes.HWND
 
     def app_is_foreground(child_hwnd: int) -> bool:
         """`child_hwnd` 所屬的最上層視窗，現在是不是前景視窗。
