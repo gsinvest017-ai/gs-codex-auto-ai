@@ -1407,7 +1407,9 @@ class LauncherUI:
             return
         self._setup_checks = None
         self._setting_up = False
-        self.refresh()
+        # 直接把剛拿到的結果套上去，不要再叫 refresh() 重跑一輪——那等於一次點擊
+        # 跑兩遍 `codex login status` / `gh auth status`，正是這個 PR 在減的開銷。
+        self._apply_checks(checks)
         missing = [c for c in checks if c["critical"] and not c["ok"]]
         if checks and not missing:
             self.status.config(text="✓ Claude / Codex 已安裝並登入，無需重跑設定", fg=GREEN)

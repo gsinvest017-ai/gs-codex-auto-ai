@@ -1110,7 +1110,10 @@ class TestSetupIsNotReentrant:
             self.status, self.root = _S(), _R()
 
         def refresh(self):
-            pass
+            self.refreshed = getattr(self, "refreshed", 0) + 1
+
+        def _apply_checks(self, checks):
+            self.applied = getattr(self, "applied", 0) + 1
 
     def test_second_click_while_busy_is_ignored(self, monkeypatch):
         started = []
@@ -1135,3 +1138,5 @@ class TestSetupIsNotReentrant:
         ui._poll_setup()
         assert ui._setting_up is False, "旗標沒清，之後再也按不動"
         assert opened == [1]
+        assert getattr(ui, "refreshed", 0) == 0,             "又叫了 refresh()，等於一次點擊跑兩遍環境檢查"
+        assert getattr(ui, "applied", 0) == 1, "剛拿到的結果沒套上去"
