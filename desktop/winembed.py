@@ -211,22 +211,28 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
     _u32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
     _u32.AttachThreadInput.restype = wintypes.BOOL
 
-    def _focus_across_processes(hwnd: int) -> None:
-        """跨行程把鍵盤焦點交給 hwnd。
+    def _attach_input(hwnd: int) -> int:
+        """把本執行緒與 hwnd 所屬執行緒的輸入佇列接起來，回傳對方的 tid。
 
-        `SetFocus` 只在**同一個輸入佇列**裡有效；瀏覽器是另一個行程，不先
-        `AttachThreadInput` 把兩邊的佇列接起來就是無效呼叫（回 NULL，也不報錯）。
+        **要一直接著，不能設完焦點就拆。** `AttachThreadInput(..., False)` 會把
+        共用的輸入狀態拆掉，焦點歸屬也跟著失效——上一版就是設完 `SetFocus` 立刻在
+        `finally` 裡拆掉，等於白設。宿主視窗要一直代管子視窗的輸入，兩邊的佇列就
+        得在整個內嵌期間保持相連。
         """
         me = _k32.GetCurrentThreadId()
         tid = _u32.GetWindowThreadProcessId(hwnd, None)
         if tid and tid != me:
             _u32.AttachThreadInput(me, tid, True)
-            try:
-                _u32.SetFocus(hwnd)
-            finally:
-                _u32.AttachThreadInput(me, tid, False)
-        else:
-            _u32.SetFocus(hwnd)
+            return int(tid)
+        return 0
+
+    def _detach_input(tid: int) -> None:
+        if tid:
+            _u32.AttachThreadInput(_k32.GetCurrentThreadId(), tid, False)
+
+    def _focus_across_processes(hwnd: int) -> None:
+        """把鍵盤焦點交給 hwnd（佇列必須已經接好，見 `_attach_input`）。"""
+        _u32.SetFocus(hwnd)
 
     def _is_window(hwnd: int) -> bool:
         return bool(_u32.IsWindow(hwnd))
@@ -271,6 +277,12 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
         return 0
 
     def _focus_across_processes(hwnd: int) -> None:  # type: ignore[misc]
+        return None
+
+    def _attach_input(hwnd: int) -> int:  # type: ignore[misc]
+        return 0
+
+    def _detach_input(tid: int) -> None:  # type: ignore[misc]
         return None
 
     def _is_window(hwnd: int) -> bool:  # type: ignore[misc]
@@ -349,6 +361,7 @@ class EmbeddedBrowser:
         # 這次啟動的識別碼。**收尾一定要靠它**：我們 Popen 的那個行程不一定是最後
         # 擁有視窗的那個（瀏覽器會 handoff），只認 pid 會收不乾淨。
         self.nonce = ""
+        self._input_tid = 0     # 已接起來的輸入佇列（見 _attach_input）
 
     # -- 建立 ---------------------------------------------------------------
     def attach(self, parent_hwnd: int, url: str, *, width: int, height: int,
@@ -424,6 +437,8 @@ class EmbeddedBrowser:
             self.close()
             return False
         self.hwnd = hwnd
+        # 內嵌期間一直讓兩邊的輸入佇列相連，鍵盤才進得來
+        self._input_tid = _attach_input(hwnd)
         self._measure_inset(pump)
         # `_measure_inset` 還會再 pump 最多 6 秒——同一條取消路徑在這裡一樣到得了，
         # 而且瀏覽器也可能自己掛掉。**不重新確認就 return True** 的話，呼叫端會
@@ -544,6 +559,8 @@ class EmbeddedBrowser:
         沒人管的視窗浮在桌面上（實測殘留 25 個 msedge 行程）。所以再用 nonce
         掃一次視窗，把真正擁有它的行程一起收掉。
         """
+        _detach_input(self._input_tid)
+        self._input_tid = 0
         proc, self.proc = self.proc, None
         hwnd, self.hwnd = self.hwnd, None
         pids = []

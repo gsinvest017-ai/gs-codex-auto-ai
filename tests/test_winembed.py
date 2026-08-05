@@ -533,3 +533,35 @@ class TestCrossProcessFocus:
         emb = winembed.EmbeddedBrowser()
         emb.hwnd = 99
         emb.focus()      # 不該拋
+
+
+class TestInputQueueStaysAttached:
+    """`AttachThreadInput(..., False)` 會把共用的輸入狀態拆掉，焦點歸屬跟著失效。
+
+    上一版設完 `SetFocus` 就立刻在 `finally` 裡拆掉，等於白設——宿主要一直代管
+    子視窗的輸入，兩邊的佇列就得在整個內嵌期間保持相連。
+    """
+
+    def test_close_detaches_what_attach_connected(self, monkeypatch, tmp_path):
+        detached = []
+        monkeypatch.setattr(winembed, "_kill_tree", lambda pid: None)
+        monkeypatch.setattr(winembed, "_enum_windows", lambda: [])
+        monkeypatch.setattr(winembed, "_is_window", lambda h: False)
+        monkeypatch.setattr(winembed, "_detach_input", detached.append)
+        emb = winembed.EmbeddedBrowser()
+        emb._input_tid = 4242
+        emb.profile_dir = str(tmp_path / "p")
+        emb.close()
+        assert detached == [4242]
+        assert emb._input_tid == 0, "沒清掉的話第二次 close 會重複拆"
+
+    def test_focus_does_not_detach(self, monkeypatch):
+        """focus() 只負責設焦點；拆佇列是 close() 的事。"""
+        monkeypatch.setattr(winembed, "_detach_input",
+                            lambda tid: pytest.fail("focus() 不該拆輸入佇列"))
+        monkeypatch.setattr(winembed, "_focus_across_processes", lambda h: None)
+        monkeypatch.setattr(winembed, "_child_windows", lambda h: [])
+        emb = winembed.EmbeddedBrowser()
+        emb.hwnd = 99
+        emb._input_tid = 4242
+        emb.focus()

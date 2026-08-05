@@ -926,3 +926,121 @@ class TestTrustProjectDir:
         state.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
         assert launcher.trust_project_dir(tmp_path / "empty") is True
+
+
+class TestPrimaryButton:
+    """`tk.Button` 只吃單一字型，做不出「大標＋小字說明」，暗色主題下自帶的邊框
+    也很突兀。改用 Frame + 兩個 Label 自己組，但對外要維持 tk.Button 的介面，
+    `refresh()` / `_set_actions_enabled()` 才不用改。"""
+
+    def _btn(self):
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        from tkinter import font as tkfont
+        b = launcher.PrimaryButton(root, "啟動新任務", "先產規格 → 七階段自動開發",
+                                   lambda: clicks.append(1),
+                                   tkfont.Font(size=14), tkfont.Font(size=9))
+        return root, b
+
+    def test_state_round_trips_like_tk_button(self):
+        global clicks
+        clicks = []
+        root, b = self._btn()
+        try:
+            assert b.cget("state") == "normal"
+            b.config(state="disabled")
+            assert b.cget("state") == "disabled"
+            b.config(state="normal")
+            assert b.cget("state") == "normal"
+        finally:
+            root.destroy()
+
+    def test_disabled_button_does_not_fire(self):
+        global clicks
+        clicks = []
+        root, b = self._btn()
+        try:
+            b.config(state="disabled")
+            b._click()
+            assert clicks == [], "停用了還是被按下去"
+            b.config(state="normal")
+            b._click()
+            assert clicks == [1]
+        finally:
+            root.destroy()
+
+    def test_hover_is_ignored_while_disabled(self):
+        global clicks
+        clicks = []
+        root, b = self._btn()
+        try:
+            b.config(state="disabled")
+            off = b.frame.cget("bg")
+            b._paint(launcher.GOLD_HOVER)
+            assert b.frame.cget("bg") == off, "停用中還會 hover 變色"
+        finally:
+            root.destroy()
+
+
+class TestChecksRunOffTheUiThread:
+    """`gather_checks()` 會叫起好幾個子行程，每個都有秒級逾時。以前在 `__init__`
+    同步跑完才畫 UI，App 開起來要卡好幾秒才點得到輸入框。"""
+
+    class _UI:
+        _apply_checks = launcher.LauncherUI._apply_checks
+        _poll_checks = launcher.LauncherUI._poll_checks
+
+        def __init__(self):
+            self._checking = True
+            self.rows = {}
+            self.msgs = []
+            self.after_calls = []
+            self.btn_state = []
+
+            class _S:
+                def __init__(self, out):
+                    self.out = out
+
+                def config(self, **kw):
+                    self.out.append(kw.get("text", ""))
+
+            class _B:
+                def __init__(self, out):
+                    self.out = out
+
+                def config(self, **kw):
+                    self.out.append(kw.get("state"))
+
+            class _R:
+                def __init__(self, out):
+                    self.out = out
+
+                def after(self, ms, fn):
+                    self.out.append(ms)
+
+            self.status = _S(self.msgs)
+            self.launch_btn = _B(self.btn_state)
+            self.root = _R(self.after_calls)
+
+    def test_polls_again_while_the_worker_is_still_running(self):
+        ui = self._UI()
+        ui._checks_result = None
+        ui._poll_checks()
+        assert ui.after_calls, "結果還沒好就該再排一次輪詢"
+        assert ui._checking is True
+
+    def test_applies_the_result_once_it_arrives(self):
+        ui = self._UI()
+        ui._checks_result = [{"key": "claude", "ok": True, "msg": "ok", "critical": True}]
+        ui._poll_checks()
+        assert ui._checking is False
+        assert ui.btn_state == ["normal"]
+
+    def test_a_failed_check_run_does_not_leave_it_stuck(self):
+        """worker 掛掉會回空 list——不能就讓 UI 永遠停在「檢查中…」。"""
+        ui = self._UI()
+        ui._checks_result = []
+        ui._poll_checks()
+        assert ui._checking is False
+        assert any("重新檢查" in m for m in ui.msgs)

@@ -52,6 +52,7 @@ CHAMPAGNE = "#e7ddc7"
 GREEN = "#3fb950"
 RED = "#f85149"
 MUTED = "#8b949e"
+GOLD_HOVER = "#e6c250"   # 主按鈕 hover
 
 # 版面：左邊控制欄的固定寬度、右邊終端機欄展開時要多給的寬度。
 LEFT_W = 560
@@ -280,6 +281,66 @@ def active_project_dir() -> Path:
     `src/`，而且完全沒有徵兆。
     """
     return _RESOLVED_ROOT or project_dir()
+
+
+class PrimaryButton:
+    """主要動作按鈕。
+
+    tkinter 的 `tk.Button` 只吃**單一字型**，所以「大標＋小字說明」做不出來，
+    而且它自己畫的邊框在暗色主題下很突兀。這裡改用 Frame + 兩個 Label 自己組，
+    換得雙行排版、hover 回饋、以及對內距的完整控制。
+
+    對外維持 `config(state=…)` / `cget("state")`，`refresh()` 與
+    `_set_actions_enabled()` 沿用原本的寫法即可。
+    """
+
+    def __init__(self, parent, title: str, subtitle: str, command,
+                 title_font, sub_font) -> None:
+        self._command = command
+        self._state = "normal"
+        self.frame = tk.Frame(parent, bg=GOLD, cursor="hand2")
+        inner = tk.Frame(self.frame, bg=GOLD)
+        inner.pack(fill="x", padx=18, pady=(12, 13))
+        self._title = tk.Label(inner, text=title, font=title_font, bg=GOLD, fg="#1a1206")
+        self._title.pack()
+        self._sub = tk.Label(inner, text=subtitle, font=sub_font, bg=GOLD, fg="#5c4a1e")
+        self._sub.pack(pady=(2, 0))
+        for w in (self.frame, inner, self._title, self._sub):
+            w.bind("<Button-1>", self._click)
+            w.bind("<Enter>", lambda _e: self._paint(GOLD_HOVER))
+            w.bind("<Leave>", lambda _e: self._paint(GOLD))
+
+    # -- 外觀 ---------------------------------------------------------------
+    def _paint(self, bg: str) -> None:
+        if self._state != "normal":
+            return
+        for w in (self.frame, self._title.master, self._title, self._sub):
+            w.config(bg=bg)
+
+    def _click(self, _event=None) -> None:
+        if self._state == "normal" and self._command:
+            self._command()
+
+    # -- 相容 tk.Button 的介面 ------------------------------------------------
+    def config(self, **kw):
+        if "state" in kw:
+            self._state = kw["state"]
+            on = self._state == "normal"
+            bg = GOLD if on else "#2a2d35"
+            self.frame.config(cursor="hand2" if on else "arrow")
+            for w in (self.frame, self._title.master):
+                w.config(bg=bg)
+            self._title.config(bg=bg, fg="#1a1206" if on else MUTED)
+            self._sub.config(bg=bg, fg="#5c4a1e" if on else "#4a4d55")
+
+    configure = config
+
+    def cget(self, key):
+        return self._state if key == "state" else None
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+        return self
 
 
 class EmbeddedTerminal:
@@ -788,6 +849,8 @@ class LauncherUI:
         self.h1 = tkfont.Font(family="Segoe UI", size=20, weight="bold")
         self.h2 = tkfont.Font(family="Segoe UI", size=11)
         self.mono = tkfont.Font(family="Consolas", size=10)
+        self.btn_title = tkfont.Font(family="Segoe UI", size=15, weight="bold")
+        self.btn_sub = tkfont.Font(family="Segoe UI", size=9)
         self.rows: dict[str, dict] = {}
         self._update_info: dict | None = None
         self._build()
@@ -863,7 +926,7 @@ class LauncherUI:
         self.req = tk.Text(self.left, height=3, font=self.h2, bg=CARD, fg=CHAMPAGNE,
                           insertbackground=GOLD, relief="flat", wrap="word")
         self.req.pack(fill="x", padx=22)
-        self.req.insert("1.0", "做一個記帳 CLI 工具，資料存 SQLite")
+        self.req.insert("1.0", "做一個記帳 CLI 工具，資料存 SQLite，將此任務作為一個測試 codex-auto-ai 自身功能的範例沙盒測試專案")
 
         # 執行模式：勾選＝非停（autopilot），連回合都不停一路跑到交付（commit/push 仍會問）。
         self.autopilot_var = tk.BooleanVar(value=False)
@@ -888,11 +951,10 @@ class LauncherUI:
         # 唯一的啟動入口：先產規格再跑七階段。以前還有一顆「直接把需求丟給
         # claude」的按鈕，但那條路跳過了規格階段，等於繞開本框架的前半段；
         # 兩顆並排也只會讓人不知道該按哪顆。
-        self.launch_btn = tk.Button(
-            self.left, text="🚀 啟動新任務（先產規格再開發）",
-            command=self.on_seed_from_spec,
-            font=self.h1, bg=GOLD, fg=BG, relief="flat", pady=8)
-        self.launch_btn.pack(fill="x", padx=22, pady=(10, 6))
+        self.launch_btn = PrimaryButton(
+            self.left, "啟動新任務", "先產規格 → 七階段自動開發",
+            self.on_seed_from_spec, self.btn_title, self.btn_sub)
+        self.launch_btn.pack(fill="x", padx=22, pady=(12, 8))
         self.seed_btn = self.launch_btn      # 停用/還原邏輯沿用同一顆
 
         # 直接開終端機（不建 session）：想手動開 codex 或一般 shell 分頁時用。
@@ -1177,18 +1239,61 @@ class LauncherUI:
             messagebox.showerror("CodexAutoAI", f"寫入中止旗標失敗：{exc}")
 
     def refresh(self) -> None:
+        """重新做環境檢查。**在背景執行緒跑**，UI 立刻可用。
+
+        `gather_checks()` 會叫起好幾個子行程（`codex login status`、`gh auth status`、
+        探 python 版本…），每個都有秒級的逾時。以前是在 `__init__` 裡同步跑完才畫
+        UI，所以 App 開起來要卡好幾秒才點得到輸入框——而且每加一項檢查就更慢。
+        """
+        if getattr(self, "_checking", False):
+            return
+        self._checking = True
+        for r in self.rows.values():
+            r["dot"].config(fg=MUTED)
+            r["msg"].config(text="檢查中…")
+        self.status.config(text="正在檢查環境…", fg=MUTED)
+
+        def worker() -> None:
+            try:
+                result = gather_checks()
+            except Exception:  # noqa: BLE001
+                result = []
+            # **不從工作執行緒碰 tkinter**（連 `after` 都不要）：Tcl 直譯器不是
+            # thread-safe，跨執行緒呼叫是未定義行為。放進格子，讓主執行緒自己來拿。
+            self._checks_result = result
+
+        self._checks_result = None
+        threading.Thread(target=worker, daemon=True).start()
+        self._poll_checks()
+
+    def _poll_checks(self) -> None:
+        """主執行緒這邊等背景檢查的結果。"""
+        result = getattr(self, "_checks_result", None)
+        if result is None:
+            self.root.after(150, self._poll_checks)
+            return
+        self._checks_result = None
+        self._apply_checks(result)
+
+    def _apply_checks(self, checks: list) -> None:
+        self._checking = False
+        if not checks:
+            self.status.config(text="環境檢查失敗，請按「↻ 重新檢查」", fg=RED)
+            return
         ready = True
-        for c in gather_checks():
-            r = self.rows[c["key"]]
+        for c in checks:
+            r = self.rows.get(c["key"])
+            if not r:
+                continue
             r["dot"].config(fg=GREEN if c["ok"] else (RED if c["critical"] else GOLD))
             r["msg"].config(text=c["msg"])
             if c["critical"] and not c["ok"]:
                 ready = False
         if ready:
-            self.launch_btn.config(state="normal", bg=GOLD)
+            self.launch_btn.config(state="normal")
             self.status.config(text="✓ 環境就緒，可以啟動", fg=GREEN)
         else:
-            self.launch_btn.config(state="disabled", bg="#3a3a3a")
+            self.launch_btn.config(state="disabled")
             self.status.config(text="請先按「設定 / 修復」完成 Claude / Codex 登入", fg=RED)
 
     def _refresh_project_label(self) -> None:
