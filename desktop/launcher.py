@@ -1407,8 +1407,11 @@ class LauncherUI:
             idle = {"done": "已完成", "escalated": "已中止"}.get(model["state"], "執行中…")
             when = self._events_when()
             detail = "　".join(bits) or idle
+            # 細節列一律用 MUTED——新舊之分已經由上面那條進度條的顏色與
+            # 「上次執行」前綴表達了。（原本寫成 `MUTED if stale else MUTED`，
+            # 兩邊一樣、等於沒作用，卻讓人以為這裡有在區分。）
             self.prog_detail.config(text=f"{detail}　{when}" if when else detail,
-                                    fg=MUTED if stale else MUTED)
+                                    fg=MUTED)
             running = model["state"] == "running"
             self.abort_btn.config(state="normal" if running else "disabled",
                                   fg=CHAMPAGNE if running else MUTED)
