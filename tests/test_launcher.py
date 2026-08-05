@@ -1140,3 +1140,118 @@ class TestSetupIsNotReentrant:
         assert opened == [1]
         assert getattr(ui, "refreshed", 0) == 0,             "又叫了 refresh()，等於一次點擊跑兩遍環境檢查"
         assert getattr(ui, "applied", 0) == 1, "剛拿到的結果沒套上去"
+
+
+class TestKeyboardBridge:
+    """內嵌的瀏覽器視窗被 SetParent 進 App 之後，按鍵到不了 Chromium 的 renderer。
+
+    實測（頁面自己把 `document.hasFocus()` 寫進視窗標題來回報）：點過終端機之後
+    是 `F=true AE=TEXTAREA`——頁面有焦點、xterm 的 textarea 也是 activeElement，
+    但打字毫無反應，代表按鍵在到達網頁之前就被丟掉了。所以改由 tk 收鍵盤、
+    直接寫進 pty，瀏覽器只負責顯示。
+    """
+
+    @pytest.mark.parametrize("keysym,char,ctrl,want", [
+        ("Return", "\r", False, "\r"),
+        ("KP_Enter", "", False, "\r"),
+        ("BackSpace", "\x08", False, "\x7f"),   # 終端機要 DEL，不是 BS
+        ("Tab", "\t", False, "\t"),
+        ("Escape", "\x1b", False, "\x1b"),
+        ("Up", "", False, "\x1b[A"),
+        ("Down", "", False, "\x1b[B"),
+        ("Right", "", False, "\x1b[C"),
+        ("Left", "", False, "\x1b[D"),
+        ("a", "a", False, "a"),
+        ("中", "中", False, "中"),
+    ])
+    def test_translates_keys_to_terminal_input(self, keysym, char, ctrl, want):
+        assert launcher.keystroke_to_bytes(keysym, char, ctrl) == want
+
+    @pytest.mark.parametrize("keysym,want", [("c", "\x03"), ("d", "\x04"), ("C", "\x03")])
+    def test_ctrl_combos(self, keysym, want):
+        """Ctrl+C 中斷、Ctrl+D EOF——沒有這個就沒辦法中止跑掉的指令。"""
+        assert launcher.keystroke_to_bytes(keysym, "", True) == want
+
+    @pytest.mark.parametrize("keysym", ["Shift_L", "Control_L", "Alt_L", "F5"])
+    def test_modifier_and_unknown_keys_send_nothing(self, keysym):
+        """單獨按修飾鍵不該送出東西，否則每次按 Shift 都會污染輸入。"""
+        assert launcher.keystroke_to_bytes(keysym, "", False) == ""
+
+    def test_ctrl_with_a_non_letter_sends_nothing(self):
+        assert launcher.keystroke_to_bytes("1", "1", True) == ""
+
+
+class TestKeyboardWatchdog:
+    """點終端機**不會**觸發 tk 的 `<Button-1>`——瀏覽器視窗整片蓋在 term_host 上，
+    點擊由它接走、順便把 OS 焦點拿走。所以要靠輪詢把焦點搶回來。"""
+
+    class _UI:
+        _keep_keyboard = launcher.LauncherUI._keep_keyboard
+
+        def __init__(self, focus, foreground, mapped=True, alive=True):
+            self.forced = 0
+            self._focus = focus
+            self._fg = foreground
+
+            class _Emb:
+                hwnd = 123
+
+                def __init__(self, a):
+                    self.alive = a
+
+            class _Pane:
+                def __init__(self, m):
+                    self._m = m
+
+                def winfo_ismapped(self):
+                    return self._m
+
+            class _Host:
+                def __init__(self, ui):
+                    self._ui = ui
+
+                def focus_force(self):
+                    self._ui.forced += 1
+
+            class _Root:
+                def __init__(self, ui):
+                    self._ui = ui
+
+                def focus_get(self):
+                    return self._ui._focus
+
+                def after(self, ms, fn):
+                    pass
+
+            self._embed = _Emb(alive)
+            self.termpane = _Pane(mapped)
+            self.term_host = _Host(self)
+            self.root = _Root(self)
+
+    def _run(self, monkeypatch, ui, foreground=True):
+        monkeypatch.setattr(launcher.winembed, "app_is_foreground", lambda h: foreground)
+        ui._keep_keyboard()
+        return ui.forced
+
+    def test_takes_focus_back_when_it_left_tk(self, monkeypatch):
+        ui = self._UI(focus=None, foreground=True)
+        assert self._run(monkeypatch, ui) == 1
+
+    def test_leaves_focus_alone_when_a_tk_widget_has_it(self, monkeypatch):
+        """使用者正在左欄的需求框打字時，不能把焦點搶走。"""
+        ui = self._UI(focus="某個 tk widget", foreground=True)
+        assert self._run(monkeypatch, ui) == 0
+
+    def test_does_not_steal_focus_from_other_apps(self, monkeypatch):
+        """**這道守門不能省**：少了它，使用者切到別的程式時我們會每 300ms 把
+        焦點硬拉回來，等於搶使用者的鍵盤。"""
+        ui = self._UI(focus=None, foreground=False)
+        assert self._run(monkeypatch, ui, foreground=False) == 0
+
+    def test_does_nothing_when_the_pane_is_collapsed(self, monkeypatch):
+        ui = self._UI(focus=None, foreground=True, mapped=False)
+        assert self._run(monkeypatch, ui) == 0
+
+    def test_does_nothing_when_the_embed_is_dead(self, monkeypatch):
+        ui = self._UI(focus=None, foreground=True, alive=False)
+        assert self._run(monkeypatch, ui) == 0

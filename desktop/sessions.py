@@ -65,9 +65,12 @@ class SessionKind:
 
 _SHELL = ["cmd.exe"] if os.name == "nt" else [os.environ.get("SHELL", "/bin/bash")]
 
+# 分頁上顯示的名字刻意寫成**角色**而不是底層 CLI：這條 session 跑的是完整的
+# 七階段 pipeline——Claude 只做規劃與調度，實作是它再去叫 `codex exec` 產出的。
+# 標成「Claude」會讓人以為程式碼是 Claude 寫的，正好跟本框架的核心分工相反。
 KINDS: dict[str, SessionKind] = {
-    "claude": SessionKind("claude", "Claude", ["claude"], accepts_prompt=True),
-    "codex": SessionKind("codex", "Codex", ["codex"], accepts_prompt=True),
+    "claude": SessionKind("claude", "Pipeline", ["claude"], accepts_prompt=True),
+    "codex": SessionKind("codex", "Codex（直接）", ["codex"], accepts_prompt=True),
     "shell": SessionKind("shell", "終端機", _SHELL),
 }
 

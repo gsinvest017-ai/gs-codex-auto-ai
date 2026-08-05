@@ -515,6 +515,35 @@ def touch_app_run(root: Path, prompt: str = "") -> None:
         pass
 
 
+# tk 的 keysym → 要送進 pty 的位元組。終端機吃的是 ANSI 序列，不是按鍵名。
+_KEYSYM_BYTES = {
+    "Return": "\r", "KP_Enter": "\r", "Tab": "\t", "BackSpace": "\x7f",
+    "Escape": "\x1b", "Delete": "\x1b[3~", "Insert": "\x1b[2~",
+    "Up": "\x1b[A", "Down": "\x1b[B", "Right": "\x1b[C", "Left": "\x1b[D",
+    "Home": "\x1b[H", "End": "\x1b[F", "Prior": "\x1b[5~", "Next": "\x1b[6~",
+}
+
+
+def keystroke_to_bytes(keysym: str, char: str, ctrl: bool) -> str:
+    """把一次 tk 按鍵事件翻成終端機看得懂的輸入。回空字串代表不要送。
+
+    **為什麼需要這層**：內嵌的瀏覽器視窗被 SetParent 進 App 之後，鍵盤事件進不到
+    Chromium 的 renderer（實測頁面自己回報 `document.hasFocus()=true`、
+    `activeElement` 也是 xterm 的 textarea，但打字沒有任何反應——按鍵在到達網頁
+    之前就被丟掉了）。所以改由 tk 收鍵盤，直接寫進 pty；瀏覽器只負責顯示。
+    """
+    if keysym in _KEYSYM_BYTES:
+        return _KEYSYM_BYTES[keysym]
+    if ctrl:
+        # Ctrl+A..Z → 0x01..0x1a（Ctrl+C 中斷、Ctrl+D EOF 都靠這個）
+        if len(keysym) == 1 and keysym.isalpha():
+            return chr(ord(keysym.upper()) - 64)
+        return ""
+    if char and char.isprintable():
+        return char
+    return ""
+
+
 def _note_embed(msg: str) -> None:
     """把視窗內嵌失敗的原因寫到一個固定位置。
 
@@ -1059,6 +1088,10 @@ class LauncherUI:
         # 前景視窗是 tk 的 toplevel，按鍵預設進 tk 的佇列，不會自己過去。
         self.term_host.bind("<Button-1>", self._focus_embed, add="+")
         self.termpane.bind("<Button-1>", self._focus_embed, add="+")
+        # tk 要收得到鍵盤才轉送得出去
+        self.term_host.config(takefocus=True)
+        self.term_host.bind("<Key>", self._on_term_key, add="+")
+        self._keep_keyboard()
 
         self._embed = None
         self._resize_job = None
@@ -1180,8 +1213,63 @@ class LauncherUI:
         self.root.geometry(f"{LEFT_W}x{max(self.root.winfo_height(), 900)}")
 
     def _focus_embed(self, _event=None) -> None:
-        if self._embed is not None and self._embed.alive:
-            self._embed.focus()
+        """點終端機區時把鍵盤焦點留在 **tk**，由 `_on_term_key` 轉送給 pty。
+
+        以前這裡是把焦點交給嵌進來的瀏覽器，但那條路走不通：實測頁面回報
+        `hasFocus()=true`、`activeElement` 也是 xterm 的 textarea，打字卻毫無反應
+        ——按鍵在到達 renderer 之前就被丟掉了。改成 tk 自己收、直接寫進 pty。
+        """
+        self.term_host.focus_force()
+
+    def _keep_keyboard(self) -> None:
+        """把鍵盤焦點留在 tk，這樣 `_on_term_key` 才收得到。
+
+        **點終端機不會觸發 tk 的 `<Button-1>`**：嵌進來的瀏覽器視窗整片蓋在
+        `term_host` 上，點擊由它接走、順便把 OS 焦點也拿走，tk 從此收不到按鍵。
+        所以改成輪詢：只要焦點跑到 tk 的元件之外（`focus_get()` 是 None）而 App
+        又還在最前面，就把它搶回來。
+
+        **`app_is_foreground` 這道守門不能省**：少了它，使用者切到別的程式時我們
+        會每 300ms 把焦點硬拉回來，變成搶使用者的鍵盤。
+        """
+        try:
+            emb = self._embed
+            if (emb is not None and emb.alive and emb.hwnd
+                    and self.termpane.winfo_ismapped()
+                    and self.root.focus_get() is None
+                    and winembed is not None
+                    and winembed.app_is_foreground(emb.hwnd)):
+                self.term_host.focus_force()
+        except Exception:  # noqa: BLE001 — 焦點顧不到不該讓 App 出錯
+            pass
+        self.root.after(300, self._keep_keyboard)
+
+    def _current_session(self):
+        """鍵盤要送到哪條 session。
+
+        面板可以同時開好幾格，但 tk 不知道網頁裡哪一格有焦點，所以送給**最新建立
+        且還活著**的那條——單一 pipeline 的常見情境下就是使用者正在看的那條。
+        """
+        mgr = getattr(TERMINAL, "_mgr", None)
+        if mgr is None:
+            return None
+        alive = [s for s in mgr.list() if s.alive]
+        return alive[-1] if alive else None
+
+    def _on_term_key(self, event) -> str:
+        """把 tk 收到的按鍵轉送進 pty。回 "break" 讓 tk 不要再自己處理。"""
+        sess = self._current_session()
+        if sess is None:
+            return ""
+        ctrl = bool(event.state & 0x0004)
+        data = keystroke_to_bytes(event.keysym, event.char or "", ctrl)
+        if not data:
+            return ""
+        try:
+            sess.write(data)
+        except Exception:  # noqa: BLE001 — session 剛死之類，不該讓 UI 出錯
+            return ""
+        return "break"
 
     def _on_term_resize(self, _event=None) -> None:
         """跟著欄位調整內嵌視窗大小。
@@ -1254,14 +1342,16 @@ class LauncherUI:
             self.prog_bar.config(
                 text=f"Phase {model['marker']}/{model['total']} {bar} {model['current_name']}",
                 fg=colour)
-            bits = [f"已完成：{model['completed'] or '無'}"]
+            # 不再列「已完成：[0, 1, 2]」——上面的進度條已經表達同一件事，
+            # 再用一串裸數字重複一次只是佔位子又難看。
+            bits = []
             if model["iteration"]:
                 bits.append(f"迭代 {model['iteration']}")
             if model["cost_usd"]:
                 bits.append(f"${model['cost_usd']:.4f}")
             if model["errors"]:
                 bits.append(f"錯誤：{model['errors'][-1]['reason']}")
-            self.prog_detail.config(text="　".join(bits))
+            self.prog_detail.config(text="　".join(bits) or "執行中…")
             running = model["state"] == "running"
             self.abort_btn.config(state="normal" if running else "disabled",
                                   fg=CHAMPAGNE if running else MUTED)

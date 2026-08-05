@@ -243,6 +243,13 @@ function makeTab(s) {
   tabEl.className = "tab";
   tabEl.innerHTML = `<span class="dot"></span><span class="name"></span><span class="x">✕</span>`;
   tabEl.querySelector(".name").textContent = s.title + " · " + s.id;
+  // 滑過去說明這條 session 到底在跑什麼——「Pipeline」看不出 Claude 只負責規劃、
+  // 實作是它再去叫 codex 產出的。
+  tabEl.title = s.kind === "claude"
+    ? `七階段 pipeline（Claude 規劃／調度 → Codex 實作）
+${s.cwd}`
+    : `${s.kind_label}
+${s.cwd}`;
   tabEl.onclick = (e) => {
     if (e.target.classList.contains("x")) { closeTab(s.id); return; }
     place(focused, s.id);            // 放進目前有焦點的格子
