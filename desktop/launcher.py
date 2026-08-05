@@ -298,7 +298,11 @@ class PrimaryButton:
                  title_font, sub_font) -> None:
         self._command = command
         self._state = "normal"
-        self.frame = tk.Frame(parent, bg=GOLD, cursor="hand2")
+        # takefocus + 鍵盤啟動：`tk.Button` 本來就能 Tab 過去再按 Space/Enter，
+        # 自己用 Frame 組就得自己補回來，否則只剩滑鼠能按。
+        self.frame = tk.Frame(parent, bg=GOLD, cursor="hand2",
+                              highlightthickness=2, highlightbackground=GOLD,
+                              highlightcolor="#ffffff", takefocus=True)
         inner = tk.Frame(self.frame, bg=GOLD)
         inner.pack(fill="x", padx=18, pady=(12, 13))
         self._title = tk.Label(inner, text=title, font=title_font, bg=GOLD, fg="#1a1206")
@@ -306,9 +310,11 @@ class PrimaryButton:
         self._sub = tk.Label(inner, text=subtitle, font=sub_font, bg=GOLD, fg="#5c4a1e")
         self._sub.pack(pady=(2, 0))
         for w in (self.frame, inner, self._title, self._sub):
-            w.bind("<Button-1>", self._click)
+            w.bind("<Button-1>", self._focus_then_click)
             w.bind("<Enter>", lambda _e: self._paint(GOLD_HOVER))
             w.bind("<Leave>", lambda _e: self._paint(GOLD))
+        for seq in ("<Return>", "<KP_Enter>", "<space>"):
+            self.frame.bind(seq, self._click)
 
     # -- 外觀 ---------------------------------------------------------------
     def _paint(self, bg: str) -> None:
@@ -316,6 +322,11 @@ class PrimaryButton:
             return
         for w in (self.frame, self._title.master, self._title, self._sub):
             w.config(bg=bg)
+
+    def _focus_then_click(self, event=None) -> None:
+        if self._state == "normal":
+            self.frame.focus_set()
+        self._click(event)
 
     def _click(self, _event=None) -> None:
         if self._state == "normal" and self._command:
@@ -1332,11 +1343,32 @@ class LauncherUI:
         self.status.config(text=f"專案資料夾已改為 {picked}", fg=GREEN)
 
     def on_setup(self) -> None:
-        # 環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
-        checks = gather_checks()
+        """環境 pre-check（與 extension skipSetupWhenReady 一致）：關鍵項都就緒就不開終端機。
+
+        檢查同樣丟到背景——它跟啟動時跑的是同一批子行程，在 UI 執行緒上同步跑會讓
+        「設定 / 修復」按下去整個卡住，正是這次要修掉的那個毛病。
+        """
+        self.status.config(text="正在檢查環境…", fg=MUTED)
+
+        def worker() -> None:
+            try:
+                self._setup_checks = gather_checks()
+            except Exception:  # noqa: BLE001
+                self._setup_checks = []
+
+        self._setup_checks = None
+        threading.Thread(target=worker, daemon=True).start()
+        self._poll_setup()
+
+    def _poll_setup(self) -> None:
+        checks = getattr(self, "_setup_checks", None)
+        if checks is None:
+            self.root.after(150, self._poll_setup)
+            return
+        self._setup_checks = None
         self.refresh()
         missing = [c for c in checks if c["critical"] and not c["ok"]]
-        if not missing:
+        if checks and not missing:
             self.status.config(text="✓ Claude / Codex 已安裝並登入，無需重跑設定", fg=GREEN)
             return
         run_setup()

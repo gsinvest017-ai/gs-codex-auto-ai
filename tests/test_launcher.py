@@ -974,6 +974,18 @@ class TestPrimaryButton:
         b._click()
         assert clicks == [1]
 
+    def test_can_be_activated_from_the_keyboard(self, root):
+        """`tk.Button` 本來就能 Tab 過去按 Space/Enter；自己用 Frame 組要補回來，
+        否則只剩滑鼠能按。
+
+        驗綁定而不是 `event_generate`：按鍵事件要真的有焦點才會派送，而測試用的
+        root 是 withdrawn 的，模擬出來的結果不可靠（第一版就是這樣一直 0 次）。
+        """
+        b = self._btn(root, [])
+        assert b.frame.cget("takefocus") in (1, "1", True), "Tab 不過去"
+        bound = set(b.frame.bind())
+        assert {"<Key-Return>", "<Key-space>"} <= bound, f"沒綁鍵盤啟動：{sorted(bound)}"
+
     def test_hover_is_ignored_while_disabled(self, root):
         b = self._btn(root, [])
         b.config(state="disabled")
