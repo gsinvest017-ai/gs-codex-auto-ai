@@ -1086,3 +1086,52 @@ class TestBuildDoesNotRunSubprocesses:
         assert len(checks) == len(launcher.CHECKS), "一項壞掉整排就不見了"
         bad = next(c for c in checks if c["key"] == "codex")
         assert bad["ok"] is False and "炸了" in bad["msg"]
+
+
+class TestSetupIsNotReentrant:
+    """`on_setup()` 改成非同步之後，卡頓時連點兩下會開出**兩個**設定視窗、
+    甚至同時跑兩份安裝流程（`run_setup()` 每次都 Popen 一個新終端機）。"""
+
+    class _UI:
+        on_setup = launcher.LauncherUI.on_setup
+        _poll_setup = launcher.LauncherUI._poll_setup
+
+        def __init__(self):
+            self.threads = 0
+
+            class _S:
+                def config(self, **kw):
+                    pass
+
+            class _R:
+                def after(self, ms, fn):
+                    pass
+
+            self.status, self.root = _S(), _R()
+
+        def refresh(self):
+            pass
+
+    def test_second_click_while_busy_is_ignored(self, monkeypatch):
+        started = []
+        monkeypatch.setattr(launcher.threading, "Thread",
+                            lambda target, daemon=False: type(
+                                "T", (), {"start": lambda s: started.append(1)})())
+        ui = self._UI()
+        ui.on_setup()
+        ui.on_setup()
+        ui.on_setup()
+        assert started == [1], f"連點就開了 {len(started)} 份設定流程"
+
+    def test_clears_the_guard_after_finishing(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(launcher, "run_setup", lambda: opened.append(1))
+        monkeypatch.setattr(launcher.threading, "Thread",
+                            lambda target, daemon=False: type(
+                                "T", (), {"start": lambda s: None})())
+        ui = self._UI()
+        ui.on_setup()
+        ui._setup_checks = [{"key": "claude", "ok": False, "critical": True, "msg": ""}]
+        ui._poll_setup()
+        assert ui._setting_up is False, "旗標沒清，之後再也按不動"
+        assert opened == [1]

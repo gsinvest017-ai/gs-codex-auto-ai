@@ -1383,6 +1383,11 @@ class LauncherUI:
         檢查同樣丟到背景——它跟啟動時跑的是同一批子行程，在 UI 執行緒上同步跑會讓
         「設定 / 修復」按下去整個卡住，正是這次要修掉的那個毛病。
         """
+        # 重入防線：改成非同步之後，卡頓時使用者連點兩下就會開出**兩個**設定視窗、
+        # 甚至同時跑兩份安裝流程（`run_setup()` 每次都 Popen 一個新終端機）。
+        if getattr(self, "_setting_up", False):
+            return
+        self._setting_up = True
         self.status.config(text="正在檢查環境…", fg=MUTED)
 
         def worker() -> None:
@@ -1401,6 +1406,7 @@ class LauncherUI:
             self.root.after(150, self._poll_setup)
             return
         self._setup_checks = None
+        self._setting_up = False
         self.refresh()
         missing = [c for c in checks if c["critical"] and not c["ok"]]
         if checks and not missing:
