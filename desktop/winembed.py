@@ -234,6 +234,25 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
         """把鍵盤焦點交給 hwnd（佇列必須已經接好，見 `_attach_input`）。"""
         _u32.SetFocus(hwnd)
 
+    _u32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    _u32.GetAncestor.restype = wintypes.HWND
+    # restype 一定要宣告：不宣告的話 ctypes 當成 32 位元 c_int 收，64 位元的 HWND
+    # 會被截斷／變號。這道守門是負責任的（比對錯就會去搶別的程式的鍵盤），
+    # 不能靠「handle 通常夠小所以剛好沒事」。
+    _u32.GetForegroundWindow.restype = wintypes.HWND
+
+    def app_is_foreground(child_hwnd: int) -> bool:
+        """`child_hwnd` 所屬的最上層視窗，現在是不是前景視窗。
+
+        鍵盤橋接要用它當守門：只有「我們的 App 就在最前面」時才把焦點搶回 tk，
+        否則使用者切到別的程式時我們會硬把焦點拉回來。
+        """
+        try:
+            top = _u32.GetAncestor(child_hwnd, 2)     # GA_ROOT
+            return bool(top) and int(top) == int(_u32.GetForegroundWindow())
+        except Exception:  # noqa: BLE001
+            return False
+
     def _is_window(hwnd: int) -> bool:
         return bool(_u32.IsWindow(hwnd))
 
@@ -286,6 +305,9 @@ else:  # 非 Windows：讓模組仍可 import（CI 在 Linux 上跑純邏輯測�
         return None
 
     def _is_window(hwnd: int) -> bool:  # type: ignore[misc]
+        return False
+
+    def app_is_foreground(child_hwnd: int) -> bool:  # type: ignore[misc]
         return False
 
     def _window_class(hwnd: int) -> str:  # type: ignore[misc]
