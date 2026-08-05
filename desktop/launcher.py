@@ -655,22 +655,57 @@ def check_python() -> tuple[bool, str]:
     return False, too_old or "未安裝 — hooks 需要它，缺了 Codex-first 守門員會失效"
 
 
+# 檢查項的**靜態**清單：(key, 顯示名, critical, 檢查函式)。
+# UI 只靠前三欄就能把列畫出來——`_build()` 以前是呼叫 `gather_checks()` 來列舉，
+# 等於為了拿名字去跑一輪 `codex login status` / `gh auth status` / 探 python，
+# 結果 ok/msg 立刻丟掉，既阻塞又白做。兩邊共用同一份清單也不會再對不起來。
+# critical 的 python：hooks 全靠它，缺了整套 Codex-first 保證會靜默失效。
+CHECKS = (
+    ("claude", "Claude Code", True),
+    ("codex", "OpenAI Codex", True),
+    ("node", "Node.js", False),
+    ("git", "Git", False),
+    ("gh", "GitHub CLI", False),
+    ("python", "Python", True),
+)
+
+
+def check_rows() -> list[tuple[str, str, bool]]:
+    """畫 UI 用的列定義。**不跑任何子行程。**"""
+    return list(CHECKS)
+
+
+def _run_check(key: str) -> tuple[bool, str]:
+    """跑單一項檢查。
+
+    刻意在**呼叫當下**才查模組層級的函式名（而不是把函式物件存進 `CHECKS`）：
+    存物件的話 monkeypatch 換掉模組屬性就不會生效，測試會替換不了。
+    """
+    if key == "claude":
+        return check_claude()
+    if key == "codex":
+        return check_codex()
+    if key == "node":
+        return check_simple("node", "Node.js（Codex 需要）")
+    if key == "git":
+        return check_simple("git", "Git")
+    if key == "gh":
+        return check_gh()
+    if key == "python":
+        return check_python()
+    return False, "未知的檢查項"
+
+
 def gather_checks() -> list[dict]:
-    claude_ok, claude_msg = check_claude()
-    codex_ok, codex_msg = check_codex()
-    node_ok, node_msg = check_simple("node", "Node.js（Codex 需要）")
-    git_ok, git_msg = check_simple("git", "Git")
-    gh_ok, gh_msg = check_gh()
-    py_ok, py_msg = check_python()
-    return [
-        {"key": "claude", "name": "Claude Code", "ok": claude_ok, "msg": claude_msg, "critical": True},
-        {"key": "codex", "name": "OpenAI Codex", "ok": codex_ok, "msg": codex_msg, "critical": True},
-        {"key": "node", "name": "Node.js", "ok": node_ok, "msg": node_msg, "critical": False},
-        {"key": "git", "name": "Git", "ok": git_ok, "msg": git_msg, "critical": False},
-        {"key": "gh", "name": "GitHub CLI", "ok": gh_ok, "msg": gh_msg, "critical": False},
-        # critical：hooks 全靠它，缺了整套 Codex-first 保證會靜默失效（見 check_python）
-        {"key": "python", "name": "Python", "ok": py_ok, "msg": py_msg, "critical": True},
-    ]
+    """真的去檢查（會叫子行程，慢）。只在背景執行緒呼叫。"""
+    out = []
+    for key, name, critical in CHECKS:
+        try:
+            ok, msg = _run_check(key)
+        except Exception as exc:  # noqa: BLE001 — 一項壞掉不該讓整排檢查消失
+            ok, msg = False, f"檢查失敗：{exc}"
+        out.append({"key": key, "name": name, "ok": ok, "msg": msg, "critical": critical})
+    return out
 
 
 # ── 動作 ────────────────────────────────────────────────────────────────────
@@ -900,16 +935,16 @@ class LauncherUI:
         self.card = card = tk.Frame(self.left, bg=CARD)
         card.pack(fill="x", padx=22)
         tk.Label(card, text="環境檢查", font=self.h2, fg=CHAMPAGNE, bg=CARD).pack(anchor="w", padx=14, pady=(12, 6))
-        for c in gather_checks():
+        for key, label, critical in check_rows():     # 靜態清單，不跑子行程
             row = tk.Frame(card, bg=CARD)
             row.pack(fill="x", padx=14, pady=2)
             dot = tk.Label(row, text="●", font=self.h2, fg=MUTED, bg=CARD, width=2)
             dot.pack(side="left")
-            name = tk.Label(row, text=c["name"], font=self.h2, fg=CHAMPAGNE, bg=CARD, width=12, anchor="w")
+            name = tk.Label(row, text=label, font=self.h2, fg=CHAMPAGNE, bg=CARD, width=12, anchor="w")
             name.pack(side="left")
-            msg = tk.Label(row, text="", font=self.mono, fg=MUTED, bg=CARD, anchor="w")
+            msg = tk.Label(row, text="檢查中…", font=self.mono, fg=MUTED, bg=CARD, anchor="w")
             msg.pack(side="left", fill="x", expand=True)
-            self.rows[c["key"]] = {"dot": dot, "msg": msg, "critical": c["critical"]}
+            self.rows[key] = {"dot": dot, "msg": msg, "critical": critical}
 
         btns = tk.Frame(card, bg=CARD)
         btns.pack(fill="x", padx=14, pady=(8, 12))

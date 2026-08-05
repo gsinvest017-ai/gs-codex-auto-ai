@@ -1055,3 +1055,34 @@ class TestChecksRunOffTheUiThread:
         ui._poll_checks()
         assert ui._checking is False
         assert any("重新檢查" in m for m in ui.msgs)
+
+
+class TestBuildDoesNotRunSubprocesses:
+    """`_build()` 以前呼叫 `gather_checks()` **只為了拿列的名字**——等於為了畫 UI
+    去跑一輪 `codex login status` / `gh auth status` / 探 python，ok/msg 立刻丟掉。
+    既阻塞（在 `mainloop()` 之前）又白做，正是「開啟要等很久」的主因。"""
+
+    def test_check_rows_needs_no_subprocess(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_run", lambda *a, **k: pytest.fail("跑了子行程"))
+        monkeypatch.setattr(launcher, "_which", lambda n: pytest.fail("查了 PATH"))
+        rows = launcher.check_rows()
+        assert [r[0] for r in rows] == [c[0] for c in launcher.CHECKS]
+        assert all(isinstance(r[2], bool) for r in rows)
+
+    def test_rows_and_results_cannot_diverge(self, monkeypatch):
+        """兩邊共用同一份 CHECKS——分開維護就會出現「有列沒結果」的靜默落差。"""
+        monkeypatch.setattr(launcher, "_run_check", lambda key: (True, "ok"))
+        assert [r[0] for r in launcher.check_rows()] == \
+               [c["key"] for c in launcher.gather_checks()]
+
+    def test_one_broken_check_does_not_drop_the_rest(self, monkeypatch):
+        def flaky(key):
+            if key == "codex":
+                raise RuntimeError("炸了")
+            return True, "ok"
+
+        monkeypatch.setattr(launcher, "_run_check", flaky)
+        checks = launcher.gather_checks()
+        assert len(checks) == len(launcher.CHECKS), "一項壞掉整排就不見了"
+        bad = next(c for c in checks if c["key"] == "codex")
+        assert bad["ok"] is False and "炸了" in bad["msg"]
