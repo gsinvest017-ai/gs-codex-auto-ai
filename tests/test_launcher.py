@@ -1255,3 +1255,120 @@ class TestKeyboardWatchdog:
     def test_does_nothing_when_the_embed_is_dead(self, monkeypatch):
         ui = self._UI(focus=None, foreground=True, alive=False)
         assert self._run(monkeypatch, ui) == 0
+
+
+class TestKeyboardHint:
+    """使用者回報「打不了字」時，要能分辨是**App 沒接管到鍵盤**還是**接管了但對面
+    的 CLI 正在忙**。沒有這行提示就只能猜——前三次就是這樣繞了很久。"""
+
+    class _UI:
+        _update_kbd_hint = launcher.LauncherUI._update_kbd_hint
+
+        def __init__(self, focused, alive=True, mapped=True, sess=True):
+            self.text = None
+            ui = self
+
+            class _Lab:
+                def config(self, **kw):
+                    ui.text = kw.get("text")
+
+            class _Emb:
+                def __init__(self, a):
+                    self.alive = a
+
+            class _Pane:
+                def __init__(self, m):
+                    self._m = m
+
+                def winfo_ismapped(self):
+                    return self._m
+
+            class _Root:
+                def focus_get(self_inner):
+                    return ui.term_host if focused else None
+
+            class _Sess:
+                id = "s1"
+
+                class kind:
+                    label = "Pipeline"
+
+            self.kbd_label = _Lab()
+            self._embed = _Emb(alive)
+            self.termpane = _Pane(mapped)
+            self.term_host = object()
+            self.root = _Root()
+            self._sess = _Sess() if sess else None
+
+        def _current_session(self):
+            return self._sess
+
+    def test_says_taken_over_and_names_the_session(self):
+        ui = self._UI(focused=True)
+        ui._update_kbd_hint()
+        assert "已接管" in ui.text and "Pipeline · s1" in ui.text
+        assert "正在忙" in ui.text, "要說明打不出字的另一種可能，否則使用者還是會誤判"
+
+    def test_says_not_taken_over_with_what_to_do(self):
+        ui = self._UI(focused=False)
+        ui._update_kbd_hint()
+        assert "未接管" in ui.text and "點一下" in ui.text
+
+    def test_blank_when_no_embed(self):
+        ui = self._UI(focused=True, alive=False)
+        ui._update_kbd_hint()
+        assert ui.text == ""
+
+    def test_blank_when_collapsed(self):
+        ui = self._UI(focused=True, mapped=False)
+        ui._update_kbd_hint()
+        assert ui.text == ""
+
+
+class TestStaleProgressIsLabelled:
+    """事件檔留在專案資料夾裡，所以重開 App 會直接看到上一輪跑到哪——使用者無從
+    分辨那是現在還是上次的，會以為任務正在跑（實際回報過：一開 App 就顯示
+    Phase 4/7）。"""
+
+    def test_mtime_older_than_app_start_is_stale(self, tmp_path):
+        log = tmp_path / "events.jsonl"
+        log.write_text("{}", encoding="utf-8")
+        os.utime(log, (1000, 1000))
+
+        class _UI:
+            _events_mtime = launcher.LauncherUI._events_mtime
+            _events_when = launcher.LauncherUI._events_when
+            _progress_is_stale = launcher.LauncherUI._progress_is_stale
+            _app_started_at = 2000
+
+            def _events_log(self):
+                return log
+
+        ui = _UI()
+        assert ui._progress_is_stale() is True, "應判為上次執行"
+        assert ui._events_when(), "要能顯示時間，否則使用者還是不知道多舊"
+
+    def test_fresh_run_is_not_stale(self, tmp_path):
+        log = tmp_path / "events.jsonl"
+        log.write_text("{}", encoding="utf-8")
+
+        class _UI:
+            _events_mtime = launcher.LauncherUI._events_mtime
+            _progress_is_stale = launcher.LauncherUI._progress_is_stale
+            _app_started_at = 0
+
+            def _events_log(self):
+                return log
+
+        assert _UI()._progress_is_stale() is False, "這一輪的進度被誤標成上次的"
+
+    def test_missing_log_is_safe(self, tmp_path):
+        class _UI:
+            _events_mtime = launcher.LauncherUI._events_mtime
+            _events_when = launcher.LauncherUI._events_when
+
+            def _events_log(self):
+                return tmp_path / "nope.jsonl"
+
+        assert _UI()._events_mtime() == 0.0
+        assert _UI()._events_when() == ""

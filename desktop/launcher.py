@@ -928,6 +928,7 @@ class LauncherUI:
         self.btn_sub = tkfont.Font(family="Segoe UI", size=9)
         self.rows: dict[str, dict] = {}
         self._update_info: dict | None = None
+        self._app_started_at = time.time()
         self._build()
         self.refresh()
         self.poll_progress()
@@ -1091,6 +1092,11 @@ class LauncherUI:
         # tk 要收得到鍵盤才轉送得出去
         self.term_host.config(takefocus=True)
         self.term_host.bind("<Key>", self._on_term_key, add="+")
+        # 鍵盤狀態指示：使用者回報「打不了字」時，這一行能直接分辨是「App 沒接管
+        # 到鍵盤」還是「接管了但對面的 CLI 正在忙、不收輸入」——否則只能猜。
+        self.kbd_label = tk.Label(self.termpane, text="", font=self.mono,
+                                  fg=MUTED, bg=CARD, anchor="w")
+        self.kbd_label.pack(fill="x", padx=10, pady=(0, 6))
         self._keep_keyboard()
 
         self._embed = None
@@ -1240,9 +1246,25 @@ class LauncherUI:
                     and winembed is not None
                     and winembed.app_is_foreground(emb.hwnd)):
                 self.term_host.focus_force()
+            self._update_kbd_hint()
         except Exception:  # noqa: BLE001 — 焦點顧不到不該讓 App 出錯
             pass
         self.root.after(300, self._keep_keyboard)
+
+    def _update_kbd_hint(self) -> None:
+        lab = getattr(self, "kbd_label", None)
+        if lab is None:
+            return
+        emb = self._embed
+        if emb is None or not emb.alive or not self.termpane.winfo_ismapped():
+            lab.config(text="")
+            return
+        sess = self._current_session()
+        if self.root.focus_get() is self.term_host and sess is not None:
+            lab.config(text=f"⌨ 鍵盤已接管 → {sess.kind.label} · {sess.id}"
+                            f"（打不出字代表對面的 CLI 正在忙）", fg=GREEN)
+        else:
+            lab.config(text="⌨ 鍵盤未接管 — 點一下終端機區", fg=GOLD)
 
     def _current_session(self):
         """鍵盤要送到哪條 session。
@@ -1296,6 +1318,28 @@ class LauncherUI:
         self._embed.fit(self.term_host.winfo_width(), self.term_host.winfo_height())
 
     # ── 進度輪詢 ────────────────────────────────────────────────────────────
+    def _progress_is_stale(self) -> bool:
+        """這份進度是不是「這次開 App 之前」留下的。
+
+        抽成獨立函式是為了測得到——原本寫在 `poll_progress()` 裡，測試只能驗
+        `_events_mtime()` 這種輔助函式，把判斷改成 `False` 照樣全綠（變異測試抓不到）。
+        """
+        return self._events_mtime() < getattr(self, "_app_started_at", 0)
+
+    def _events_mtime(self) -> float:
+        try:
+            return self._events_log().stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _events_when(self) -> str:
+        """事件檔最後更新的時間，讓使用者一眼看出這份進度有多舊。"""
+        ts = self._events_mtime()
+        if not ts:
+            return ""
+        from datetime import datetime
+        return datetime.fromtimestamp(ts).strftime("%m/%d %H:%M")
+
     def _events_log(self) -> Path:
         return active_project_dir() / "log" / "events.jsonl"
 
@@ -1339,8 +1383,15 @@ class LauncherUI:
             bar = "".join("▓" if i <= model["marker"] else "░"
                           for i in range(model["total"] + 1))
             colour = {"escalated": RED, "done": GREEN}.get(model["state"], GOLD)
+            # **標明這是不是「這次開 App 之後」的進度。** 事件檔留在專案資料夾裡，
+            # 所以重開 App 會直接看到上一輪跑到哪——使用者無從分辨那是現在還是上次的，
+            # 會以為任務正在跑。用事件檔的更新時間跟 App 啟動時間比對。
+            stale = self._progress_is_stale()
+            prefix = "上次執行　" if stale else ""
+            if stale:
+                colour = MUTED
             self.prog_bar.config(
-                text=f"Phase {model['marker']}/{model['total']} {bar} {model['current_name']}",
+                text=f"{prefix}Phase {model['marker']}/{model['total']} {bar} {model['current_name']}",
                 fg=colour)
             # 不再列「已完成：[0, 1, 2]」——上面的進度條已經表達同一件事，
             # 再用一串裸數字重複一次只是佔位子又難看。
@@ -1354,7 +1405,13 @@ class LauncherUI:
             # 沒有細節可講時的墊字要跟狀態一致——一律寫「執行中…」的話，
             # 跑完了下面還說執行中，跟上面那條變綠的進度條互相矛盾。
             idle = {"done": "已完成", "escalated": "已中止"}.get(model["state"], "執行中…")
-            self.prog_detail.config(text="　".join(bits) or idle)
+            when = self._events_when()
+            detail = "　".join(bits) or idle
+            # 細節列一律用 MUTED——新舊之分已經由上面那條進度條的顏色與
+            # 「上次執行」前綴表達了。（原本寫成 `MUTED if stale else MUTED`，
+            # 兩邊一樣、等於沒作用，卻讓人以為這裡有在區分。）
+            self.prog_detail.config(text=f"{detail}　{when}" if when else detail,
+                                    fg=MUTED)
             running = model["state"] == "running"
             self.abort_btn.config(state="normal" if running else "disabled",
                                   fg=CHAMPAGNE if running else MUTED)
