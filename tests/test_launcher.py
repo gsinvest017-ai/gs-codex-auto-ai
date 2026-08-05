@@ -926,3 +926,217 @@ class TestTrustProjectDir:
         state.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(launcher, "CLAUDE_STATE", state)
         assert launcher.trust_project_dir(tmp_path / "empty") is True
+
+
+# **不要用「建一個 Tk root 試試看」來偵測**：在 Windows 上建完再 destroy 之後，
+# 後續的 `tk.Tk()` 會壞成 `Can't find a usable init.tcl`，等於為了偵測把要測的
+# 東西弄壞。看環境變數就夠了——Linux CI 沒有 DISPLAY，Windows 一定有桌面。
+requires_display = pytest.mark.skipif(
+    os.name != "nt" and not os.environ.get("DISPLAY"),
+    reason="需要圖形介面（Linux CI 是 headless；verify-windows 會跑）")
+
+
+@requires_display
+class TestPrimaryButton:
+    """`tk.Button` 只吃單一字型，做不出「大標＋小字說明」，暗色主題下自帶的邊框
+    也很突兀。改用 Frame + 兩個 Label 自己組，但對外要維持 tk.Button 的介面，
+    `refresh()` / `_set_actions_enabled()` 才不用改。"""
+
+    @pytest.fixture(scope="class")
+    def root(self):
+        import tkinter as tk
+        r = tk.Tk()
+        r.withdraw()
+        yield r
+        r.destroy()
+
+    def _btn(self, root, clicks):
+        from tkinter import font as tkfont
+        return launcher.PrimaryButton(root, "啟動新任務", "先產規格 → 七階段自動開發",
+                                      lambda: clicks.append(1),
+                                      tkfont.Font(size=14), tkfont.Font(size=9))
+
+    def test_state_round_trips_like_tk_button(self, root):
+        b = self._btn(root, [])
+        assert b.cget("state") == "normal"
+        b.config(state="disabled")
+        assert b.cget("state") == "disabled"
+        b.config(state="normal")
+        assert b.cget("state") == "normal"
+
+    def test_disabled_button_does_not_fire(self, root):
+        clicks = []
+        b = self._btn(root, clicks)
+        b.config(state="disabled")
+        b._click()
+        assert clicks == [], "停用了還是被按下去"
+        b.config(state="normal")
+        b._click()
+        assert clicks == [1]
+
+    def test_can_be_activated_from_the_keyboard(self, root):
+        """`tk.Button` 本來就能 Tab 過去按 Space/Enter；自己用 Frame 組要補回來，
+        否則只剩滑鼠能按。
+
+        驗綁定而不是 `event_generate`：按鍵事件要真的有焦點才會派送，而測試用的
+        root 是 withdrawn 的，模擬出來的結果不可靠（第一版就是這樣一直 0 次）。
+        """
+        b = self._btn(root, [])
+        assert b.frame.cget("takefocus") in (1, "1", True), "Tab 不過去"
+        bound = set(b.frame.bind())
+        assert {"<Key-Return>", "<Key-space>"} <= bound, f"沒綁鍵盤啟動：{sorted(bound)}"
+
+    def test_hover_is_ignored_while_disabled(self, root):
+        b = self._btn(root, [])
+        b.config(state="disabled")
+        off = b.frame.cget("bg")
+        b._paint(launcher.GOLD_HOVER)
+        assert b.frame.cget("bg") == off, "停用中還會 hover 變色"
+
+
+class TestChecksRunOffTheUiThread:
+    """`gather_checks()` 會叫起好幾個子行程，每個都有秒級逾時。以前在 `__init__`
+    同步跑完才畫 UI，App 開起來要卡好幾秒才點得到輸入框。"""
+
+    class _UI:
+        _apply_checks = launcher.LauncherUI._apply_checks
+        _poll_checks = launcher.LauncherUI._poll_checks
+
+        def __init__(self):
+            self._checking = True
+            self.rows = {}
+            self.msgs = []
+            self.after_calls = []
+            self.btn_state = []
+
+            class _S:
+                def __init__(self, out):
+                    self.out = out
+
+                def config(self, **kw):
+                    self.out.append(kw.get("text", ""))
+
+            class _B:
+                def __init__(self, out):
+                    self.out = out
+
+                def config(self, **kw):
+                    self.out.append(kw.get("state"))
+
+            class _R:
+                def __init__(self, out):
+                    self.out = out
+
+                def after(self, ms, fn):
+                    self.out.append(ms)
+
+            self.status = _S(self.msgs)
+            self.launch_btn = _B(self.btn_state)
+            self.root = _R(self.after_calls)
+
+    def test_polls_again_while_the_worker_is_still_running(self):
+        ui = self._UI()
+        ui._checks_result = None
+        ui._poll_checks()
+        assert ui.after_calls, "結果還沒好就該再排一次輪詢"
+        assert ui._checking is True
+
+    def test_applies_the_result_once_it_arrives(self):
+        ui = self._UI()
+        ui._checks_result = [{"key": "claude", "ok": True, "msg": "ok", "critical": True}]
+        ui._poll_checks()
+        assert ui._checking is False
+        assert ui.btn_state == ["normal"]
+
+    def test_a_failed_check_run_does_not_leave_it_stuck(self):
+        """worker 掛掉會回空 list——不能就讓 UI 永遠停在「檢查中…」。"""
+        ui = self._UI()
+        ui._checks_result = []
+        ui._poll_checks()
+        assert ui._checking is False
+        assert any("重新檢查" in m for m in ui.msgs)
+
+
+class TestBuildDoesNotRunSubprocesses:
+    """`_build()` 以前呼叫 `gather_checks()` **只為了拿列的名字**——等於為了畫 UI
+    去跑一輪 `codex login status` / `gh auth status` / 探 python，ok/msg 立刻丟掉。
+    既阻塞（在 `mainloop()` 之前）又白做，正是「開啟要等很久」的主因。"""
+
+    def test_check_rows_needs_no_subprocess(self, monkeypatch):
+        monkeypatch.setattr(launcher, "_run", lambda *a, **k: pytest.fail("跑了子行程"))
+        monkeypatch.setattr(launcher, "_which", lambda n: pytest.fail("查了 PATH"))
+        rows = launcher.check_rows()
+        assert [r[0] for r in rows] == [c[0] for c in launcher.CHECKS]
+        assert all(isinstance(r[2], bool) for r in rows)
+
+    def test_rows_and_results_cannot_diverge(self, monkeypatch):
+        """兩邊共用同一份 CHECKS——分開維護就會出現「有列沒結果」的靜默落差。"""
+        monkeypatch.setattr(launcher, "_run_check", lambda key: (True, "ok"))
+        assert [r[0] for r in launcher.check_rows()] == \
+               [c["key"] for c in launcher.gather_checks()]
+
+    def test_one_broken_check_does_not_drop_the_rest(self, monkeypatch):
+        def flaky(key):
+            if key == "codex":
+                raise RuntimeError("炸了")
+            return True, "ok"
+
+        monkeypatch.setattr(launcher, "_run_check", flaky)
+        checks = launcher.gather_checks()
+        assert len(checks) == len(launcher.CHECKS), "一項壞掉整排就不見了"
+        bad = next(c for c in checks if c["key"] == "codex")
+        assert bad["ok"] is False and "炸了" in bad["msg"]
+
+
+class TestSetupIsNotReentrant:
+    """`on_setup()` 改成非同步之後，卡頓時連點兩下會開出**兩個**設定視窗、
+    甚至同時跑兩份安裝流程（`run_setup()` 每次都 Popen 一個新終端機）。"""
+
+    class _UI:
+        on_setup = launcher.LauncherUI.on_setup
+        _poll_setup = launcher.LauncherUI._poll_setup
+
+        def __init__(self):
+            self.threads = 0
+
+            class _S:
+                def config(self, **kw):
+                    pass
+
+            class _R:
+                def after(self, ms, fn):
+                    pass
+
+            self.status, self.root = _S(), _R()
+
+        def refresh(self):
+            self.refreshed = getattr(self, "refreshed", 0) + 1
+
+        def _apply_checks(self, checks):
+            self.applied = getattr(self, "applied", 0) + 1
+
+    def test_second_click_while_busy_is_ignored(self, monkeypatch):
+        started = []
+        monkeypatch.setattr(launcher.threading, "Thread",
+                            lambda target, daemon=False: type(
+                                "T", (), {"start": lambda s: started.append(1)})())
+        ui = self._UI()
+        ui.on_setup()
+        ui.on_setup()
+        ui.on_setup()
+        assert started == [1], f"連點就開了 {len(started)} 份設定流程"
+
+    def test_clears_the_guard_after_finishing(self, monkeypatch):
+        opened = []
+        monkeypatch.setattr(launcher, "run_setup", lambda: opened.append(1))
+        monkeypatch.setattr(launcher.threading, "Thread",
+                            lambda target, daemon=False: type(
+                                "T", (), {"start": lambda s: None})())
+        ui = self._UI()
+        ui.on_setup()
+        ui._setup_checks = [{"key": "claude", "ok": False, "critical": True, "msg": ""}]
+        ui._poll_setup()
+        assert ui._setting_up is False, "旗標沒清，之後再也按不動"
+        assert opened == [1]
+        assert getattr(ui, "refreshed", 0) == 0,             "又叫了 refresh()，等於一次點擊跑兩遍環境檢查"
+        assert getattr(ui, "applied", 0) == 1, "剛拿到的結果沒套上去"
