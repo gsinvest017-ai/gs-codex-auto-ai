@@ -156,3 +156,36 @@ def test_gate_does_not_emit_terminal_error_event(tmp_path, monkeypatch):
     kinds = [json.loads(line)["event_type"] for line in events.splitlines() if line.strip()]
     assert "error" not in kinds
     assert "tool_call" in kinds
+
+
+def test_gate_batch_is_one_based(tmp_path, monkeypatch):
+    """`--batch` 以前是 0-based，但 plan 輸出與 skill 文件都講「第 N 批」。
+
+    語義不符的後果：`--batch 1` 檢查的是第 2 批（還沒建的檔），整個 Phase 5 都在
+    檢查不存在的東西，語法保護形同虛設。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("def bad(:\n", encoding="utf-8")
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps([
+        {"id": "FN1", "file": "src/a.py", "owner_file": "src/a.py", "deps": []},
+        {"id": "FN2", "file": "src/b.py", "owner_file": "src/b.py", "deps": ["FN1"]},
+    ]), encoding="utf-8")
+
+    first = run_build.cmd_gate(Namespace(files=[], manifest=str(man), batch=1, run_id="r"))
+    assert first["status"] == "ok", f"第 1 批應該只檢查 a.py：{first}"
+
+    second = run_build.cmd_gate(Namespace(files=[], manifest=str(man), batch=2, run_id="r"))
+    assert second["status"] == "syntax_error", f"第 2 批的 b.py 是壞的：{second}"
+
+
+def test_gate_batch_zero_is_rejected(tmp_path, monkeypatch):
+    """0 要明確報錯，不能默默當成第 1 批——那會讓 off-by-one 靜默地繼續存在。"""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps([{"id": "FN1", "file": "src/a.py",
+                                "owner_file": "src/a.py", "deps": []}]), encoding="utf-8")
+    out = run_build.cmd_gate(Namespace(files=[], manifest=str(man), batch=0, run_id="r"))
+    assert out["status"] == "error" and "從 1 開始" in out["reason"]

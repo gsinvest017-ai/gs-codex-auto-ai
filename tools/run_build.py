@@ -134,10 +134,15 @@ def cmd_gate(args) -> dict:
             root = _project_dir(); paths = _paths(root)
             orch = _build_orch(paths, _resolve_run_id(paths, args.run_id))
             batches = orch.plan_build(fns)
-            if args.batch < 0 or args.batch >= len(batches):
+            # **1-based**：plan 的輸出與 skill 文件都講「第 N 批」，而這裡以前是
+            # 0-based——`--batch 1` 檢查的其實是第 2 批（還沒建的檔），等於整個
+            # Phase 5 都在檢查不存在的東西，語法保護形同虛設。兩邊語義對齊，
+            # 並明確拒絕 0 而不是默默當成第 1 批。
+            if args.batch < 1 or args.batch > len(batches):
                 return {"status": "error",
-                        "reason": f"batch {args.batch} 超出範圍（共 {len(batches)} 批）"}
-            manifest_files = [a["owner_file"] for a in batches[args.batch]
+                        "reason": (f"batch {args.batch} 超出範圍："
+                                   f"批次從 1 開始，共 {len(batches)} 批")}
+            manifest_files = [a["owner_file"] for a in batches[args.batch - 1]
                               if a.get("owner_file")]
         files.extend(manifest_files)
 
@@ -230,7 +235,7 @@ def main(argv=None) -> int:
     g2.add_argument("--files", nargs="*", help="要檢查的檔案（相對專案根或絕對路徑）")
     g2.add_argument("--manifest", help="改由 manifest 取檔案清單")
     g2.add_argument("--batch", type=int, default=None,
-                    help="只檢查第 N 批的 owner_file（需搭配 --manifest）")
+                    help="只檢查第 N 批的 owner_file（**從 1 開始**，需搭配 --manifest）")
     g2.add_argument("--run-id")
     args = ap.parse_args(argv)
 
