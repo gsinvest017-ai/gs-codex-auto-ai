@@ -263,3 +263,42 @@ def test_real_failure_output_counts_as_having_run(self=None):
     """測試真的跑了而且失敗——不能被當成工具層失敗，否則真缺陷會被當環境問題。"""
     r = rl.Ran(1, "collected 3 items\nFAILED tests/t.py::a - assert 1 == 2", "")
     assert r.ran_pytest()
+
+
+# ── shell=True + 正斜線路徑（流水線回報的框架 bug #6）────────────────────────
+import os          # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest      # noqa: E402
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe 才有正斜線問題")
+def test_forward_slash_exe_actually_runs_under_cmd(tmp_path):
+    """對照組：同一支腳本，正斜線呼叫在 cmd.exe 下會失敗，換過反斜線才跑得起來。"""
+    d = tmp_path / "bin"
+    d.mkdir()
+    (d / "hello.bat").write_text("@echo off\r\necho RAN_OK\r\n", encoding="utf-8")
+    rel = "bin/hello.bat"
+
+    before = subprocess.run(rel, shell=True, cwd=str(tmp_path),
+                            capture_output=True, text=True, timeout=60)
+    after = subprocess.run(rl.win_shell_cmd(rel), shell=True, cwd=str(tmp_path),
+                           capture_output=True, text=True, timeout=60)
+
+    assert "RAN_OK" not in (before.stdout or ""), (
+        "對照組沒壞——若 cmd.exe 本來就吃正斜線，這個修正就不必要了")
+    assert "RAN_OK" in (after.stdout or ""), f"換過反斜線就該跑得起來：{after!r}"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 改寫")
+def test_win_shell_cmd_only_touches_the_executable():
+    """參數裡的正斜線可能是旗標或要傳給程式的路徑，不能一起改。"""
+    got = rl.win_shell_cmd(".venv/Scripts/python -m pytest tests/tools -q")
+    assert got == r".venv\Scripts\python -m pytest tests/tools -q"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 改寫")
+def test_win_shell_cmd_leaves_bare_commands_and_urls_alone():
+    assert rl.win_shell_cmd("pytest -q") == "pytest -q"
+    assert rl.win_shell_cmd("curl https://x/y -o a") == "curl https://x/y -o a"
+    assert rl.win_shell_cmd("") == ""

@@ -146,12 +146,32 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def win_shell_cmd(cmd: str) -> str:
+    """Windows 上把**開頭那個執行檔路徑**的正斜線換成反斜線。
+
+    `shell=True` 在 Windows 上是 `cmd.exe /c <cmd>`，而 cmd.exe 不吃正斜線開頭的
+    路徑——`.venv/Scripts/python -m pytest` 會直接回「系統找不到指定的路徑」。
+    CLAUDE.md 裡的範例、skill 文件與 POSIX 習慣都寫正斜線，所以這個地雷是必然會踩的。
+
+    只動第一個 token（真正交給 cmd.exe 當程式名的那個），後面的參數原封不動——
+    參數裡的正斜線常常是**旗標**（`/c`）或**要傳給程式的路徑**，改了會壞事。
+    非 Windows、看起來不像路徑（沒有 `/`）、或是 URL 的一律不碰。
+    """
+    if os.name != "nt" or not cmd[:1].strip():
+        return cmd
+    head, sep, rest = cmd.partition(" ")
+    if "://" in head or "/" not in head:
+        return cmd
+    return head.replace("/", "\\") + sep + rest
+
+
 def _run(cmd: str, cwd: str, timeout: int) -> Ran:
     """跑一條 shell 指令並擷取輸出；**逾時不拋例外**，回傳 timed_out 結果。
 
     這是本工具唯一的子行程入口——裸的 ``subprocess.run`` 沒有 timeout，
     一個 hang 住的 `codex exec` 會無聲卡死整條 pipeline（沒有任何訊號）。
     """
+    cmd = win_shell_cmd(cmd)
     kwargs: dict = dict(shell=True, cwd=cwd, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True,
                         encoding="utf-8", errors="replace")
