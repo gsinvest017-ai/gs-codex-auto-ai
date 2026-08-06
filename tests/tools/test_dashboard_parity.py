@@ -64,6 +64,24 @@ SCENARIOS = {
         {"event_type": "phase_start", "phase": "phase5"},
         {"event_type": "tool_call", "tool": "codex_runner"},
     ],
+    # 使用者實測：七階段全跑完，卡片卻是紅的、還掛著早就過期的「錯誤：no_progress」。
+    "phase6 escalate 之後修好、七階段全過（該顯示綠的）": [
+        {"event_type": "phase_start", "phase": "phase6"},
+        {"event_type": "error", "phase": "phase6", "reason": "no_progress"},
+        {"event_type": "phase_end", "phase": "phase6", "status": "success"},
+        {"event_type": "phase_start", "phase": "phase7"},
+        {"event_type": "phase_end", "phase": "phase7", "status": "success"},
+    ],
+    "phase6 escalate 而且沒修好（該顯示紅的）": [
+        {"event_type": "phase_start", "phase": "phase6"},
+        {"event_type": "error", "phase": "phase6", "reason": "no_progress"},
+        {"event_type": "phase_end", "phase": "phase6", "status": "failure"},
+    ],
+    "沒掛在任何 phase 底下的錯誤（清不掉）": [
+        {"event_type": "phase_start", "phase": "phase7"},
+        {"event_type": "error", "reason": "boom"},
+        {"event_type": "phase_end", "phase": "phase7", "status": "success"},
+    ],
     "修復迴圈 tick 與成本": [
         {"event_type": "phase_start", "phase": "phase6"},
         {"event_type": "loop_tick", "phase": "phase6", "iteration": 2,
@@ -157,3 +175,35 @@ def test_division_warning_actually_fires():
     assert d["division_warning"] is True
     ok = em.division_stats(SCENARIOS["正常推進到 phase5"])
     assert ok["division_warning"] is False
+
+
+def test_recovered_escalation_does_not_leave_the_card_red():
+    """七階段跑完就要是綠的——中途被修好的 escalation 不該留成永久紅字。
+
+    以前 `failed` 是全域 latch，一個 error 事件就把整輪判死；使用者實測正是
+    七階段全過、卡片仍紅、下方掛著「錯誤：no_progress」。
+    """
+    events = SCENARIOS["phase6 escalate 之後修好、七階段全過（該顯示綠的）"]
+    model = em.build_model(events, log_exists=True)
+    assert model["failed"] is False, "被修好的 escalation 不該讓整輪算失敗"
+    assert model["state"] == em.STATE_DONE
+    assert model["errors"] == [], f"過期的錯誤不該還掛在畫面上：{model['errors']}"
+    lines = " | ".join(em.render_summary_lines(
+        em.summarize(events), log_exists=True, errors=model["errors"]))
+    assert "✓ 完成" in lines and "no_progress" not in lines
+
+
+def test_unrecovered_escalation_still_shows_red():
+    """反向保護：真的沒修好時不能被這個修正一起洗白。"""
+    model = em.build_model(SCENARIOS["phase6 escalate 而且沒修好（該顯示紅的）"],
+                           log_exists=True)
+    assert model["failed"] is True and model["state"] == em.STATE_ESCALATED
+    assert [e["reason"] for e in model["errors"]] == ["no_progress"]
+
+
+def test_run_level_error_has_no_phase_to_clear_it():
+    """沒帶 phase 的錯誤沒有「那個 phase 後來成功了」可以清它，必須留著。"""
+    model = em.build_model(SCENARIOS["沒掛在任何 phase 底下的錯誤（清不掉）"],
+                           log_exists=True)
+    assert model["failed"] is True
+    assert [e["reason"] for e in model["errors"]] == ["boom"]
