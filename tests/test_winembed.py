@@ -581,7 +581,15 @@ class TestAppIsForeground:
         u32 = winembed._u32
         monkeypatch.setattr(u32, "GetForegroundWindow", lambda: fg)
         monkeypatch.setattr(u32, "GetAncestor", lambda h, f: ga_root)
-        monkeypatch.setattr(u32, "IsChild", lambda a, b: 1 if is_child else 0)
+        self.is_child_args = []
+
+        def _is_child(parent, child):
+            # 記下參數順序：`IsChild(parent, child)` 是 Win32 的簽名，接反了語意
+            # 就完全相反（問「前景視窗是不是嵌入視窗的祖先」變成問反過來）。
+            self.is_child_args.append((parent, child))
+            return 1 if is_child else 0
+
+        monkeypatch.setattr(u32, "IsChild", _is_child)
 
     def test_true_when_ga_root_is_the_foreground_window(self, monkeypatch):
         self._patch(monkeypatch, fg=900, ga_root=900)
@@ -595,6 +603,8 @@ class TestAppIsForeground:
     def test_true_when_foreground_sits_under_the_child(self, monkeypatch):
         self._patch(monkeypatch, fg=777, ga_root=555, is_child=True)
         assert winembed.app_is_foreground(123) is True
+        assert self.is_child_args == [(777, 123)], (
+            f"要問「前景視窗是不是 123 的祖先」，參數接反語意就相反：{self.is_child_args}")
 
     def test_false_when_a_different_app_is_foreground(self, monkeypatch):
         """反向保護：別的程式在前面時不能判 True，否則會去搶使用者的鍵盤。"""

@@ -85,30 +85,6 @@ class Ran:
     def text(self) -> str:
         return (self.stdout or "") + "\n" + (self.stderr or "")
 
-    @property
-    def launch_failed(self) -> bool:
-        """指令**根本沒跑起來**（不是跑了之後結果不好）。
-
-        這兩件事語意相反，外觀卻一樣：都是非零 returncode、都沒有可解析的失敗
-        清單。分不出來的話，「我連 pytest 都叫不動」會被當成「測試壞了」，
-        每輪合成同一個缺陷 → no-progress → escalated。實測就是全綠的測試被判失敗
-        （skill 範例給的正斜線 venv 路徑，cmd.exe 認不得）。
-
-        POSIX shell 用 127 表示 command not found；cmd.exe 給 1 或 9009，
-        所以還要認訊息。
-        """
-        if self.timed_out:
-            return False
-        if self.returncode in (127, 9009):
-            return True
-        low = self.text.lower()
-        return any(s in low for s in (
-            "is not recognized as an internal or external command",
-            "command not found",
-            "the system cannot find the path specified",
-            "the system cannot find the file specified",
-        ))
-
     def ran_pytest(self) -> bool:
         """輸出裡有沒有 pytest 真的跑過的痕跡。
 
@@ -163,10 +139,29 @@ def win_shell_cmd(cmd: str) -> str:
     """
     if os.name != "nt" or not cmd[:1].strip():
         return cmd
-    head, sep, rest = cmd.partition(" ")
+    # **要切在第一個「引號外」的空白，不是第一個空白。** Windows 上帶空白的路徑
+    # （`"C:/Users/Jane Doe/.venv/Scripts/python" -m pytest`）極常見，naive 的
+    # partition(" ") 只會轉換空白之前那半段，留下一個半吊子的混合路徑。
+    #
+    # 誠實記錄：實測 cmd.exe **容忍**引號內混用 `/` 與 `\`，所以那個半吊子結果照樣
+    # 跑得起來，我構造不出它真的失敗的案例（見對應測試）。這裡改的理由是「整個
+    # 執行檔 token 一起轉換」說得清自己在做什麼，不是修掉了一個會爆的 bug。
+    if cmd.startswith('"'):
+        end = cmd.find('"', 1)
+        if end == -1:                       # 引號沒收尾，別亂動
+            return cmd
+        head, rest = cmd[:end + 1], cmd[end + 1:]
+        sep = ""
+    else:
+        head, sep, rest = cmd.partition(" ")
     if "://" in head or "/" not in head:
         return cmd
     return head.replace("/", "\\") + sep + rest
+
+
+def _slug(text: str) -> str:
+    """把 run_id / phase 變成安全的資料夾名（它們最終會進檔案系統路徑）。"""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text)[:80] or "run"
 
 
 def final_reason(reason: str | None, tool_fail: str, status: str) -> str | None:
@@ -352,11 +347,12 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
                 # 工具層失敗 ≠ 語意結論。硬報成測試失敗的話，缺陷每輪都一樣，
                 # 迴圈會以 no_progress 收場，把「我叫不動 pytest」講成「測試修不動」。
                 #
-                # **`ran_pytest()` 有一票否決權**，`launch_failed` 不能自己成立：
-                # 它比對的 "the system cannot find the file specified" 正是 Windows
-                # `FileNotFoundError` 的標準文字，會出現在**真的**測試失敗的
-                # traceback 裡（開不存在的檔案那種測試）。讓它短路過 `ran_pytest()`
-                # 的話，真實缺陷會被蓋成 tool:cannot-run-tests——剛好是 M1 的反面。
+                # **只用 `ran_pytest()` 判**。曾經另有一個 `launch_failed` 比對
+                # shell 的錯誤訊息，但那條路有兩個問題：訊息會在地化（中文 Windows
+                # 一條都對不上），而且 "the system cannot find the file specified"
+                # 正是 Windows FileNotFoundError 的標準文字，會出現在**真的**測試
+                # 失敗的 traceback 裡，反而把真缺陷蓋成工具層失敗。
+                # 「pytest 有沒有留下痕跡」跟語系無關，也不會被 traceback 內容騙。
                 toolfail_box[0] = (f"測試指令無法執行：{cmd}\n"
                                    f"{proc.text.strip()[:400]}")
                 defects = ["tool:cannot-run-tests"]
@@ -474,7 +470,10 @@ def run(args) -> dict:
     # **放進專案內**：`tempfile.mkdtemp()` 不受 `--workdir` 控制，恆落在系統 temp，
     # 而 Codex 的 sandbox 只寫得到工作目錄——reviewer 寫不出 {review_out}，
     # 迴圈就會把「沒產出」當成「沒缺陷」。放在 log/ 底下同時也留了現場可查。
-    tmp = str(Path(workdir) / "log" / "run_loop")
+    # 帶上 run_id / phase：同一個 workdir 上有兩個 run_loop 同時跑時（重疊的 run、
+    # 未來的並行使用）不會互相蓋掉對方的 defects.txt / review_out.txt。
+    # 換掉 mkdtemp 是為了 sandbox 可寫性，但不該連隔離性一起丟掉。
+    tmp = str(Path(workdir) / "log" / "run_loop" / _slug(f"{run_id}-{phase_label}"))
     try:
         Path(tmp).mkdir(parents=True, exist_ok=True)
     except OSError:

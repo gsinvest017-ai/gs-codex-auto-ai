@@ -181,30 +181,28 @@ class TestToolFailureIsNotAVerdict:
     """實測跑出來的三個坑是同一類：run_loop 把「指令沒跑起來」當成「東西壞了 /
     東西是好的」。這會讓流水線在事實相反時給出相反結論——全綠的測試被判
     escalated/no_progress，或 reviewer 沒產出被當成沒缺陷（假通過）。
+
+    判準只有 `ran_pytest()` 一條。曾經另外比對 shell 的錯誤訊息，但那條路訊息會
+    在地化、又會被真實 traceback 的內容騙，已經拿掉。
     """
 
     def test_posix_command_not_found(self):
-        assert rl.Ran(127, "", "sh: pytest: command not found").launch_failed
+        assert not rl.Ran(127, "", "sh: pytest: command not found").ran_pytest()
 
     def test_windows_not_recognized(self):
         r = rl.Ran(1, "", "'C:/x/.venv/Scripts/python' is not recognized as an "
                           "internal or external command,")
-        assert r.launch_failed, "正斜線 venv 路徑打不開，就是這個訊息"
+        assert not r.ran_pytest(), "正斜線 venv 路徑打不開，pytest 根本沒跑"
 
     def test_windows_cannot_find_path(self):
-        assert rl.Ran(3, "", "The system cannot find the path specified.").launch_failed
+        assert not rl.Ran(3, "", "The system cannot find the path specified.").ran_pytest()
 
-    def test_real_test_failure_is_not_a_launch_failure(self):
+    def test_real_test_failure_counts_as_having_run(self):
         """測試真的失敗時不能誤判成工具層失敗——那會讓真缺陷被當成環境問題。"""
-        r = rl.Ran(1, "FAILED tests/test_a.py::test_x - assert 1 == 2", "")
-        assert not r.launch_failed
+        assert rl.Ran(1, "FAILED tests/test_a.py::test_x - assert 1 == 2", "").ran_pytest()
 
-    def test_timeout_is_not_a_launch_failure(self):
-        """逾時代表它跑起來了只是太久，已經有 review:timeout 在處理。"""
-        assert not rl.Ran(-1, "", "", timed_out=True).launch_failed
-
-    def test_clean_run_is_not_a_launch_failure(self):
-        assert not rl.Ran(0, "5 passed", "").launch_failed
+    def test_clean_run_counts_as_having_run(self):
+        assert rl.Ran(0, "5 passed", "").ran_pytest()
 
 
 def test_unlaunchable_test_command_is_reported_as_tool_failure(tmp_path, monkeypatch):
@@ -255,7 +253,6 @@ def test_localised_shell_error_still_detected(tmp_path, monkeypatch):
     第一版就是只比英文，在這台機器上完全失效。
     """
     r = rl.Ran(1, "", "系統找不到指定的路徑。")
-    assert not r.launch_failed, "英文樣式本來就對不上在地化訊息"
     assert not r.ran_pytest(), "沒有任何 pytest 痕跡 → 它根本沒跑"
 
 
@@ -349,8 +346,8 @@ class TestFinalReason:
         assert rl.final_reason("no_progress", "", "escalated") == "no_progress"
 
 
-class TestRanPytestVetoesLaunchFailed:
-    """`launch_failed` 不能自己成立——它會蓋掉真實的測試失敗。
+class TestRanPytestIsTheOnlySignal:
+    """判準只能是「pytest 有沒有留下痕跡」，不能比對 shell 的錯誤訊息。
 
     它比對的 "the system cannot find the file specified" 正是 Windows
     `FileNotFoundError` 的標準文字，會出現在**真的**測試失敗的 traceback 裡。
@@ -368,7 +365,9 @@ class TestRanPytestVetoesLaunchFailed:
     def test_real_pytest_failure_is_not_a_launch_failure(self):
         r = rl.Ran(1, self.REAL_FAILURE, "")
         assert r.ran_pytest(), "pytest 的招牌字串都在，它顯然跑過了"
-        assert r.launch_failed, "前提：字串比對確實會命中（所以才需要否決權）"
+        low = r.text.lower()
+        assert "the system cannot find the file specified" in low, (
+            "前提：這段輸出確實含有會被誤認成啟動失敗的字串")
 
     def test_defects_come_from_the_failing_test_not_the_tool(self, tmp_path, monkeypatch):
         """端到端：這種輸出要解析出真的失敗測試，不能報成 tool:cannot-run-tests。"""
@@ -389,3 +388,64 @@ class TestRanPytestVetoesLaunchFailed:
         assert not rl.Ran(9009, "", "'pytest' is not recognized as an internal or "
                                     "external command, operable program or batch "
                                     "file. error").ran_pytest()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 改寫")
+class TestWinShellCmdQuotedPaths:
+    """帶空白的路徑在 Windows 上極常見（`C:/Users/Jane Doe/...`）。
+
+    naive 的 `partition(" ")` 會切在路徑中間、把引號弄斷、斜線只改一半——
+    cmd.exe 照樣找不到，M5 想修的 bug 換一種路徑就復發。
+    """
+
+    def test_quoted_path_with_a_space_is_converted_whole(self):
+        got = rl.win_shell_cmd('"C:/Users/Jane Doe/.venv/Scripts/python" -m pytest')
+        assert got == r'"C:\Users\Jane Doe\.venv\Scripts\python" -m pytest', got
+
+    def test_whole_executable_token_is_converted_not_half_of_it(self, tmp_path):
+        """naive 的 `partition(" ")` 只會轉換路徑**空白之前**那半段。
+
+        **誠實記錄**：實測 cmd.exe 容忍引號內混用 `/` 與 `\`，所以那個半吊子的
+        結果照樣跑得起來——我構造不出它真的失敗的案例。這條測的是「整個執行檔
+        token 一起轉換」這個比較站得住腳的行為，不是宣稱修掉了一個會爆的 bug。
+        兩種寫法都能跑，但只有一種說得清自己在做什麼。
+        """
+        d = tmp_path / "with space"
+        d.mkdir()
+        (d / "hello.bat").write_text(
+            "@echo off" + chr(13) + chr(10) + "echo QUOTED_OK" + chr(13) + chr(10),
+            encoding="utf-8")
+        cmd = f'"{d.as_posix()}/hello.bat"'
+
+        head, sep, rest = cmd.partition(" ")
+        naive = head.replace("/", chr(92)) + sep + rest
+        fixed = rl.win_shell_cmd(cmd)
+
+        assert "/" in naive, f"naive 只轉了一半，路徑後段還留著正斜線：{naive}"
+        assert "/" not in fixed, f"整個 token 都該轉換：{fixed}"
+
+        ran = subprocess.run(fixed, shell=True, capture_output=True,
+                             text=True, timeout=60)
+        assert "QUOTED_OK" in (ran.stdout or ""), f"轉換後要照常跑：{ran!r}"
+
+    def test_arguments_after_a_quoted_path_are_untouched(self):
+        got = rl.win_shell_cmd('"C:/a b/python" -m pytest tests/tools --tb=short')
+        assert got.endswith("-m pytest tests/tools --tb=short"), got
+
+    def test_unterminated_quote_is_left_alone(self):
+        assert rl.win_shell_cmd('"C:/a b/python -m pytest') == '"C:/a b/python -m pytest'
+
+
+def test_concurrent_runs_do_not_share_scratch_files(tmp_path, monkeypatch):
+    """兩個 run_loop 打同一個 workdir 時不能互相蓋掉 defects/review_out。
+
+    換掉 `mkdtemp()` 是為了 Codex sandbox 的可寫性，但不該連隔離性一起丟掉。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    rl.run(_args(run_id="run-A", phase="6", review_cmd=OK, fix_cmd=OK, max_iters=1,
+                 workdir=str(tmp_path)))
+    rl.run(_args(run_id="run-B", phase="6", review_cmd=OK, fix_cmd=OK, max_iters=1,
+                 workdir=str(tmp_path)))
+    dirs = sorted(p.name for p in (tmp_path / "log" / "run_loop").iterdir() if p.is_dir())
+    assert len(dirs) == 2, f"兩個 run 應該各有自己的暫存區：{dirs}"
+    assert any("run-A" in d for d in dirs) and any("run-B" in d for d in dirs), dirs
