@@ -107,7 +107,8 @@ def cmd_gen_tests(args) -> dict:
         return {"status": "no_scenarios", "count": 0}
     body = ["# 由 run_build.py gen-tests 從 EARS scenario 生成（REVIEW-R3）。",
             "# 這些 stub 預設失敗，待 Phase 6 的 run_loop 驅動實作補齊。", ""]
-    body += [pv.stub_for(p) for p in props]
+    # 走 stubs_for 而不是逐個 stub_for——它保證整批名字唯一，中文場景名不會撞名互蓋
+    body += pv.stubs_for(props)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(body), encoding="utf-8")
