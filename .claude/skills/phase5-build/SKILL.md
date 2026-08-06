@@ -34,6 +34,7 @@ description: "Phase 5：根據架構文件並行派遣 function-builder agent �
 4. **每批跑完立刻過語法 gate（零 LLM、零測試成本）**——不要把錯誤累積到 Phase 6：
 
    ```bash
+   # <N> 是**第幾批，從 1 開始**（跟 plan 輸出的批次序號一致）
    python tools/run_build.py gate --manifest docs/fn-manifest.json --batch <N> --run-id <id>
    ```
    讀 stdout JSON：

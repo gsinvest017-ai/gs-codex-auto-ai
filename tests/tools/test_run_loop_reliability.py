@@ -174,3 +174,131 @@ def test_run_tolerates_namespace_without_new_flags(tmp_path, monkeypatch):
                      reviewer_model=None, fixer_model=None, available=None)
     out = rl.run(args)
     assert out["status"] in {"resolved", "escalated"}
+
+
+# ── 工具層失敗 ≠ 語意結論 ────────────────────────────────────────────────────
+class TestToolFailureIsNotAVerdict:
+    """實測跑出來的三個坑是同一類：run_loop 把「指令沒跑起來」當成「東西壞了 /
+    東西是好的」。這會讓流水線在事實相反時給出相反結論——全綠的測試被判
+    escalated/no_progress，或 reviewer 沒產出被當成沒缺陷（假通過）。
+    """
+
+    def test_posix_command_not_found(self):
+        assert rl.Ran(127, "", "sh: pytest: command not found").launch_failed
+
+    def test_windows_not_recognized(self):
+        r = rl.Ran(1, "", "'C:/x/.venv/Scripts/python' is not recognized as an "
+                          "internal or external command,")
+        assert r.launch_failed, "正斜線 venv 路徑打不開，就是這個訊息"
+
+    def test_windows_cannot_find_path(self):
+        assert rl.Ran(3, "", "The system cannot find the path specified.").launch_failed
+
+    def test_real_test_failure_is_not_a_launch_failure(self):
+        """測試真的失敗時不能誤判成工具層失敗——那會讓真缺陷被當成環境問題。"""
+        r = rl.Ran(1, "FAILED tests/test_a.py::test_x - assert 1 == 2", "")
+        assert not r.launch_failed
+
+    def test_timeout_is_not_a_launch_failure(self):
+        """逾時代表它跑起來了只是太久，已經有 review:timeout 在處理。"""
+        assert not rl.Ran(-1, "", "", timed_out=True).launch_failed
+
+    def test_clean_run_is_not_a_launch_failure(self):
+        assert not rl.Ran(0, "5 passed", "").launch_failed
+
+
+def test_unlaunchable_test_command_is_reported_as_tool_failure(tmp_path, monkeypatch):
+    """指令打不開時，reason 必須說是工具層問題，不能報成 no_progress。
+
+    實測情境：skill 範例給的正斜線 venv 路徑，cmd.exe 認不得 → pytest 從沒跑過，
+    但全綠的測試被判 escalated / no_progress，把人導向「測試修不動」的錯誤方向。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    nonexistent = '"C:/nope/.venv/Scripts/python" -m pytest'
+    out = rl.run(_args(review_cmd=nonexistent, fix_cmd=OK, max_iters=2, patience=2))
+    assert out["status"] == "escalated"
+    assert "tool_failed" in out["reason"], out["reason"]
+    assert "no_progress" not in out["reason"], "工具層失敗被報成 no_progress"
+    assert out.get("tool_failure"), "要留下原始錯誤讓人看得出是什麼指令打不開"
+    assert any("tool:cannot-run-tests" in d for d in out["final_defects"])
+
+
+def test_reviewer_producing_nothing_is_not_a_pass(tmp_path, monkeypatch):
+    """reviewer 沒產出 {review_out} 時不可判 resolved——那是假通過。
+
+    「說沒缺陷」與「根本沒產出」都是空的 {review_out}，但語意相反。
+    實測 Phase 4 因此出現兩次假通過。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    silent_fail = f'"{PY}" -c "raise SystemExit(1)"'
+    out = rl.run(_args(mode="review", phase="4", review_cmd=silent_fail,
+                       fix_cmd=OK, max_iters=1))
+    assert out["status"] != "resolved", "reviewer 沒產出卻判通過"
+    assert "tool_failed" in out["reason"], out["reason"]
+
+
+def test_reviewer_saying_no_defects_still_resolves(tmp_path, monkeypatch):
+    """相對照：reviewer 正常跑完、真的沒缺陷，就要收斂成 resolved。
+
+    不驗這條的話，上面那條可以靠「一律不通過」作弊過關。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    out = rl.run(_args(mode="review", phase="4", review_cmd=OK, fix_cmd=OK, max_iters=1))
+    assert out["status"] == "resolved", out
+
+
+def test_localised_shell_error_still_detected(tmp_path, monkeypatch):
+    """cmd.exe 的錯誤訊息會**在地化**（實測中文 Windows 給「系統找不到指定的路徑」），
+    rc 也只是 1——跟「測試失敗」外觀完全一樣。
+
+    所以判斷不能只比對英文訊息；要看 pytest 自己的招牌字串有沒有出現。
+    第一版就是只比英文，在這台機器上完全失效。
+    """
+    r = rl.Ran(1, "", "系統找不到指定的路徑。")
+    assert not r.launch_failed, "英文樣式本來就對不上在地化訊息"
+    assert not r.ran_pytest(), "沒有任何 pytest 痕跡 → 它根本沒跑"
+
+
+def test_real_failure_output_counts_as_having_run(self=None):
+    """測試真的跑了而且失敗——不能被當成工具層失敗，否則真缺陷會被當環境問題。"""
+    r = rl.Ran(1, "collected 3 items\nFAILED tests/t.py::a - assert 1 == 2", "")
+    assert r.ran_pytest()
+
+
+# ── shell=True + 正斜線路徑（流水線回報的框架 bug #6）────────────────────────
+import os          # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest      # noqa: E402
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe 才有正斜線問題")
+def test_forward_slash_exe_actually_runs_under_cmd(tmp_path):
+    """對照組：同一支腳本，正斜線呼叫在 cmd.exe 下會失敗，換過反斜線才跑得起來。"""
+    d = tmp_path / "bin"
+    d.mkdir()
+    (d / "hello.bat").write_text("@echo off\r\necho RAN_OK\r\n", encoding="utf-8")
+    rel = "bin/hello.bat"
+
+    before = subprocess.run(rel, shell=True, cwd=str(tmp_path),
+                            capture_output=True, text=True, timeout=60)
+    after = subprocess.run(rl.win_shell_cmd(rel), shell=True, cwd=str(tmp_path),
+                           capture_output=True, text=True, timeout=60)
+
+    assert "RAN_OK" not in (before.stdout or ""), (
+        "對照組沒壞——若 cmd.exe 本來就吃正斜線，這個修正就不必要了")
+    assert "RAN_OK" in (after.stdout or ""), f"換過反斜線就該跑得起來：{after!r}"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 改寫")
+def test_win_shell_cmd_only_touches_the_executable():
+    """參數裡的正斜線可能是旗標或要傳給程式的路徑，不能一起改。"""
+    got = rl.win_shell_cmd(".venv/Scripts/python -m pytest tests/tools -q")
+    assert got == r".venv\Scripts\python -m pytest tests/tools -q"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只在 Windows 改寫")
+def test_win_shell_cmd_leaves_bare_commands_and_urls_alone():
+    assert rl.win_shell_cmd("pytest -q") == "pytest -q"
+    assert rl.win_shell_cmd("curl https://x/y -o a") == "curl https://x/y -o a"
+    assert rl.win_shell_cmd("") == ""

@@ -10,7 +10,9 @@ check callables, and produces a VerificationReport.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 
@@ -177,7 +179,40 @@ def verify(
 # Stub generator
 # ---------------------------------------------------------------------------
 
-def stub_for(prop: Property) -> str:
+def safe_name(scenario_id: str) -> str:
+    r"""把 scenario id 變成合法的 Python 識別碼片段，**保留 CJK**。
+
+    以前是 ``[^A-Za-z0-9] -> _``，中文場景名整段被吃掉：
+    「情境：新增支出」與「情境：刪除支出」都變成同一個 ``______``，
+    產出的檔案裡後面的 def 靜默覆蓋前面的，測試數量無聲蒸發
+    （實測 23 個場景只剩 9 個唯一名字，14 個被吃掉）。
+
+    Python 3 的識別碼本來就吃 CJK（PEP 3131），所以改用 unicode 的 ``\W``：
+    只把真正不合法的字元換成底線。全部落空時退回 hash，寧可醜也不要撞名。
+    """
+    name = re.sub(r"\W", "_", scenario_id, flags=re.UNICODE)
+    if not name.strip("_"):
+        return "s_" + hashlib.sha1(scenario_id.encode("utf-8")).hexdigest()[:8]
+    return name
+
+
+def unique_names(scenario_ids: Sequence[str]) -> list[str]:
+    """保證整批名字互不相同——撞到就加 ``_2`` / ``_3``。
+
+    ``safe_name`` 讓撞名變罕見，但擋不住兩個場景真的同名（或只差在被正規化掉
+    的字元）。靜默覆蓋是這個 bug 最貴的部分，所以這裡機械性地把它變成不可能。
+    """
+    used: dict[str, int] = {}
+    out: list[str] = []
+    for sid in scenario_ids:
+        base = safe_name(sid)
+        n = used.get(base, 0) + 1
+        used[base] = n
+        out.append(base if n == 1 else f"{base}_{n}")
+    return out
+
+
+def stub_for(prop: Property, name: str | None = None) -> str:
     """Return a pytest test function source string for a Property.
 
     The generated function is named ``test_<sanitized_scenario_id>`` where
@@ -194,8 +229,7 @@ def stub_for(prop: Property) -> str:
             # THEN the loop stops and escalates
             assert False  # TODO
     """
-    safe_id = re.sub(r"[^A-Za-z0-9]", "_", prop.scenario_id)
-    lines: list[str] = [f"def test_{safe_id}():"]
+    lines: list[str] = [f"def test_{name or safe_name(prop.scenario_id)}():"]
 
     for text in prop.given:
         lines.append(f"    # GIVEN {text}")
@@ -207,3 +241,9 @@ def stub_for(prop: Property) -> str:
     lines.append("    assert False  # TODO")
 
     return "\n".join(lines) + "\n"
+
+
+def stubs_for(props: Sequence[Property]) -> list[str]:
+    """整批產生 stub，名字保證唯一。``gen-tests`` 一律走這條，不要逐個 stub_for。"""
+    names = unique_names([p.scenario_id for p in props])
+    return [stub_for(p, n) for p, n in zip(props, names)]

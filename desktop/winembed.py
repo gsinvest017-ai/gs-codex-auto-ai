@@ -240,6 +240,8 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
     # 會被截斷／變號。這道守門是負責任的（比對錯就會去搶別的程式的鍵盤），
     # 不能靠「handle 通常夠小所以剛好沒事」。
     _u32.GetForegroundWindow.restype = wintypes.HWND
+    _u32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
+    _u32.IsChild.restype = wintypes.BOOL
 
     def app_is_foreground(child_hwnd: int) -> bool:
         """`child_hwnd` 所屬的最上層視窗，現在是不是前景視窗。
@@ -248,8 +250,16 @@ if IS_WIN:  # pragma: no cover - 需要真的 Windows 才跑得到
         否則使用者切到別的程式時我們會硬把焦點拉回來。
         """
         try:
-            top = _u32.GetAncestor(child_hwnd, 2)     # GA_ROOT
-            return bool(top) and int(top) == int(_u32.GetForegroundWindow())
+            fg = int(_u32.GetForegroundWindow() or 0)
+            if not fg:
+                return False
+            top = int(_u32.GetAncestor(child_hwnd, 2) or 0)     # GA_ROOT
+            if top and top == fg:
+                return True
+            # 退路：前景視窗**就是**嵌進來的那個子視窗。reparent 沒成功（退回獨立
+            # 視窗）時會是這樣；只認 GA_ROOT 的話這台機器就永遠判成「App 不在最
+            # 前面」，看門狗一次都不會出手，使用者怎麼點都是「鍵盤未接管」。
+            return fg == int(child_hwnd) or bool(_u32.IsChild(fg, child_hwnd))
         except Exception:  # noqa: BLE001
             return False
 

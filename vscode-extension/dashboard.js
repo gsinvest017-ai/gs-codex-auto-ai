@@ -25,6 +25,7 @@ function summarizeEvents(lines) {
     lastTs: null,
   };
   const completed = new Set();
+  const failedPhases = new Set();   // -1 = 沒掛在任何 phase 底下的 run 層級錯誤
   let curPhase = null;
   for (const line of lines) {
     let ev;
@@ -33,8 +34,11 @@ function summarizeEvents(lines) {
     const p = phaseNum(ev.phase);
     if (t === "phase_start" && p !== null) { s.current = p; curPhase = p; }
     else if (t === "phase_end" && p !== null) {
-      if (ev.status === "success") completed.add(p);
-      else if (ev.status === "failure") s.failed = true;
+      // 成功就把該 phase 之前的錯誤清掉——以前 s.failed 是全域 latch，
+      // Phase 6 修復迴圈裡一次「下一輪就修好」的 escalation 會讓七階段跑完
+      // 之後畫面還是紅的（跟 events_model.py 的 failed_phases 同語意）。
+      if (ev.status === "success") { completed.add(p); failedPhases.delete(p); }
+      else if (ev.status === "failure") failedPhases.add(p);
       curPhase = p;
     } else if (t === "llm_call") {
       s.claude.calls += 1;
@@ -43,12 +47,14 @@ function summarizeEvents(lines) {
     } else if (t === "tool_call" && /codex/i.test(String(ev.tool || ""))) {
       s.codex.calls += 1;
       if ((p !== null ? p : curPhase) === 5) s.codexInPhase5 += 1;
-    } else if (t === "error") { s.failed = true; }
+    } else if (t === "error") { failedPhases.add(p !== null ? p : -1); }
     if (ev.iteration !== undefined && ev.iteration !== null) s.iteration = ev.iteration;
     if (ev.cumulative_cost_usd !== undefined && ev.cumulative_cost_usd !== null) s.cost = ev.cumulative_cost_usd;
     if (ev.timestamp) s.lastTs = ev.timestamp;
   }
   s.completed = [...completed].sort((a, b) => a - b);
+  s.failedPhases = [...failedPhases].sort((a, b) => a - b);
+  s.failed = failedPhases.size > 0;
   // 分工警示：已進入/完成 phase5 但沒有任何 codex 呼叫 → 疑似「只燒 Claude、沒用 Codex 實作」
   const reached5 = (s.current !== null && s.current >= 5) || s.completed.includes(5);
   s.divisionWarning = reached5 && s.codexInPhase5 === 0;

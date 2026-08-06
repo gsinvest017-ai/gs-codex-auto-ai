@@ -85,6 +85,44 @@ class Ran:
     def text(self) -> str:
         return (self.stdout or "") + "\n" + (self.stderr or "")
 
+    @property
+    def launch_failed(self) -> bool:
+        """指令**根本沒跑起來**（不是跑了之後結果不好）。
+
+        這兩件事語意相反，外觀卻一樣：都是非零 returncode、都沒有可解析的失敗
+        清單。分不出來的話，「我連 pytest 都叫不動」會被當成「測試壞了」，
+        每輪合成同一個缺陷 → no-progress → escalated。實測就是全綠的測試被判失敗
+        （skill 範例給的正斜線 venv 路徑，cmd.exe 認不得）。
+
+        POSIX shell 用 127 表示 command not found；cmd.exe 給 1 或 9009，
+        所以還要認訊息。
+        """
+        if self.timed_out:
+            return False
+        if self.returncode in (127, 9009):
+            return True
+        low = self.text.lower()
+        return any(s in low for s in (
+            "is not recognized as an internal or external command",
+            "command not found",
+            "the system cannot find the path specified",
+            "the system cannot find the file specified",
+        ))
+
+    def ran_pytest(self) -> bool:
+        """輸出裡有沒有 pytest 真的跑過的痕跡。
+
+        **不能只靠錯誤訊息比對**：cmd.exe 的訊息是在地化的（實測這台中文 Windows
+        給的是「系統找不到指定的路徑」，英文樣式一條都對不上），而且 rc 只是 1，
+        跟「測試失敗」無從分辨。改看 pytest 自己的招牌字串——它跑過就一定會留下，
+        跟語系無關。
+        """
+        low = self.text.lower()
+        return any(s in low for s in (
+            "passed", "failed", "error", "collected", "no tests ran",
+            "=====", "test session starts",
+        ))
+
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """殺掉整棵行程樹（**不只是直屬子行程**）。
@@ -108,12 +146,32 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def win_shell_cmd(cmd: str) -> str:
+    """Windows 上把**開頭那個執行檔路徑**的正斜線換成反斜線。
+
+    `shell=True` 在 Windows 上是 `cmd.exe /c <cmd>`，而 cmd.exe 不吃正斜線開頭的
+    路徑——`.venv/Scripts/python -m pytest` 會直接回「系統找不到指定的路徑」。
+    CLAUDE.md 裡的範例、skill 文件與 POSIX 習慣都寫正斜線，所以這個地雷是必然會踩的。
+
+    只動第一個 token（真正交給 cmd.exe 當程式名的那個），後面的參數原封不動——
+    參數裡的正斜線常常是**旗標**（`/c`）或**要傳給程式的路徑**，改了會壞事。
+    非 Windows、看起來不像路徑（沒有 `/`）、或是 URL 的一律不碰。
+    """
+    if os.name != "nt" or not cmd[:1].strip():
+        return cmd
+    head, sep, rest = cmd.partition(" ")
+    if "://" in head or "/" not in head:
+        return cmd
+    return head.replace("/", "\\") + sep + rest
+
+
 def _run(cmd: str, cwd: str, timeout: int) -> Ran:
     """跑一條 shell 指令並擷取輸出；**逾時不拋例外**，回傳 timed_out 結果。
 
     這是本工具唯一的子行程入口——裸的 ``subprocess.run`` 沒有 timeout，
     一個 hang 住的 `codex exec` 會無聲卡死整條 pipeline（沒有任何訊號）。
     """
+    cmd = win_shell_cmd(cmd)
     kwargs: dict = dict(shell=True, cwd=cwd, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, text=True,
                         encoding="utf-8", errors="replace")
@@ -239,6 +297,7 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
                     local_fix_cmd=None, max_local_attempts=0):
     cost_box, raw_box = boxes["cost"], boxes["raw"]
     fixfail_box, fixerr_box, tier_box = boxes["fix_fail"], boxes["fix_err"], boxes["tiers"]
+    toolfail_box = boxes["tool_fail"]
 
     def _grounding(compiled, test_out):
         # 延遲匯入 review.py，套用 REVIEW-R2 的 grounding / skip 規則。
@@ -264,12 +323,26 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         cmd = _subst(review_cmd, iteration, defects_file, review_out)
         proc = _run(cmd, workdir, review_timeout)
         if mode == "test":
-            defects = parse_pytest_failures(proc.stdout, proc.stderr, proc.returncode)
+            if proc.launch_failed or (not proc.ok and not proc.ran_pytest()):
+                # 工具層失敗 ≠ 語意結論。硬報成測試失敗的話，缺陷每輪都一樣，
+                # 迴圈會以 no_progress 收場，把「我叫不動 pytest」講成「測試修不動」。
+                toolfail_box[0] = (f"測試指令無法執行：{cmd}\n"
+                                   f"{proc.text.strip()[:400]}")
+                defects = ["tool:cannot-run-tests"]
+            else:
+                defects = parse_pytest_failures(proc.stdout, proc.stderr, proc.returncode)
             raw = proc.text
             tokens = 0
         else:
             defects = parse_issue_list(review_out)
             raw = _read(review_out)
+            # 「reviewer 說沒缺陷」與「reviewer 根本沒產出」都是空的 {review_out}，
+            # 但前者該收斂、後者是工具層失敗。不分開就會假通過（實測 Phase 4
+            # 連兩次假通過）。
+            if not defects and not raw.strip() and not proc.ok:
+                toolfail_box[0] = (f"審查指令沒有產出 {review_out}：{cmd}\n"
+                                   f"{proc.text.strip()[:400]}")
+                defects = ["tool:review-no-output"]
             tokens = estimate_tokens(cmd, proc.stdout)
         # review 逾時絕不能被當成「通過」——合成一個穩定缺陷讓迴圈繼續收斂。
         if proc.timed_out:
@@ -367,12 +440,20 @@ def run(args) -> dict:
         except Exception:
             pass
 
-    tmp = tempfile.mkdtemp(prefix="run_loop_")
+    # **放進專案內**：`tempfile.mkdtemp()` 不受 `--workdir` 控制，恆落在系統 temp，
+    # 而 Codex 的 sandbox 只寫得到工作目錄——reviewer 寫不出 {review_out}，
+    # 迴圈就會把「沒產出」當成「沒缺陷」。放在 log/ 底下同時也留了現場可查。
+    tmp = str(Path(workdir) / "log" / "run_loop")
+    try:
+        Path(tmp).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        tmp = tempfile.mkdtemp(prefix="run_loop_")   # 專案不可寫時的退路
     defects_file = str(Path(tmp) / "defects.txt")
     review_out = str(Path(tmp) / "review_out.txt")
     _write(defects_file, "")
     _write(review_out, "")
-    boxes = {"cost": [0.0], "raw": [""], "fix_fail": [0], "fix_err": [""], "tiers": []}
+    boxes = {"cost": [0.0], "raw": [""], "fix_fail": [0], "fix_err": [""],
+             "tiers": [], "tool_fail": [""]}
 
     # getattr 取值：`run()` 也被測試與其他呼叫端用手搭的 Namespace 驅動，
     # 不強制它們補齊新旗標（缺省即沿用預設行為）。
@@ -397,6 +478,10 @@ def run(args) -> dict:
     # （額度耗盡 / 未登入 / sandbox 拒寫），報成 no_progress 會把人導向錯的地方。
     if result.status == "escalated" and fix_failures and len(boxes["tiers"]) == fix_failures:
         reason = f"fixer_failed（修復器 {fix_failures} 次全部失敗，非缺陷修不動）：{reason}"
+    # 工具層根本沒跑起來時，reason 一定要講出來——否則使用者看到的是 no_progress，
+    # 會以為「東西修不好」，實際上是指令打不開（路徑、venv、額度…）。
+    if boxes["tool_fail"][0]:
+        reason = f"tool_failed（指令無法執行，不是缺陷修不動）：{boxes['tool_fail'][0]}"
 
     out = {"status": result.status, "iterations": result.iterations,
            "reason": reason, "final_defects": result.final_defects,
@@ -404,6 +489,8 @@ def run(args) -> dict:
            "fixer_tiers": list(boxes["tiers"])}
     if boxes["fix_err"][0]:
         out["fixer_last_error"] = boxes["fix_err"][0][-500:]
+    if boxes["tool_fail"][0]:
+        out["tool_failure"] = boxes["tool_fail"][0][-500:]
     if result.status == "escalated":
         orch.events.emit("error", phase=phase_label,
                         reason=reason or "escalated", status="escalated")
