@@ -302,3 +302,48 @@ def test_win_shell_cmd_leaves_bare_commands_and_urls_alone():
     assert rl.win_shell_cmd("pytest -q") == "pytest -q"
     assert rl.win_shell_cmd("curl https://x/y -o a") == "curl https://x/y -o a"
     assert rl.win_shell_cmd("") == ""
+
+
+def test_transient_tool_failure_does_not_poison_a_resolved_run(tmp_path, monkeypatch):
+    """第一輪指令沒跑起來、後面恢復並收斂成功 → 結論不該還說是工具層失敗。
+
+    `tool_fail` box 以前整輪只寫不清，於是一次短暫失敗（檔案鎖、防毒干擾）就會把
+    最終 reason 蓋成 tool_failed——一個真的修好了的 run 宣稱自己是因為指令打不開
+    而失敗，正是 M1 想解決的混淆的反面。
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    flag = tmp_path / "first_round_done.txt"
+    # 第一輪：假裝指令打不開（模擬檔案鎖）。第二輪起：正常跑完、沒有缺陷。
+    script = (
+        "import pathlib,sys;"
+        f"f=pathlib.Path(r'{flag}');"
+        "first=not f.exists();"
+        "f.write_text('x');"
+        "sys.stderr.write('The system cannot find the path specified') "
+        "if first else sys.stdout.write('2 passed');"
+        "sys.exit(1 if first else 0)"
+    )
+    out = rl.run(_args(review_cmd=f'"{PY}" -c "{script}"', fix_cmd=OK,
+                       max_iters=3, patience=3))
+
+    assert out["status"] == "resolved", f"第二輪就該收斂：{out}"
+    assert "tool_failed" not in (out["reason"] or ""), (
+        f"收斂成功的 run 不該宣稱自己是工具層失敗：{out['reason']}")
+    assert not out.get("tool_failure"), (
+        f"上一輪的工具錯誤不該留在最終輸出：{out.get('tool_failure')}")
+
+
+class TestFinalReason:
+    """收尾覆寫 reason 的那道判斷——它被上游的逐輪清空遮住，只能直接驗。"""
+
+    def test_tool_failure_wins_when_the_run_did_not_converge(self):
+        got = rl.final_reason("no_progress", "pytest 打不開", "escalated")
+        assert "tool_failed" in got and "pytest 打不開" in got
+
+    def test_resolved_run_keeps_its_own_reason(self):
+        """已經修好的 run 不該宣稱自己是工具層失敗——M1 那個混淆的反面。"""
+        assert rl.final_reason("ok", "pytest 打不開", "resolved") == "ok"
+        assert rl.final_reason(None, "pytest 打不開", "resolved") is None
+
+    def test_no_tool_failure_leaves_reason_untouched(self):
+        assert rl.final_reason("no_progress", "", "escalated") == "no_progress"

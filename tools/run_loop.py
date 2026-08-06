@@ -165,6 +165,22 @@ def win_shell_cmd(cmd: str) -> str:
     return head.replace("/", "\\") + sep + rest
 
 
+def final_reason(reason: str | None, tool_fail: str, status: str) -> str | None:
+    """收尾時的 reason：工具層失敗要講出來，但**收斂成功的 run 不算**。
+
+    講出來的理由：使用者看到 no_progress 會以為「東西修不好」，實際上是指令打不開
+    （路徑、venv、額度…），方向完全錯。
+
+    加上 status 條件的理由：`tool_fail` 是「最後一輪指令有沒有跑起來」。就算它逐輪
+    被清乾淨了（見 `review()`），這裡仍留一道——一個已經 resolved 的 run 宣稱自己
+    因為指令打不開而失敗，跟 M1 想解決的混淆是同一件事的反面。兩道防線是刻意的：
+    上游少清一次，這裡還攔得住。
+    """
+    if tool_fail and status != "resolved":
+        return f"tool_failed（指令無法執行，不是缺陷修不動）：{tool_fail}"
+    return reason
+
+
 def _run(cmd: str, cwd: str, timeout: int) -> Ran:
     """跑一條 shell 指令並擷取輸出；**逾時不拋例外**，回傳 timed_out 結果。
 
@@ -307,6 +323,11 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         return should_skip_llm_review(sig)
 
     def review(fix, iteration):
+        # 每輪先清掉上一輪的工具層失敗。這個 box 是「**這一輪**指令有沒有跑起來」，
+        # 不是「整輪跑下來曾經失敗過」——不清的話，第一輪的短暫失敗（檔案鎖、防毒
+        # 干擾）會在後面幾輪恢復、真的收斂成功之後，仍然把最終 reason 蓋成
+        # tool_failed，等於用另一種方式犯下 M1 要修的那個錯。
+        toolfail_box[0] = ""
         # REVIEW-R2-S2：若有 compile 步驟且編譯失敗，跳過昂貴的 reviewer/測試，直接 fix。
         if compile_cmd:
             cp = _run(_subst(compile_cmd, iteration, defects_file, review_out),
@@ -478,10 +499,7 @@ def run(args) -> dict:
     # （額度耗盡 / 未登入 / sandbox 拒寫），報成 no_progress 會把人導向錯的地方。
     if result.status == "escalated" and fix_failures and len(boxes["tiers"]) == fix_failures:
         reason = f"fixer_failed（修復器 {fix_failures} 次全部失敗，非缺陷修不動）：{reason}"
-    # 工具層根本沒跑起來時，reason 一定要講出來——否則使用者看到的是 no_progress，
-    # 會以為「東西修不好」，實際上是指令打不開（路徑、venv、額度…）。
-    if boxes["tool_fail"][0]:
-        reason = f"tool_failed（指令無法執行，不是缺陷修不動）：{boxes['tool_fail'][0]}"
+    reason = final_reason(reason, boxes["tool_fail"][0], result.status)
 
     out = {"status": result.status, "iterations": result.iterations,
            "reason": reason, "final_defects": result.final_defects,

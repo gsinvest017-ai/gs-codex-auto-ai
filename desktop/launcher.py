@@ -1103,6 +1103,12 @@ class LauncherUI:
         self.kbd_label.bind("<Button-1>", lambda _e: self.force_keyboard())
         self.kbd_label.config(cursor="hand2")
         self._kbd_forced = False
+        # 強制接管**必須**在切走時失效，否則它會變成永久 bypass：使用者切到瀏覽器、
+        # 記事本時 `focus_get()` 同樣是 None，剩下的守門攔不住，看門狗就會每 300ms
+        # 把焦點搶回來——正是 `app_is_foreground` 本來要防的事。
+        # 用 tk 自己的 `<Deactivate>`（App 失去作用中狀態）而不是 `app_is_foreground`：
+        # 後者正是這台機器上判錯的那個，拿它來解除自己的 workaround 沒有意義。
+        self.root.bind("<Deactivate>", self._on_app_deactivate, add="+")
         self._keep_keyboard()
 
         self._embed = None
@@ -1275,8 +1281,20 @@ class LauncherUI:
             return False, "App 不在最前面"
         return True, ""
 
+    def _on_app_deactivate(self, _event=None) -> None:
+        """App 失去作用中狀態 → 解除強制接管，把鍵盤還給使用者切過去的程式。
+
+        切回來之後若守門仍判錯，再點一次提示列即可。多點一下，遠好過整個 session
+        都在跟別的程式搶鍵盤。
+        """
+        self._kbd_forced = False
+
     def force_keyboard(self) -> None:
-        """手動接管鍵盤（點提示列觸發），跳過前景守門直接把焦點搶回來。"""
+        """手動接管鍵盤（點提示列觸發），跳過前景守門直接把焦點搶回來。
+
+        **只在 App 還在最前面時有效**——`<Deactivate>` 會把它解除（見
+        `_on_app_deactivate`），所以這不是永久 bypass。
+        """
         self._kbd_forced = True
         try:
             self.term_host.focus_force()

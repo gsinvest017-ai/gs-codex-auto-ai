@@ -1189,6 +1189,7 @@ class TestKeyboardWatchdog:
         _keep_keyboard = launcher.LauncherUI._keep_keyboard
         _keyboard_decision = launcher.LauncherUI._keyboard_decision
         force_keyboard = launcher.LauncherUI.force_keyboard
+        _on_app_deactivate = launcher.LauncherUI._on_app_deactivate
         _update_kbd_hint = launcher.LauncherUI._update_kbd_hint
 
         def __init__(self, focus, foreground, mapped=True, alive=True):
@@ -1258,7 +1259,25 @@ class TestKeyboardWatchdog:
         assert ui.forced == 1, "手動接管要能跳過守門"
 
         ui._keep_keyboard()
-        assert ui.forced == 2, "之後看門狗也要繼續維持接管，不能只生效一次"
+        assert ui.forced == 2, "還在最前面時看門狗要繼續維持接管，不能只生效一次"
+
+    def test_manual_override_expires_when_the_app_loses_focus(self, monkeypatch):
+        """強制接管**不能是永久的**，否則它會變成它自己想修的那個問題。
+
+        使用者切到別的程式時 `focus_get()` 同樣是 None（整個 App 沒有 OS 焦點，
+        不是「焦點落在左欄某個 widget」），剩下的守門攔不住——沒有這條的話，點過
+        一次強制接管之後，看門狗會每 300ms 從瀏覽器/記事本手上把鍵盤搶回來。
+        """
+        ui = self._UI(focus=None, foreground=False)
+        monkeypatch.setattr(launcher.winembed, "app_is_foreground", lambda h: False)
+        ui.force_keyboard()
+        assert ui.forced == 1
+
+        ui._on_app_deactivate()          # 使用者切到別的程式
+        ui.forced = 0
+        ui._keep_keyboard()
+        ui._keep_keyboard()
+        assert ui.forced == 0, "切走之後就不該再搶鍵盤"
 
     def test_manual_override_still_yields_to_the_left_column(self, monkeypatch):
         """強制接管跳過的是**前景守門**，不是「使用者正在左欄打字」那條。"""
