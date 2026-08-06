@@ -1097,6 +1097,18 @@ class LauncherUI:
         self.kbd_label = tk.Label(self.termpane, text="", font=self.mono,
                                   fg=MUTED, bg=CARD, anchor="w")
         self.kbd_label.pack(fill="x", padx=10, pady=(0, 6))
+        # 點這一行 = 強制接管鍵盤。看門狗的守門條件在某些機器上會判成「不該搶」
+        # （使用者實測：明明 App 就在最前面卻一直顯示未接管），那時整個面板就等於
+        # 不能打字、也沒有別的路可走。這是那個情況下的手動出口。
+        self.kbd_label.bind("<Button-1>", lambda _e: self.force_keyboard())
+        self.kbd_label.config(cursor="hand2")
+        self._kbd_forced = False
+        # 強制接管**必須**在切走時失效，否則它會變成永久 bypass：使用者切到瀏覽器、
+        # 記事本時 `focus_get()` 同樣是 None，剩下的守門攔不住，看門狗就會每 300ms
+        # 把焦點搶回來——正是 `app_is_foreground` 本來要防的事。
+        # 用 tk 自己的 `<Deactivate>`（App 失去作用中狀態）而不是 `app_is_foreground`：
+        # 後者正是這台機器上判錯的那個，拿它來解除自己的 workaround 沒有意義。
+        self.root.bind("<Deactivate>", self._on_app_deactivate, add="+")
         self._keep_keyboard()
 
         self._embed = None
@@ -1239,17 +1251,56 @@ class LauncherUI:
         會每 300ms 把焦點硬拉回來，變成搶使用者的鍵盤。
         """
         try:
-            emb = self._embed
-            if (emb is not None and emb.alive and emb.hwnd
-                    and self.termpane.winfo_ismapped()
-                    and self.root.focus_get() is None
-                    and winembed is not None
-                    and winembed.app_is_foreground(emb.hwnd)):
+            take, _why = self._keyboard_decision()
+            if take:
                 self.term_host.focus_force()
             self._update_kbd_hint()
         except Exception:  # noqa: BLE001 — 焦點顧不到不該讓 App 出錯
             pass
         self.root.after(300, self._keep_keyboard)
+
+    def _keyboard_decision(self) -> tuple[bool, str]:
+        """要不要把焦點搶回 tk，以及**不搶的理由**。
+
+        理由字串會顯示在提示列上。使用者回報「點了終端機還是打不了字」時，
+        以前只看得到「未接管」三個字，完全無從分辨是嵌入掛了、面板沒顯示、
+        還是前景守門判錯——這個回傳值就是為了讓下次回報能直接指到那一條。
+        """
+        emb = self._embed
+        if emb is None or not emb.alive or not emb.hwnd:
+            return False, "終端機還沒嵌進來"
+        if not self.termpane.winfo_ismapped():
+            return False, "終端機面板沒顯示"
+        if self.root.focus_get() is not None:
+            return False, "焦點在左欄"          # 使用者正在打需求，不能搶
+        if winembed is None:
+            return False, "非 Windows"
+        if getattr(self, "_kbd_forced", False):
+            return True, ""                     # 手動接管：跳過前景守門
+        if not winembed.app_is_foreground(emb.hwnd):
+            return False, "App 不在最前面"
+        return True, ""
+
+    def _on_app_deactivate(self, _event=None) -> None:
+        """App 失去作用中狀態 → 解除強制接管，把鍵盤還給使用者切過去的程式。
+
+        切回來之後若守門仍判錯，再點一次提示列即可。多點一下，遠好過整個 session
+        都在跟別的程式搶鍵盤。
+        """
+        self._kbd_forced = False
+
+    def force_keyboard(self) -> None:
+        """手動接管鍵盤（點提示列觸發），跳過前景守門直接把焦點搶回來。
+
+        **只在 App 還在最前面時有效**——`<Deactivate>` 會把它解除（見
+        `_on_app_deactivate`），所以這不是永久 bypass。
+        """
+        self._kbd_forced = True
+        try:
+            self.term_host.focus_force()
+        except Exception:  # noqa: BLE001
+            pass
+        self._update_kbd_hint()
 
     def _update_kbd_hint(self) -> None:
         lab = getattr(self, "kbd_label", None)
@@ -1264,7 +1315,10 @@ class LauncherUI:
             lab.config(text=f"⌨ 鍵盤已接管 → {sess.kind.label} · {sess.id}"
                             f"（打不出字代表對面的 CLI 正在忙）", fg=GREEN)
         else:
-            lab.config(text="⌨ 鍵盤未接管 — 點一下終端機區", fg=GOLD)
+            _, why = self._keyboard_decision()
+            suffix = f"（{why}）" if why else ""
+            lab.config(text=f"⌨ 鍵盤未接管{suffix} — 點終端機區，"
+                            f"沒反應就點這一行強制接管", fg=GOLD)
 
     def _current_session(self):
         """鍵盤要送到哪條 session。

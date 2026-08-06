@@ -52,6 +52,9 @@ STATE_RUNNING = "running"
 STATE_ESCALATED = "escalated"
 STATE_DONE = "done"
 
+# 沒掛在任何 phase 底下的錯誤（run 層級），沒有「該 phase 後來成功了」可以把它清掉。
+_RUN_LEVEL_FAILURE = -1
+
 
 def phase_num(value: object) -> int | None:
     """把事件裡的 phase 欄位（`'phase3'` / `3` / `'3'`）正規化成整數。"""
@@ -105,7 +108,7 @@ def summarize(events: list[dict]) -> dict:
     iteration = 0
     cost = 0.0
     last_status: str | None = None
-    failed = False
+    failed_phases: set[int] = set()
 
     for ev in events:
         etype = ev.get("event_type")
@@ -113,15 +116,17 @@ def summarize(events: list[dict]) -> dict:
 
         if etype == "run_start":
             # 新的一輪 run：把上一輪的狀態全部清掉，避免跨 run 汙染。
-            current, completed, iteration, cost, last_status, failed = \
-                None, set(), 0, 0.0, None, False
+            current, completed, iteration, cost, last_status = None, set(), 0, 0.0, None
+            failed_phases = set()
             continue
 
         if etype == "phase_end" and pnum is not None:
             if ev.get("status") == "success":
                 completed.add(pnum)
+                # 該 phase 最後是成功的 → 中途那些錯誤已經被收斂掉了。
+                failed_phases.discard(pnum)
             elif ev.get("status") == "failure":
-                failed = True
+                failed_phases.add(pnum)
         elif pnum is not None:
             current = pnum
 
@@ -132,7 +137,10 @@ def summarize(events: list[dict]) -> dict:
         if ev.get("status"):
             last_status = ev["status"]
         if etype == "error":
-            failed = True
+            # 記在該 phase 名下。之前是一個全域 latch，於是 Phase 6 修復迴圈裡
+            # 一次「已經被下一輪修好」的 escalation，會讓七階段全部跑完之後畫面
+            # 仍然是紅的、還掛著早就過期的「錯誤：no_progress」。
+            failed_phases.add(pnum if pnum is not None else _RUN_LEVEL_FAILURE)
 
     return {
         "current": current,
@@ -140,7 +148,8 @@ def summarize(events: list[dict]) -> dict:
         "iteration": iteration,
         "cost": cost,
         "last_status": last_status,
-        "failed": failed,
+        "failed": bool(failed_phases),
+        "failed_phases": failed_phases,
     }
 
 
@@ -242,6 +251,11 @@ def build_model(events: list[dict], *, log_exists: bool) -> dict:
         }
         for ev in scoped
         if ev.get("event_type") == "error"
+        # 只留「那個 phase 到最後仍然是壞的」錯誤。修復迴圈中途 escalate、下一輪
+        # 修好的那些，phase_end 成功時已從 failed_phases 移除——留著只會讓交付完成的
+        # 畫面掛著一條早就過期的「最後錯誤：no_progress」。
+        and (phase_num(ev.get("phase")) if ev.get("phase") is not None
+             else _RUN_LEVEL_FAILURE) in summary["failed_phases"]
     ]
 
     if not log_exists:

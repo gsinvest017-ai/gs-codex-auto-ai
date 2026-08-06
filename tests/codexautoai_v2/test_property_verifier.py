@@ -285,3 +285,60 @@ class TestStubFor:
         assert "# GIVEN" in src
         assert "# WHEN" in src
         assert "# THEN" in src
+
+
+# ── 中文場景名撞名（流水線回報的框架 bug #5）────────────────────────────────
+import re as _re  # noqa: E402
+
+from src.codexautoai_v2.property_verifier import (  # noqa: E402
+    safe_name,
+    stubs_for,
+    unique_names,
+)
+
+
+def test_cjk_scenario_names_do_not_collide():
+    """中文場景名以前整段被 `[^A-Za-z0-9]` 吃掉，全都變同一個名字互相覆蓋。"""
+    ids = ["情境：新增支出", "情境：刪除支出", "情境：查詢餘額"]
+    names = [safe_name(i) for i in ids]
+    assert len(set(names)) == 3, f"中文應該保留下來才不會撞名：{names}"
+    # 光是「互不相同」還不夠——退回 hash 也能做到互不相同，但名字會變得
+    # 完全讀不出是哪個場景。要求原文留在名字裡，才真的驗到不是走 fallback。
+    for sid, name in zip(ids, names):
+        assert sid[-2:] in name, f"場景「{sid}」的名字 {name} 認不出來源"
+
+
+def test_unique_names_suffixes_true_duplicates():
+    """就算兩個場景真的同名，也要靠後綴分開——靜默覆蓋是這個 bug 最貴的部分。"""
+    assert unique_names(["A", "A", "A"]) == ["A", "A_2", "A_3"]
+
+
+def test_generated_stubs_are_all_distinct_functions():
+    """端到端：23 個中文場景要產出 23 個 def，一個都不能少。"""
+    props = [Property(scenario_id=f"情境{i}：測試項目{i}", given=["x"],
+                      when=["y"], then=["z"]) for i in range(23)]
+    src = "\n".join(stubs_for(props))
+    names = _re.findall(r"^def (test_\w+)\(", src, _re.MULTILINE | _re.UNICODE)
+    assert len(names) == 23 and len(set(names)) == 23, f"只剩 {len(set(names))} 個唯一名字"
+    compile(src, "<stubs>", "exec")  # 產出必須是合法 Python
+
+
+def test_stub_name_falls_back_when_everything_is_stripped():
+    out = safe_name("!!!///")
+    assert out.startswith("s_") and out[2:].isalnum()
+
+
+def test_suffix_does_not_collide_with_a_real_name():
+    """合成的 `_2` 後綴自己也會撞：`["A", "A_2", "A"]` 下第三個會撞到第二個的真名。
+
+    那等於把同一個 bug 搬到上一層——生成檔裡仍然是兩個同名 def 互相覆蓋。
+    """
+    got = unique_names(["A", "A_2", "A"])
+    assert len(set(got)) == 3, f"後綴撞到真名了：{got}"
+    assert got[:2] == ["A", "A_2"], "前兩個是真名，不該被動到"
+
+
+def test_pathological_suffix_chain_still_unique():
+    ids = ["S", "S_2", "S_3", "S", "S", "S_4"]
+    got = unique_names(ids)
+    assert len(set(got)) == len(ids), got

@@ -33,6 +33,11 @@ jobs:
   # ConPTY 只在 Windows 上存在，而 verify 跑 ubuntu——內嵌終端機的整個存在理由
   # （desktop/conpty.py 的 ctypes ConPTY 路徑）在 Linux CI 上一行都跑不到。
   # 這個 job 補上那塊回歸保護；公開 repo 的 Actions 分鐘數不計費，成本為零。
+  #
+  # **跑整套，不是只跑 test_conpty.py。** 本 repo 有一整批 `skipif(os.name != "nt")`
+  # 的測試（`win_shell_cmd` 的 cmd.exe 正斜線、`app_is_foreground` 的前景守門、
+  # npm shim 拆解…），它們在 ubuntu 的 verify 一律 skip。以前這裡只跑一個檔案，
+  # 等於那些測試在 CI 裡完全是死的——回歸只能等使用者在自己機器上踩到才發現。
   verify-windows:
     runs-on: windows-latest
     steps:
@@ -42,8 +47,8 @@ jobs:
           python-version: "3.12"
       - name: Install pytest
         run: python -m pip install --upgrade pip pytest
-      - name: PTY 後端測試（ConPTY 路徑）
-        run: python -m pytest tests/test_conpty.py -q
+      - name: 全套測試（含所有 Windows-only 的 skipif 分支）
+        run: python -m pytest tests/ -q
         env:
           PYTHONPATH: .
 
