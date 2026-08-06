@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -39,16 +40,56 @@ from pathlib import Path
 IS_WIN = os.name == "nt"
 
 
+# npm 的 .CMD shim 最後一行長這樣：
+#   … & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*
+_NPM_SHIM_RE = re.compile(r'"%_prog%"\s+"%dp0%[\\/](?P<js>[^"]+)"', re.IGNORECASE)
+
+
+def unwrap_npm_shim(shim: Path) -> list[str] | None:
+    """把 npm 的 `.CMD` shim 拆成 `[node, …/xxx.js]`；不是 npm shim 就回 None。
+
+    **為什麼要拆**：`.CMD` 一定會經過 `cmd.exe /c`，而 shim 用 `%*` 把參數重新展開
+    一次。cmd.exe 的命令列遇到換行就斷掉——多行 `--prompt`（我們每個 phase 的 prompt
+    都是多行）只有第一行傳得進去，Codex 收到殘缺指令還是照跑，產出自然不對。
+    直接叫 node 就完全不經過 cmd.exe：CreateProcess 的命令列裡換行只是普通字元，
+    CommandLineToArgvW 只把空白與 tab 當分隔符，所以整段 prompt 原樣送達。
+    """
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _NPM_SHIM_RE.search(text)
+    if not m:
+        return None
+    js = shim.parent / m.group("js").replace("\\", "/")
+    if not js.exists():
+        return None
+    local_node = shim.parent / "node.exe"      # shim 自己也是先找同層的 node.exe
+    node = str(local_node) if local_node.exists() else shutil.which("node")
+    if not node:
+        return None
+    return [node, str(js)]
+
+
 def resolve_codex(exe: str = "codex") -> list[str]:
     """回傳啟動 codex 的 argv 前綴（不含 exec/子參數）。
 
     Windows 上 npm 把 codex 裝成 `codex.CMD` shim；Python subprocess.Popen 用**裸名**
     'codex'（無 shell）不做 PATHEXT 解析 → WinError 2「找不到指定的檔案」（每個新任務都踩）。
-    用 shutil.which 解析成完整路徑（實測完整 .CMD 路徑可被 Popen 直接啟動、且 args 經
-    list2cmdline 正確帶入，不必經 cmd.exe 重新解析而衍生引號問題）。找不到就退回裸名。
+    所以先用 shutil.which 解析成完整路徑。
+
+    但完整的 `.CMD` 路徑仍會經過 cmd.exe，多行 prompt 會被截在第一行
+    （見 `unwrap_npm_shim`）。所以再往下拆一層，能拆就直接跑 node；拆不動才退回 `.CMD`。
     """
     resolved = shutil.which(exe)
-    return [resolved] if resolved else [exe]
+    if not resolved:
+        return [exe]
+    path = Path(resolved)
+    if path.suffix.lower() in (".cmd", ".bat"):
+        direct = unwrap_npm_shim(path)
+        if direct:
+            return direct
+    return [resolved]
 
 
 def _sessions_dir() -> Path:
