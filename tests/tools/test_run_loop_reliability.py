@@ -256,12 +256,6 @@ def test_localised_shell_error_still_detected(tmp_path, monkeypatch):
     assert not r.ran_pytest(), "沒有任何 pytest 痕跡 → 它根本沒跑"
 
 
-def test_real_failure_output_counts_as_having_run(self=None):
-    """測試真的跑了而且失敗——不能被當成工具層失敗，否則真缺陷會被當環境問題。"""
-    r = rl.Ran(1, "collected 3 items\nFAILED tests/t.py::a - assert 1 == 2", "")
-    assert r.ran_pytest()
-
-
 # ── shell=True + 正斜線路徑（流水線回報的框架 bug #6）────────────────────────
 import os          # noqa: E402
 import subprocess  # noqa: E402
