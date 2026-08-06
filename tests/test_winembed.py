@@ -10,6 +10,7 @@
 3. Chromium 在 `--app` 模式自繪標題列（含關閉鈕），要靠 inset 往上裁掉；
    量不到畫布時得回傳 0 讓呼叫端走 DPI 估計值，而不是亂裁。
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -565,3 +566,41 @@ class TestInputQueueStaysAttached:
         emb.hwnd = 99
         emb._input_tid = 4242
         emb.focus()
+
+
+# ── 前景守門的退路（使用者實測：怎麼點都是「鍵盤未接管」）──────────────────
+@pytest.mark.skipif(os.name != "nt", reason="app_is_foreground 只在 Windows 有實作")
+class TestAppIsForeground:
+    """這道守門判 False 時，鍵盤看門狗一次都不會出手——整個內嵌面板等於不能打字。
+
+    只認 `GA_ROOT == 前景視窗` 的話，reparent 沒成功而退回獨立視窗的機器上永遠
+    判 False。所以多加「前景視窗就是那個子視窗（或它的祖先鏈上）」這條退路。
+    """
+
+    def _patch(self, monkeypatch, *, fg, ga_root, is_child=False):
+        u32 = winembed._u32
+        monkeypatch.setattr(u32, "GetForegroundWindow", lambda: fg)
+        monkeypatch.setattr(u32, "GetAncestor", lambda h, f: ga_root)
+        monkeypatch.setattr(u32, "IsChild", lambda a, b: 1 if is_child else 0)
+
+    def test_true_when_ga_root_is_the_foreground_window(self, monkeypatch):
+        self._patch(monkeypatch, fg=900, ga_root=900)
+        assert winembed.app_is_foreground(123) is True
+
+    def test_true_when_the_child_itself_is_foreground(self, monkeypatch):
+        """reparent 沒成功、子視窗還是獨立 top-level 的情況。"""
+        self._patch(monkeypatch, fg=123, ga_root=0)
+        assert winembed.app_is_foreground(123) is True
+
+    def test_true_when_foreground_sits_under_the_child(self, monkeypatch):
+        self._patch(monkeypatch, fg=777, ga_root=555, is_child=True)
+        assert winembed.app_is_foreground(123) is True
+
+    def test_false_when_a_different_app_is_foreground(self, monkeypatch):
+        """反向保護：別的程式在前面時不能判 True，否則會去搶使用者的鍵盤。"""
+        self._patch(monkeypatch, fg=42, ga_root=900, is_child=False)
+        assert winembed.app_is_foreground(123) is False
+
+    def test_false_when_nothing_is_foreground(self, monkeypatch):
+        self._patch(monkeypatch, fg=0, ga_root=0)
+        assert winembed.app_is_foreground(123) is False

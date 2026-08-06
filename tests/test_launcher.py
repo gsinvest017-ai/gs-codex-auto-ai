@@ -1187,6 +1187,9 @@ class TestKeyboardWatchdog:
 
     class _UI:
         _keep_keyboard = launcher.LauncherUI._keep_keyboard
+        _keyboard_decision = launcher.LauncherUI._keyboard_decision
+        force_keyboard = launcher.LauncherUI.force_keyboard
+        _update_kbd_hint = launcher.LauncherUI._update_kbd_hint
 
         def __init__(self, focus, foreground, mapped=True, alive=True):
             self.forced = 0
@@ -1242,6 +1245,29 @@ class TestKeyboardWatchdog:
         ui = self._UI(focus="某個 tk widget", foreground=True)
         assert self._run(monkeypatch, ui) == 0
 
+    def test_manual_override_works_when_the_foreground_guard_says_no(self, monkeypatch):
+        """使用者實測：App 明明就在最前面，看門狗卻一直判「不該搶」，整個面板等於
+        不能打字。點提示列強制接管是那個情況下唯一的出口，必須跳過前景守門。"""
+        ui = self._UI(focus=None, foreground=False)
+        monkeypatch.setattr(launcher.winembed, "app_is_foreground", lambda h: False)
+
+        ui._keep_keyboard()
+        assert ui.forced == 0, "前提：守門本來就擋著"
+
+        ui.force_keyboard()
+        assert ui.forced == 1, "手動接管要能跳過守門"
+
+        ui._keep_keyboard()
+        assert ui.forced == 2, "之後看門狗也要繼續維持接管，不能只生效一次"
+
+    def test_manual_override_still_yields_to_the_left_column(self, monkeypatch):
+        """強制接管跳過的是**前景守門**，不是「使用者正在左欄打字」那條。"""
+        ui = self._UI(focus="某個 tk widget", foreground=False)
+        monkeypatch.setattr(launcher.winembed, "app_is_foreground", lambda h: False)
+        ui._kbd_forced = True
+        ui._keep_keyboard()
+        assert ui.forced == 0
+
     def test_does_not_steal_focus_from_other_apps(self, monkeypatch):
         """**這道守門不能省**：少了它，使用者切到別的程式時我們會每 300ms 把
         焦點硬拉回來，等於搶使用者的鍵盤。"""
@@ -1263,6 +1289,7 @@ class TestKeyboardHint:
 
     class _UI:
         _update_kbd_hint = launcher.LauncherUI._update_kbd_hint
+        _keyboard_decision = launcher.LauncherUI._keyboard_decision
 
         def __init__(self, focused, alive=True, mapped=True, sess=True):
             self.text = None
@@ -1273,6 +1300,8 @@ class TestKeyboardHint:
                     ui.text = kw.get("text")
 
             class _Emb:
+                hwnd = 123
+
                 def __init__(self, a):
                     self.alive = a
 
@@ -1312,7 +1341,19 @@ class TestKeyboardHint:
     def test_says_not_taken_over_with_what_to_do(self):
         ui = self._UI(focused=False)
         ui._update_kbd_hint()
-        assert "未接管" in ui.text and "點一下" in ui.text
+        assert "未接管" in ui.text and "點終端機區" in ui.text
+        assert "強制接管" in ui.text, "點終端機沒反應時要有第二條路，否則就是死路"
+
+    def test_says_which_guard_blocked_the_takeover(self):
+        """使用者回報「怎麼點都是未接管」時，要看得出是**哪一條**守門擋下來的。
+
+        以前只顯示「未接管」三個字，分不出是嵌入掛了、面板沒顯示、還是前景守門
+        判錯——只能靠猜，前幾輪就是這樣繞了很久。
+        """
+        ui = self._UI(focused=False, alive=True)
+        ui.root.focus_get = lambda: "左欄的需求框"
+        ui._update_kbd_hint()
+        assert "焦點在左欄" in ui.text, ui.text
 
     def test_blank_when_no_embed(self):
         ui = self._UI(focused=True, alive=False)
