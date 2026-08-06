@@ -201,14 +201,25 @@ def unique_names(scenario_ids: Sequence[str]) -> list[str]:
 
     ``safe_name`` 讓撞名變罕見，但擋不住兩個場景真的同名（或只差在被正規化掉
     的字元）。靜默覆蓋是這個 bug 最貴的部分，所以這裡機械性地把它變成不可能。
+
+    **後綴自己也會撞。** ``["A", "A_2", "A"]`` 這種輸入下，第三個合成出來的
+    ``A_2`` 會撞到第二個的**真名**——同一個 bug 只是搬到上一層。所以要比對真正
+    發出去的名字（``taken``），不是只看計數器。場景 id 由 Codex 產生，
+    ``情境1`` / ``情境1_2`` 並存並不罕見。
     """
     used: dict[str, int] = {}
+    taken: set[str] = set()
     out: list[str] = []
     for sid in scenario_ids:
         base = safe_name(sid)
         n = used.get(base, 0) + 1
+        cand = base if n == 1 else f"{base}_{n}"
+        while cand in taken:
+            n += 1
+            cand = f"{base}_{n}"
         used[base] = n
-        out.append(base if n == 1 else f"{base}_{n}")
+        taken.add(cand)
+        out.append(cand)
     return out
 
 

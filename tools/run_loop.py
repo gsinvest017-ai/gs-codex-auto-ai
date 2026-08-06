@@ -116,10 +116,14 @@ class Ran:
         給的是「系統找不到指定的路徑」，英文樣式一條都對不上），而且 rc 只是 1，
         跟「測試失敗」無從分辨。改看 pytest 自己的招牌字串——它跑過就一定會留下，
         跟語系無關。
+
+        刻意**不收**裸的 ``error``：那兩個字幾乎任何錯誤訊息裡都有，會把真正的
+        啟動失敗誤判成「跑過了」。pytest 的 error 摘要一定伴隨 ``=====`` 分隔線，
+        所以不會漏。
         """
         low = self.text.lower()
         return any(s in low for s in (
-            "passed", "failed", "error", "collected", "no tests ran",
+            "passed", "failed", "collected", "no tests ran",
             "=====", "test session starts",
         ))
 
@@ -344,9 +348,15 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
         cmd = _subst(review_cmd, iteration, defects_file, review_out)
         proc = _run(cmd, workdir, review_timeout)
         if mode == "test":
-            if proc.launch_failed or (not proc.ok and not proc.ran_pytest()):
+            if not proc.ok and not proc.ran_pytest():
                 # 工具層失敗 ≠ 語意結論。硬報成測試失敗的話，缺陷每輪都一樣，
                 # 迴圈會以 no_progress 收場，把「我叫不動 pytest」講成「測試修不動」。
+                #
+                # **`ran_pytest()` 有一票否決權**，`launch_failed` 不能自己成立：
+                # 它比對的 "the system cannot find the file specified" 正是 Windows
+                # `FileNotFoundError` 的標準文字，會出現在**真的**測試失敗的
+                # traceback 裡（開不存在的檔案那種測試）。讓它短路過 `ran_pytest()`
+                # 的話，真實缺陷會被蓋成 tool:cannot-run-tests——剛好是 M1 的反面。
                 toolfail_box[0] = (f"測試指令無法執行：{cmd}\n"
                                    f"{proc.text.strip()[:400]}")
                 defects = ["tool:cannot-run-tests"]

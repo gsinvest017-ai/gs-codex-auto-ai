@@ -326,3 +326,19 @@ def test_generated_stubs_are_all_distinct_functions():
 def test_stub_name_falls_back_when_everything_is_stripped():
     out = safe_name("!!!///")
     assert out.startswith("s_") and out[2:].isalnum()
+
+
+def test_suffix_does_not_collide_with_a_real_name():
+    """合成的 `_2` 後綴自己也會撞：`["A", "A_2", "A"]` 下第三個會撞到第二個的真名。
+
+    那等於把同一個 bug 搬到上一層——生成檔裡仍然是兩個同名 def 互相覆蓋。
+    """
+    got = unique_names(["A", "A_2", "A"])
+    assert len(set(got)) == 3, f"後綴撞到真名了：{got}"
+    assert got[:2] == ["A", "A_2"], "前兩個是真名，不該被動到"
+
+
+def test_pathological_suffix_chain_still_unique():
+    ids = ["S", "S_2", "S_3", "S", "S", "S_4"]
+    got = unique_names(ids)
+    assert len(set(got)) == len(ids), got

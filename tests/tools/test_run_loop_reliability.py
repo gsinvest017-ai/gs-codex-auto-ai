@@ -347,3 +347,45 @@ class TestFinalReason:
 
     def test_no_tool_failure_leaves_reason_untouched(self):
         assert rl.final_reason("no_progress", "", "escalated") == "no_progress"
+
+
+class TestRanPytestVetoesLaunchFailed:
+    """`launch_failed` 不能自己成立——它會蓋掉真實的測試失敗。
+
+    它比對的 "the system cannot find the file specified" 正是 Windows
+    `FileNotFoundError` 的標準文字，會出現在**真的**測試失敗的 traceback 裡。
+    """
+
+    REAL_FAILURE = (
+        "===== test session starts =====\n"
+        "collected 3 items\n"
+        "tests/test_io.py::test_reads_config FAILED\n"
+        "E   FileNotFoundError: [WinError 2] The system cannot find the file "
+        "specified: 'config.toml'\n"
+        "===== 1 failed, 2 passed in 0.31s =====\n"
+    )
+
+    def test_real_pytest_failure_is_not_a_launch_failure(self):
+        r = rl.Ran(1, self.REAL_FAILURE, "")
+        assert r.ran_pytest(), "pytest 的招牌字串都在，它顯然跑過了"
+        assert r.launch_failed, "前提：字串比對確實會命中（所以才需要否決權）"
+
+    def test_defects_come_from_the_failing_test_not_the_tool(self, tmp_path, monkeypatch):
+        """端到端：這種輸出要解析出真的失敗測試，不能報成 tool:cannot-run-tests。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        script = tmp_path / "fake_pytest.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.stdout.write({self.REAL_FAILURE!r})\n"
+            "sys.exit(1)\n", encoding="utf-8")
+        out = rl.run(_args(review_cmd=f'"{PY}" "{script}"', fix_cmd=OK,
+                           max_iters=1, patience=1))
+        assert not any("tool:cannot-run-tests" in d for d in out["final_defects"]), (
+            f"真實失敗被蓋成工具層失敗：{out}")
+        assert not out.get("tool_failure"), out.get("tool_failure")
+
+    def test_bare_error_word_is_not_evidence_pytest_ran(self):
+        """裸的 error 幾乎任何錯誤訊息裡都有，收它會把啟動失敗誤判成跑過了。"""
+        assert not rl.Ran(9009, "", "'pytest' is not recognized as an internal or "
+                                    "external command, operable program or batch "
+                                    "file. error").ran_pytest()
