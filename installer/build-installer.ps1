@@ -1,4 +1,4 @@
-<#
+﻿<#
 build-installer.ps1 — 備妥 payload + 用 Inno Setup 6 編譯出 dist/CodexAutoAI-setup-<ver>.exe。
 先確保 dist/CodexAutoAI.exe 存在（沒有就先跑 build-app.ps1）。
 #>
@@ -22,7 +22,7 @@ if (-not (Test-Path "dist/CodexAutoAI.exe")) {
 
 # 2. 找 Inno Setup 6
 $iscc = $null
-foreach ($c in @("iscc", "ISCC", "C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe")) {
+foreach ($c in @("iscc", "ISCC", "C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe")) {
   $cmd = Get-Command $c -ErrorAction SilentlyContinue
   if ($cmd) { $iscc = $cmd.Source; break }
   if (Test-Path $c) { $iscc = $c; break }
@@ -52,6 +52,20 @@ Copy-Item "desktop/codexautoai.ico" -Destination (Join-Path $payload "desktop") 
 if (Test-Path "desktop/VERSION") { Copy-Item "desktop/VERSION" -Destination (Join-Path $payload "desktop") -Force }
 # launcher exe
 Copy-Item "dist/CodexAutoAI.exe" -Destination $payload -Force
+
+# 內建 gs-spec-forge 快照 —— 「啟動新任務（先產規格）」的開箱 fallback。
+# launcher._spec_forge_candidates() 凍結版找的是 APP_DIR\spec_forge_snapshot（exe 旁），
+# 所以放 payload 根。來源與規則同 build-vsix.ps1 步驟 2：sibling clone，建置機沒有時
+# 警告並跳過（該 fallback 不可用，其餘功能不受影響）。
+$sfSrc = Join-Path (Split-Path -Parent $root) "gs-spec-forge/src/gs_spec_forge"
+if (Test-Path $sfSrc) {
+  $sfSnap = Join-Path $payload "spec_forge_snapshot"
+  New-Item -ItemType Directory -Force (Join-Path $sfSnap "gs_spec_forge") | Out-Null
+  Copy-Item (Join-Path $sfSrc "*") -Destination (Join-Path $sfSnap "gs_spec_forge") -Recurse -Force
+  Write-Host "[installer] 已內建 gs-spec-forge 快照（bundled fallback）" -ForegroundColor Cyan
+} else {
+  Write-Host "[installer] 警告：找不到 sibling gs-spec-forge，跳過內建快照——「啟動新任務（先產規格）」的開箱 fallback 將不可用" -ForegroundColor Yellow
+}
 
 # 清掉混進來的快取
 Get-ChildItem $payload -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
