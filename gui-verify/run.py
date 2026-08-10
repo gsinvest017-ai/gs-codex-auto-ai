@@ -143,7 +143,7 @@ def main() -> int:
            f"locked={notes.get('locked')}）——GUI 驗證在這種狀態下沒有意義")
         return 1
 
-    for need in ("focus", "screenshot", "exec"):
+    for need in ("windows", "screenshot", "exec"):
         if need not in caps:
             no(f"broker 未回報 {need} 能力，無法進行 GUI 驗證")
             return 1
@@ -161,24 +161,33 @@ def main() -> int:
 
     try:
         # ── 3. 視窗真的出現了嗎（核心斷言）──────────────────
+        #
+        # 問「**我剛啟動的那個 pid** 有沒有畫出視窗」，而不是「畫面上有沒有一個叫
+        # CodexAutoAI 的視窗」。兩者只在單一實例時等價——實測開發機上同事已經開著
+        # 同一個 App 時，用標題找會得到歧義錯誤，驗證於是誤判成失敗。
+        #
+        # 用 pid 問還有一個好處：**完全不動前景**。不會把正在工作的人的焦點搶走，
+        # 而這支工具的前提就是「不能打擾正在用這個生產工具的人」。
         hdr("3. 視窗")
         deadline = time.time() + a.launch_timeout
-        focused = None
+        wins: list = []
         while time.time() < deadline:
             time.sleep(2)
-            focused = node.gs(f"focus {q(WINDOW_TITLE)}", timeout=90)
-            if focused.get("ok"):
-                break
-        if focused and focused.get("ok"):
-            # focus 成功代表：視窗存在、是 WM 認得的 toplevel、而且真的切到前景了。
-            # broker 的 focus 會回頭確認 GetForegroundWindow，不是信任 API 回傳值。
-            ok(f"視窗出現且可帶到前景（{focused.get('matched')}）")
-        else:
-            no(f"{a.launch_timeout} 秒內沒有出現標題含「{WINDOW_TITLE}」的視窗："
-               f"{(focused or {}).get('error')}")
-            wins = (focused or {}).get("visible_windows")
+            res = node.gs(f"windows --pid {launched_pid}", timeout=90)
+            wins = res.get("windows") or []
             if wins:
-                print(f"       當時桌面上的視窗：{', '.join(map(str, wins[:8]))}")
+                break
+        if wins:
+            titles = ", ".join(str(w.get("title")) for w in wins[:3])
+            ok(f"我啟動的 pid {launched_pid} 畫出了 {len(wins)} 個視窗（{titles}）")
+            if not any(WINDOW_TITLE.lower() in str(w.get("title", "")).lower() for w in wins):
+                no(f"但沒有一個標題含「{WINDOW_TITLE}」——視窗標題可能改了")
+        else:
+            no(f"{a.launch_timeout} 秒內，pid {launched_pid} 沒有畫出任何可見視窗")
+            others = node.gs(f"windows --title {q(WINDOW_TITLE)}", timeout=90).get("windows") or []
+            if others:
+                print(f"       （桌面上有 {len(others)} 個其他 {WINDOW_TITLE} 視窗，"
+                      f"pid={[w.get('pid') for w in others]}——那是別人開的，不是我們的）")
 
         # ── 4. 程序還活著（沒有啟動即崩潰）──────────────────
         hdr("4. 程序狀態")
