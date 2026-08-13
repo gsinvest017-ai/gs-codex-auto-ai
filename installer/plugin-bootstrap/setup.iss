@@ -13,7 +13,9 @@
 #endif
 
 [Setup]
-AppId={{7F2C4A91-63D5-4B18-9E77-CODEXPLUGIN01}
+; 真正的 GUID（前一版尾段塞了 CODEXPLUGIN01，含非十六進位字元——Inno 不驗格式
+; 所以照編，但那不是合法 GUID，未來若有人假設它是就會踩到）
+AppId={{23D49227-13DC-44CF-9032-CE05B62431AC}
 AppName=Codex plugin for Claude Code
 AppVersion={#AppVersion}
 AppPublisher=GS Invest
