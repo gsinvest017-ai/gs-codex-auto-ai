@@ -443,3 +443,52 @@ def test_concurrent_runs_do_not_share_scratch_files(tmp_path, monkeypatch):
     dirs = sorted(p.name for p in (tmp_path / "log" / "run_loop").iterdir() if p.is_dir())
     assert len(dirs) == 2, f"兩個 run 應該各有自己的暫存區：{dirs}"
     assert any("run-A" in d for d in dirs) and any("run-B" in d for d in dirs), dirs
+
+
+class TestVerdictActuallyGatesConvergence:
+    """`verdict` 必須真的影響收斂判斷，不能只是「解析得出來」。
+
+    review 抓到的漏洞：迴圈判收斂只看 `defects` 空不空。reviewer 明說
+    changes_requested 卻給空的（或型別不在封閉詞彙裡的）findings 時，缺陷被濾成空
+    集合 → 直接判 resolved。跟 M2 想修的假通過是同一類，只是換個觸發條件。
+    """
+
+    def _review_writing(self, tmp_path, payload: str) -> str:
+        """做一條會把指定內容寫進 {review_out} 的 review 指令。"""
+        script = tmp_path / "fake_reviewer.py"
+        script.write_text(
+            "import sys, pathlib\n"
+            f"pathlib.Path(sys.argv[1]).write_text({payload!r}, encoding='utf-8')\n",
+            encoding="utf-8")
+        return f'"{PY}" "{script}" {{review_out}}'
+
+    def test_changes_requested_with_empty_findings_is_not_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        cmd = self._review_writing(tmp_path, '{"verdict":"changes_requested","findings":[]}')
+        out = rl.run(_args(mode="review", phase="4", review_cmd=cmd, fix_cmd=OK, max_iters=1))
+        assert out["status"] != "resolved", f"reviewer 明說要改，不能判通過：{out}"
+        assert any("verdict-not-pass" in d for d in out["final_defects"]), out["final_defects"]
+
+    def test_changes_requested_with_unknown_finding_types_is_not_resolved(
+            self, tmp_path, monkeypatch):
+        """未知型別會被封閉詞彙濾掉——濾完變空集合就不能當成沒事。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        cmd = self._review_writing(
+            tmp_path,
+            '{"verdict":"changes_requested","findings":[{"type":"NITPICK","id":"X"}]}')
+        out = rl.run(_args(mode="review", phase="4", review_cmd=cmd, fix_cmd=OK, max_iters=1))
+        assert out["status"] != "resolved", out
+
+    def test_explicit_pass_still_resolves(self, tmp_path, monkeypatch):
+        """反向保護：不能靠「一律不通過」作弊過關——明說 pass 就要收斂。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        cmd = self._review_writing(tmp_path, '{"verdict":"pass","findings":[]}')
+        out = rl.run(_args(mode="review", phase="4", review_cmd=cmd, fix_cmd=OK, max_iters=1))
+        assert out["status"] == "resolved", out
+
+    def test_legacy_plain_text_with_no_issues_still_resolves(self, tmp_path, monkeypatch):
+        """舊的純文字 reviewer 沒有 verdict 可言，行為必須不變。"""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        cmd = self._review_writing(tmp_path, "我看過了，沒有發現問題。")
+        out = rl.run(_args(mode="review", phase="4", review_cmd=cmd, fix_cmd=OK, max_iters=1))
+        assert out["status"] == "resolved", out

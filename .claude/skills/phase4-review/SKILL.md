@@ -38,7 +38,7 @@ description: "Phase 4：派遣 Codex 審查 agent，中控複審架構與需求�
 ```bash
 python tools/run_loop.py --mode review --phase 4 --run-id <id> --max-iters 3 --patience 2 \
   --reviewer-model <模型A> --fixer-model <模型B> --available <A,B> \
-  --review-cmd 'python tools/codex_runner.py --model <A> --prompt "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把每個問題以 TYPE:ID 寫到 {review_out}（TYPE∈MISSING/EXTRA/MISMATCH，ID 用 FN 編號）。"' \
+  --review-cmd 'python tools/codex_runner.py --model <A> --prompt "逐行比對 docs/architecture.md 與 docs/requirements-spec.md，把結果以 JSON 寫到 {review_out}，格式：{\"verdict\":\"pass\"或\"changes_requested\",\"findings\":[{\"type\":\"MISSING\"或\"EXTRA\"或\"MISMATCH\",\"id\":\"FN 編號\",\"detail\":\"說明\"}]}。沒有任何問題時 verdict 填 pass、findings 給空陣列——**不要省略 verdict**。"' \
   --fix-cmd 'python tools/codex_runner.py --model <B> --prompt "依 {review_out} 的問題清單修正 docs/architecture.md。"'
 ```
 

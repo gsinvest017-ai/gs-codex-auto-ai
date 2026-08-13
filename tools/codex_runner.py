@@ -34,6 +34,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -128,30 +129,132 @@ def _expects_ok(cwd: Path, expects: list[str]) -> bool:
     return all((cwd / e).exists() for e in expects)
 
 
+# Codex 拒絕請求時會回一段結構清楚的 400，例如：
+#   {"type":"error","status":400,"error":{"type":"invalid_request_error",
+#    "message":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}}
+# 這種失敗**重試幾次都一樣**（是設定問題，不是暫時性故障），所以要認出來、講清楚、
+# 而且不要浪費三次重派。
+_FATAL_PATTERNS = (
+    ("model_not_supported", re.compile(
+        r"The '([^']+)' model is not supported when using Codex with a (\w+) account", re.I)),
+    ("not_logged_in", re.compile(r"not logged in|please run .?codex login", re.I)),
+    ("quota", re.compile(r"quota|rate.?limit|usage limit", re.I)),
+)
+
+# **只有這些「重跑一定一樣」的才跳過重試。**
+# `quota` 刻意不在裡面：速率限制正是 retry-with-backoff 要處理的東西，把它判成
+# 不可恢復會白白丟掉重試預算。它仍然會被認出來、訊息仍然講清楚，只是照常重試。
+_FATAL_KINDS = frozenset({"model_not_supported", "not_logged_in"})
+
+# `not_logged_in` / `quota` 的字面很鬆——而 Codex 的工作就是讀寫與討論程式碼，
+# 「rate limit」「quota」「not logged in」完全可能是它**產出內容**裡的正常字眼
+# （例如正在幫你寫一個限流模組）。只在**看起來像錯誤的行**裡比對，避免把一次
+# 可重試的失敗誤判成不可恢復。`model_not_supported` 的字面已經夠specific，不受此限。
+_ERRORISH = re.compile(r"\berror\b|\bfailed\b|\"status\"\s*:\s*[45]\d\d", re.I)
+_LOOSE_KINDS = frozenset({"not_logged_in", "quota"})
+
+
+def _errorish_lines(output: str) -> str:
+    return "\n".join(ln for ln in output.splitlines() if _ERRORISH.search(ln))
+
+
+def classify_failure(output: str) -> tuple[str, str]:
+    """從 codex 的輸出認出可歸因的失敗，回 (種類, 人看得懂的說明)。
+
+    沒認出來就回 ("", "")。**認出來不代表放棄重試**——只有 `_FATAL_KINDS` 裡的才會
+    跳過剩下的重試預算（見 `_FATAL_KINDS` 的說明）。
+
+    存在的理由：以前 stdout/stderr 直接丟 DEVNULL，於是 codex 明明印了一行清楚的
+    400 錯誤，runner 卻只能回 `exit=1 expects_ok=True`——使用者完全看不出是模型設錯、
+    沒登入、還是額度用完，只會以為「Codex 壞了」。
+    """
+    errorish = _errorish_lines(output)
+    for kind, rx in _FATAL_PATTERNS:
+        # 字面鬆的兩種只在「看起來像錯誤的行」裡找，避免命中 Codex 的正常產出。
+        m = rx.search(errorish if kind in _LOOSE_KINDS else output)
+        if not m:
+            continue
+        if kind == "model_not_supported":
+            model, acct = m.group(1), m.group(2)
+            return kind, (
+                f"Codex 設定的模型 '{model}' 不支援 {acct} 帳號。"
+                f"改用帳號支援的模型即可：`codex exec -m <model>`，"
+                f"或改掉 ~/.codex/config.toml 的 model=。重試不會有幫助。")
+        if kind == "not_logged_in":
+            return kind, "Codex 尚未登入，請執行 `codex login`。重試不會有幫助。"
+        return kind, "Codex 額度或速率限制——已照常重試（退避後可能就過了）。"
+    return "", ""
+
+
+def _tail(path: Path, limit: int = 1500) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
+    except OSError:
+        return ""
+
+
 def run_once(cmd: list[str], cwd: Path, expects: list[str],
              session_grace: float, heartbeat: float, poll: float = 2.0) -> tuple[bool, str]:
-    """跑一次；回 (成功?, 原因)。"""
+    """跑一次；回 (成功?, 原因)。原因前綴 `fatal:` 代表重試沒有意義。"""
     start = time.time()
-    proc = subprocess.Popen(
-        cmd, cwd=str(cwd),
-        stdin=subprocess.DEVNULL,             # 根治 #20919：絕不讓 codex 等 stdin
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0),
-    )
+    # **導到檔案而不是 PIPE。** 需要輸出才能講清楚失敗原因（見 classify_failure），
+    # 但 PIPE 在沒人讀的情況下寫滿就會把 codex 卡住——而這支 runner 的整個存在意義
+    # 就是不要讓 codex 掛死。檔案不會阻塞。
+    # mkstemp 會回一個**已開啟**的 fd；不關掉的話 Windows 會因為「檔案正由另一個
+    # 程序使用」而刪不掉（實測 WinError 32）。
+    fd, name = tempfile.mkstemp(prefix="codex_runner_", suffix=".log")
+    os.close(fd)
+    log = Path(name)
+    fh = log.open("w", encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd),
+            stdin=subprocess.DEVNULL,         # 根治 #20919：絕不讓 codex 等 stdin
+            stdout=fh, stderr=subprocess.STDOUT,
+            creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0),
+        )
+    except Exception:
+        fh.close()
+        try:
+            log.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    def _done(ok: bool, reason: str) -> tuple[bool, str]:
+        fh.close()
+        if not ok:
+            out = _tail(log)
+            kind, hint = classify_failure(out)
+            if kind in _FATAL_KINDS:
+                reason = f"fatal:{kind} {hint}"
+            elif kind:
+                # 認得出來但可重試（例如速率限制）：講清楚，但不放棄重試。
+                reason = f"{kind}: {hint}"
+            elif out:
+                reason = f"{reason}｜輸出尾段：{out[-400:]}"
+        # 被殺掉的子行程可能還沒完全放開檔案；清不掉就留給 OS 的暫存清理，
+        # 不值得為了刪一個暫存檔讓整趟呼叫失敗。
+        try:
+            log.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return ok, reason
+
     session_seen = False
     while True:
         rc = proc.poll()
         if rc is not None:
             if rc == 0 and _expects_ok(cwd, expects):
-                return True, "ok"
-            return False, f"exit={rc} expects_ok={_expects_ok(cwd, expects)}"
+                return _done(True, "ok")
+            return _done(False, f"exit={rc} expects_ok={_expects_ok(cwd, expects)}")
         now = time.time()
         mt = _latest_session_mtime(start - 5)
         if mt is not None:
             session_seen = True
         if not session_seen and now - start > session_grace:
             _kill_tree(proc)
-            return False, f"no-session within {session_grace}s（#20919 型掛死）"
+            return _done(False, f"no-session within {session_grace}s（#20919 型掛死）")
         # 停寫判定要**同時**滿足「session 靜止超過 heartbeat」與「這次 attempt 自己也跑了
         # 至少 heartbeat 秒」。少了後者，重派時上一個被殺掉的 attempt 留下的 session 檔
         # 會讓新 attempt 在起跑 0.2 秒內就被誤判停寫、白白燒掉一次重試
@@ -159,7 +262,7 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
         if (session_seen and mt is not None
                 and now - mt > heartbeat and now - start > heartbeat):
             _kill_tree(proc)
-            return False, f"heartbeat stalled {int(now - mt)}s（停寫型掛死）"
+            return _done(False, f"heartbeat stalled {int(now - mt)}s（停寫型掛死）")
         time.sleep(poll)
 
 
@@ -200,10 +303,14 @@ def main(argv: list[str] | None = None) -> int:
                               "duration_s": round(time.time() - t0, 1), "reason": "ok"},
                              ensure_ascii=False))
             return 0
+        # `fatal:` = 設定 / 帳號問題，重跑三次只會得到三次一樣的錯誤、多花幾分鐘。
+        if reason.startswith("fatal:"):
+            break
         if attempt < args.retries:
             time.sleep(args.retry_backoff)
-    print(json.dumps({"status": "failed", "attempts": args.retries,
-                      "duration_s": round(time.time() - t0, 1), "reason": reason},
+    print(json.dumps({"status": "failed", "attempts": attempt,
+                      "duration_s": round(time.time() - t0, 1), "reason": reason,
+                      "fatal": reason.startswith("fatal:")},
                      ensure_ascii=False))
     return 1
 

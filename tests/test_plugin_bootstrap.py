@@ -128,3 +128,65 @@ def test_build_refuses_a_script_without_bom():
 def test_build_looks_for_per_user_inno_install():
     """建置機沒有系統管理員是常態（本 App 自己就是 lowest 權限）——#71 的教訓。"""
     assert "LOCALAPPDATA" in _text(BUILD), "ISCC 候選路徑要含免管理員的 per-user 安裝位置"
+
+
+class TestCrossPowerShellCompat:
+    """安裝檔跑的是 **Windows 內建的 powershell.exe（5.1）**，不是 pwsh 7。
+
+    實測差異：同一支腳本，pwsh 7 回 `loggedIn:true`、5.1 回 `false`。原因是
+    `$ErrorActionPreference = "Stop"` 之下，node 往 stderr 印的 DEP0190 警告在 5.1
+    會變成終止性錯誤，整段驗證被 catch 掉。若沒修，每個用 .exe 安裝的同事都會被
+    告知「尚未登入」——即使他早就登入了。
+    """
+
+    def test_login_probe_tolerates_native_stderr(self):
+        t = _text(PS1)
+        assert "Get-CodexLoggedIn" in t, "登入偵測要收斂成一個函式，兩處呼叫才不會走樣"
+        fn = t.split("function Get-CodexLoggedIn", 1)[1].split("\nfunction ", 1)[0]
+        assert '$ErrorActionPreference = "Continue"' in fn, (
+            "要暫時放行原生 stderr，否則 PS 5.1 會把 node 的警告當成終止性錯誤")
+        assert "2>&1" in fn, "要把 stderr 一起收進來，不能丟掉（丟掉在 5.1 仍會觸發錯誤）"
+
+    def test_login_probe_extracts_the_json_substring(self):
+        """就算不終止，node 的警告也會混進輸出——不能整包丟給 ConvertFrom-Json。"""
+        fn = _text(PS1).split("function Get-CodexLoggedIn", 1)[1].split("\nfunction ", 1)[0]
+        assert 'IndexOf("{")' in fn and 'LastIndexOf("}")' in fn, (
+            "要從輸出裡把 JSON 那段切出來再解析")
+
+    def test_probe_distinguishes_unknown_from_false(self):
+        """問不到狀態 ≠ 沒登入。混為一談會讓「驗證壞了」被講成「你沒登入」。"""
+        fn = _text(PS1).split("function Get-CodexLoggedIn", 1)[1].split("\nfunction ", 1)[0]
+        assert fn.count("return $null") >= 3, "問不到要回 $null，不是 $false"
+
+
+def test_setup_does_not_leak_the_optional_step_exit_code():
+    """步驟 7 是**選配**的：它回 6（只差登入）時，setup 整支不能跟著回 6。
+
+    PowerShell 會沿用最後一個原生指令的離開碼，實測就是這樣把呼叫端誤導成
+    「整個設定失敗」。
+    """
+    setup = Path(__file__).resolve().parents[1] / "setup.ps1"
+    t = setup.read_bytes().decode("utf-8-sig")
+    assert "Install-CodexPlugin.ps1" in t, "setup 應該會嘗試安裝 plugin"
+    assert t.rstrip().endswith("exit 0"), "結尾要明確 exit 0，別沿用選配步驟的離開碼"
+
+
+def test_setup_treats_the_plugin_as_optional():
+    """plugin 失敗不能讓 setup 失敗——七階段 pipeline 走的是 codex_runner，不靠它。"""
+    setup = Path(__file__).resolve().parents[1] / "setup.ps1"
+    t = setup.read_bytes().decode("utf-8-sig")
+    step7 = t.split("步驟 7", 1)[1]
+    assert "try {" in step7 and "} catch {" in step7, "要包 try/catch，讓失敗只是略過"
+    assert "不影響七階段 pipeline" in step7, "訊息要講清楚失敗的後果有限"
+
+
+def test_logged_in_is_tri_state_not_boolean():
+    """問不到登入狀態 ≠ 沒登入。
+
+    `Get-CodexLoggedIn` 特地回 $null 表示「不知道」，但若 $result.loggedIn 的預設是
+    $false，最終輸出仍會斷定「尚未登入」，把那個區分整個抹掉——使用者會被叫去跑一個
+    他其實不需要跑的 codex login。
+    """
+    t = _text(PS1)
+    assert "loggedIn = $null" in t, "預設要是 $null（不知道），不是 $false（確定沒登入）"
+    assert "無法確認" in t, "問不到時的訊息要說「無法確認」，不能寫成斷定句"

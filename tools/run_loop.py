@@ -282,13 +282,77 @@ def parse_pytest_failures(stdout: str, stderr: str, returncode: int) -> list[str
     return ["pytest:unknown-failure"]
 
 
+def parse_structured_review(text: str) -> tuple[bool, list[str]]:
+    """試著把 reviewer 的輸出當成結構化 JSON 讀，回 (讀到了嗎, 缺陷清單)。
+
+    契約（借鏡 openai/codex-plugin-cc 的 review-output.schema.json，但**用我們自己的
+    prompt 產生**，不依賴那個 plugin 的 runtime——它的 review 子指令不吃 `--model`，
+    依賴它等於把模型選擇權交給使用者的全域 codex 設定）：
+
+        {"verdict": "pass" | "changes_requested",
+         "findings": [{"type": "MISSING"|"EXTRA"|"MISMATCH", "id": "...", ...}]}
+
+    **`verdict` 是重點，不是 findings。** 舊的做法是 regex 從自由文字刮 `TYPE:ID`，
+    於是「reviewer 看完覺得沒問題」與「reviewer 根本沒產出」都是空清單——語意相反卻
+    分不出來，實測造成 Phase 4 連兩次假通過。有了明確的 verdict，「通過」是**說出來
+    的**，不是「找不到東西」推論出來的。
+
+    容忍 Codex 在 JSON 前後多寫幾句話（很常見），所以取第一個 `{` 到最後一個 `}`。
+    """
+    if not text or not text.strip():
+        return False, []
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return False, []
+    try:
+        obj = json.loads(text[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return False, []
+    if not isinstance(obj, dict) or "verdict" not in obj:
+        return False, []
+    out: set[str] = set()
+    for f in obj.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        kind, fid = str(f.get("type", "")).upper(), str(f.get("id", "")).strip()
+        if kind in ("MISSING", "EXTRA", "MISMATCH") and fid:
+            out.add(f"{kind}:{fid}")
+    return True, sorted(out)
+
+
 def parse_issue_list(out_file: str) -> list[str]:
-    """從 review 寫出的 {review_out} 抽封閉詞彙 TYPE:ID（hash 穩定）。"""
+    """從 review 寫出的 {review_out} 抽封閉詞彙 TYPE:ID（hash 穩定）。
+
+    先試結構化 JSON，讀不到才退回原本的 regex——舊的 reviewer prompt 產出的是純文字，
+    不能因為換了契約就把既有流程弄壞。
+    """
     try:
         text = Path(out_file).read_text(encoding="utf-8")
     except Exception:
         return []
+    structured, ids = parse_structured_review(text)
+    if structured:
+        return ids
     return sorted({f"{m[0]}:{m[1]}" for m in _ISSUE_RE.findall(text)})
+
+
+def review_said_pass(out_file: str) -> bool:
+    """reviewer 有沒有**明說**通過（而不是「我們找不到缺陷」）。
+
+    只有結構化輸出答得出這個問題；純文字回退時一律回 False，維持舊行為。
+    """
+    try:
+        text = Path(out_file).read_text(encoding="utf-8")
+    except Exception:
+        return False
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return False
+    try:
+        obj = json.loads(text[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(obj, dict) and str(obj.get("verdict", "")).lower() == "pass"
 
 
 def estimate_tokens(*parts: str) -> int:
@@ -370,6 +434,14 @@ def _make_callables(orch, mode, phase_label, workdir, review_cmd, fix_cmd,
                 toolfail_box[0] = (f"審查指令沒有產出 {review_out}：{cmd}\n"
                                    f"{proc.text.strip()[:400]}")
                 defects = ["tool:review-no-output"]
+            # **verdict 要真的有影響力。** 光是能解析 verdict 沒有用——迴圈判收斂看的是
+            # `defects` 空不空。reviewer 明說 changes_requested 卻給空的 / 型別不在封閉
+            # 詞彙裡的 findings 時，缺陷會被濾成空集合，迴圈就直接判 resolved——換個
+            # 觸發條件的同一種假通過。合成一個穩定缺陷把它擋下來。
+            if not defects and raw.strip():
+                structured, _ = parse_structured_review(raw)
+                if structured and not review_said_pass(review_out):
+                    defects = ["review:verdict-not-pass"]
             tokens = estimate_tokens(cmd, proc.stdout)
         # review 逾時絕不能被當成「通過」——合成一個穩定缺陷讓迴圈繼續收斂。
         if proc.timed_out:
