@@ -136,6 +136,35 @@ Write-Host "6. 啟用 git hooks（AGENTS.md commit 時自動同步）"
 if ($SkipHooks) { Skip "依 -SkipHooks 跳過" }
 else { Run { & $py tools/install_hooks.py } "python tools/install_hooks.py" }
 
+# --- 步驟 7：OpenAI 官方 Codex plugin（選配，失敗不影響其他功能） ---
+# 裝了之後 Claude Code 裡多四個**給人用**的指令：/codex:review、
+# /codex:adversarial-review、/codex:rescue、/codex:transfer。
+# 這**不是**七階段 pipeline 的依賴——pipeline 走的是 tools/codex_runner.py，
+# 那條路能自己指定 --model，比 plugin 的 review（不吃 --model）可控。
+# 所以這裡失敗一律只警告，絕不讓整個 setup 失敗。
+Write-Host "7. Codex plugin for Claude Code（選配：/codex:review 等四個指令）"
+$pluginScript = Join-Path $PSScriptRoot "installer\plugin-bootstrap\Install-CodexPlugin.ps1"
+if (-not (Test-Path $pluginScript)) {
+  Skip "找不到 $pluginScript——略過（不影響七階段 pipeline）"
+} elseif ($DryRun) {
+  Todo "[dry-run] 安裝 Codex plugin（$pluginScript -Json）"
+} else {
+  try {
+    # -Json 隱含 -NoLogin：不在無人值守的 setup 中途彈瀏覽器打斷流程。
+    $raw = & powershell -NoProfile -ExecutionPolicy Bypass -File $pluginScript -Json 2>$null
+    $st  = ($raw | Out-String).Trim() | ConvertFrom-Json
+    if ($st.ok) {
+      Ok "Codex plugin 已就緒（/codex:review、/codex:transfer 等可用）"
+    } elseif ($st.exitCode -eq 6) {
+      Skip "Codex plugin 已裝好，但尚未登入 Codex——之後執行 codex login 即可"
+    } else {
+      Skip "Codex plugin 未安裝（$($st.message)）——不影響七階段 pipeline"
+    }
+  } catch {
+    Skip "Codex plugin 安裝略過（$_）——不影響七階段 pipeline"
+  }
+}
+
 # --- 完成 ---
 Write-Host "──────────────────────────────────"
 if ($DryRun) {
@@ -144,3 +173,9 @@ if ($DryRun) {
   Write-Host "設定完成！" -ForegroundColor Green
   Write-Host "下一步：在本資料夾執行  claude  ，然後打  /start  或直接描述需求。"
 }
+
+# **明確 exit 0。** PowerShell 會沿用最後一個原生指令的離開碼，而步驟 7 的 plugin
+# 安裝是**選配**的——它回 6（只差登入）時，setup 整支也跟著回 6，呼叫端會誤判整個
+# 設定失敗（實測就是這樣）。走到這裡代表沒有拋例外（$ErrorActionPreference = "Stop"），
+# 也就是設定成功。
+exit 0

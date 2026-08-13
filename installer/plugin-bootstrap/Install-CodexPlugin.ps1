@@ -56,7 +56,7 @@ $result = [ordered]@{
   ok = $false; stage = "start"; exitCode = 0
   claude = $false; node = $false; npm = $false
   marketplace = $false; plugin = $false
-  codex = $false; loggedIn = $false
+  codex = $false; loggedIn = $null      # 三態：$true / $false / $null（問不到）
   pluginPath = ""; message = ""
 }
 
@@ -163,6 +163,34 @@ if (Have codex) {
 # ── 5. 驗證：讓 plugin 自己回報狀態 ────────────────────────────────────────
 # 不要自己推測「應該可以了」——plugin 有 `setup --json` 的機器可讀契約，直接問它。
 # 安裝路徑帶版號（…/codex/1.0.6），寫死會在下次改版失效，所以從 installed_plugins.json 反查。
+# 問 plugin 自己「Codex 登入了沒」，回 $true / $false / $null（問不到）。
+#
+# **不能天真地 `| ConvertFrom-Json`。** 兩個在 Windows PowerShell 5.1 才會現形的坑
+# （而 5.1 正是安裝檔實際用的那一個，pwsh 7 上完全看不到）：
+#   1. node 會往 stderr 印 DEP0190 DeprecationWarning。在 `$ErrorActionPreference =
+#      "Stop"` 之下，原生指令的 stderr 會變成終止性錯誤，整段被 catch 掉。
+#   2. 就算不終止，那行警告也會混進輸出，讓 ConvertFrom-Json 解析失敗。
+# 兩者的結果一樣：明明已經登入卻回報「尚未登入」——實測 pwsh 7 說 true、5.1 說 false。
+# 所以要暫時放行 stderr，再從輸出裡把 JSON 那段切出來。
+function Get-CodexLoggedIn([string]$companion) {
+  if (-not (Test-Path $companion)) { return $null }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $raw = (& node $companion setup --json 2>&1 | Out-String)
+  } catch {
+    return $null
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  $s = $raw.IndexOf("{"); $e = $raw.LastIndexOf("}")
+  if ($s -lt 0 -or $e -le $s) { return $null }
+  try {
+    $st = $raw.Substring($s, $e - $s + 1) | ConvertFrom-Json
+    return [bool]$st.auth.loggedIn
+  } catch { return $null }
+}
+
 function Get-PluginPath {
   $state = Join-Path $env:USERPROFILE ".claude\plugins\installed_plugins.json"
   if (-not (Test-Path $state)) { return "" }
@@ -183,15 +211,12 @@ if (-not $path -or -not (Test-Path $path)) {
 }
 
 $companion = Join-Path $path "scripts\codex-companion.mjs"
-if (Test-Path $companion) {
-  try {
-    $raw = & node $companion setup --json 2>$null
-    $st  = ($raw | Out-String | ConvertFrom-Json)
-    $result.loggedIn = [bool]$st.auth.loggedIn
-  } catch {
-    # 驗證本身壞掉不該讓整個安裝算失敗——東西都裝好了，只是問不到狀態。
-    Skip "無法取得 Codex 登入狀態（不影響安裝）"
-  }
+# **三態**：$true / $false / $null（問不到）。把「問不到」併進「沒登入」的話，驗證
+# 一壞掉就會叫使用者去跑一個他其實不需要跑的 codex login——而且訊息還是斷定句。
+$result.loggedIn = Get-CodexLoggedIn $companion
+if ($null -eq $result.loggedIn) {
+  # 驗證本身壞掉不該讓整個安裝算失敗——東西都裝好了，只是問不到狀態。
+  Skip "無法取得 Codex 登入狀態（不影響安裝）"
 }
 
 # ── 6. 登入 ────────────────────────────────────────────────────────────────
@@ -202,6 +227,9 @@ if ($result.loggedIn) {
 }
 
 if ($NoLogin -or $Json) {
+  if ($null -eq $result.loggedIn) {
+    Finish 6 "login" "全部裝好了，但**無法確認** Codex 登入狀態。若 /codex: 指令不能用，請執行 codex login。"
+  }
   Finish 6 "login" "全部裝好了，但 Codex 尚未登入。請執行：codex login"
 }
 
@@ -210,13 +238,8 @@ Todo "Codex 尚未登入，現在開瀏覽器登入…"
 try { & codex login } catch { Err "登入指令執行失敗：$_" }
 
 $path = Get-PluginPath
-$companion = Join-Path $path "scripts\codex-companion.mjs"
-if (Test-Path $companion) {
-  try {
-    $st = (& node $companion setup --json 2>$null | Out-String | ConvertFrom-Json)
-    $result.loggedIn = [bool]$st.auth.loggedIn
-  } catch {}
-}
+$li = Get-CodexLoggedIn (Join-Path $path "scripts\codex-companion.mjs")
+if ($null -ne $li) { $result.loggedIn = $li }
 
 if ($result.loggedIn) { Ok "Codex 已登入"; Finish 0 "done" "" }
 Finish 6 "login" "尚未偵測到登入。稍後手動執行 `codex login` 即可，plugin 本身已裝好。"
