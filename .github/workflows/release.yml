@@ -30,6 +30,32 @@ jobs:
           python -m pip install pyinstaller pillow
           choco install innosetup -y --no-progress
 
+      # 授權閘門的前提。KEYGUARD 是私有 repo，CI 拿不到就裝不起來，而
+      # installer/build-app.ps1 會因此中止 —— 這是刻意的：寧可發版失敗，也不要再
+      # 出一批「跑得好好的、但什麼都不強制」的安裝檔到公開鏡像上。
+      #
+      # 一定要非 editable：KEYGUARD 的套件目錄是 src、import 名是 keyguard，
+      # editable 靠 .pth + 自訂 finder 做對映，PyInstaller 的靜態模組圖追不到。
+      - name: Install KEYGUARD（授權閘門）
+        shell: pwsh
+        env:
+          KEYGUARD_TOKEN: ${{ secrets.KEYGUARD_TOKEN }}
+        run: |
+          if (-not $env:KEYGUARD_TOKEN) {
+            throw @"
+          找不到 KEYGUARD_TOKEN secret，CI 無法安裝授權閘門。
+
+          這個 workflow 會把安裝檔發佈到 PUBLIC 鏡像 repo，所以不能在沒有授權鎖的
+          情況下出貨。二選一：
+
+            1. 設定 secret KEYGUARD_TOKEN（對 gsinvest017-ai/KEYGUARD 有 read 權限的 PAT），或
+            2. 改用本機發版：pwsh installer/release.ps1 -Version <x.y.z>
+               （本機環境已裝 KEYGUARD，閘門會照常執行）
+          "@
+          }
+          python -m pip install "git+https://x-access-token:$env:KEYGUARD_TOKEN@github.com/gsinvest017-ai/KEYGUARD.git"
+          python -m pip show keyguard | Select-String "^Name:|^Version:"
+
       - name: Build installer
         shell: pwsh
         run: |

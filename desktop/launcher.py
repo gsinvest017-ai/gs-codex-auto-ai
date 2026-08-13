@@ -34,6 +34,15 @@ try:
 except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
     updater = None
 
+# 授權閘門（sibling module，由 `keyguard scaffold-app` 產生）。
+#
+# 刻意用 top-level import 而不是像 conpty/sessions/termserver 那樣延遲載入：
+# 授權鎖的失敗模式就是「靜默漏包」——PyInstaller 收不到就變成一個跑得好好的、
+# 但什麼都不強制的 exe。放在模組層讓模組圖沒有模糊空間，而 licensing.py 自己
+# 對「整包 keyguard 遺失」已有 fail-open 的極小 fallback（那一層由 build 期的
+# packagecheck 負責擋，見 installer/build-app.ps1）。
+import licensing
+
 try:
     import global_overlay  # 啟動套用 / 關閉還原全域 Claude/Codex 設定（sibling module）
 except Exception:  # noqa: BLE001 — 缺模組不該擋住啟動器
@@ -1762,7 +1771,50 @@ def _overlay_token() -> str:
     return f"desktop:{os.getpid()}"
 
 
-def main() -> int:
+def _licence_cli(argv: list[str] | None) -> Optional[int]:
+    """處理一次性授權指令；不是授權指令就回 None 讓 App 正常啟動。
+
+    這幾個旗標同時也是出貨閘門（`python -m keyguard.packagecheck`）驗證的介面：
+    它跑 `<exe> --machine-id` 與 `<exe> --licence-status`，用輸出判斷 keyguard
+    到底有沒有被打包進去、強制模式有沒有生效。少了它們，閘門連檢查都做不了。
+
+    輸出一律走 `licensing.report_cli()`。這是 `--noconsole` build，`sys.stdout`
+    是 `None`，裸 `print()` 會把 `file=None` 解析到 `sys.stdout`、拿到 `None`，
+    然後**靜默返回**而不是拋錯——失敗的啟用與成功的啟用在畫面上長得一模一樣。
+    """
+    import argparse
+
+    p = argparse.ArgumentParser(prog="CodexAutoAI", add_help=False)
+    p.add_argument("--activate", metavar="KEY")
+    p.add_argument("--licence-email", metavar="EMAIL")
+    p.add_argument("--licence-status", action="store_true")
+    p.add_argument("--machine-id", action="store_true")
+    # parse_known_args：啟動器本來不吃參數，未知參數要留給既有行為，不能讓
+    # argparse 直接 exit(2) 把 App 擋在門外。
+    args, _rest = p.parse_known_args(argv)
+
+    if args.machine_id:
+        return licensing.report_cli(True, licensing.machine_id())
+    if args.activate:
+        ok, message = licensing.activate(args.activate, args.licence_email or "")
+        return licensing.report_cli(ok, message)
+    if args.licence_status:
+        return licensing.report_cli(
+            True,  # 指令本身成功了；授權狀態是它的輸出，不是它的結果
+            json.dumps(licensing.check().to_dict(), indent=2, ensure_ascii=False))
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    code = _licence_cli(argv)
+    if code is not None:
+        return code
+
+    # 閘門要擋在開 port 與起背景執行緒之前。內嵌終端機服務是延遲啟動的（用到才綁
+    # loopback port），所以這裡就是正確的位置——先把服務叫起來再蓋一個拒絕視窗，
+    # 等於讓真的服務在誰都能關掉的東西後面跑，而且 loopback 上任何行程都連得到。
+    licensing.enforce_or_exit()
+
     # 啟動：套用全域 Claude/Codex 設定；關閉（正常關 / atexit）一定還原。
     released = {"done": False}
 
