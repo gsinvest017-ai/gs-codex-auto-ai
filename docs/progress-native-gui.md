@@ -1,3 +1,10 @@
+---
+type: progress
+updated: 2026-07-07
+repos: [gs-codex-auto-ai]
+owner: gsinvest017-ai
+---
+
 # 進度：控制台原生 GUI 化（0.10.0）
 
 目標：讓控制台更像 Claude/Codex 官方 VS Code extension、對非開發者更友善。survey 見對話。
