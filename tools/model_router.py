@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 import re
 from pathlib import Path
@@ -137,6 +138,12 @@ def apply_preset(root: Path | str, preset: str) -> dict:
 
 
 def main(argv=None) -> int:
+    # Node execFile decodes stdout as UTF-8 even on Windows with a cp950 locale.
+    # Keep JSON output encoding stable for every caller, including preset/errors.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt")
     ap.add_argument("--preset", choices=("multi-provider", "codex-first"))

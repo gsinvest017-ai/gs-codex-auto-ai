@@ -1,5 +1,7 @@
 """Routing policy and actual runner adapter contracts; no paid model calls."""
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -212,3 +214,16 @@ def test_native_claude_shim_keeps_multiline_prompt(tmp_path, monkeypatch):
     assert Path(argv[0]) == executable
     assert argv[argv.index("-p") + 1] == prompt
     assert not any(str(arg).endswith(".cmd") for arg in argv)
+
+
+
+def test_real_cli_emits_utf8_despite_legacy_stdio_encoding(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools/model_router.py"), "--root", str(tmp_path),
+         "--prompt", "請審查程式", "--json"],
+        capture_output=True, check=True, timeout=10,
+        env={**os.environ, "PYTHONIOENCODING": "cp950"},
+    )
+    route = json.loads(result.stdout.decode("utf-8", errors="strict"))
+    assert route["scenario"] == "review"
+    assert route["reason"] == "matched keyword: 審查"
