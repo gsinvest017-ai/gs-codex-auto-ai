@@ -399,11 +399,17 @@ function html(defaultReq) {
 <div class="card"><h2>你想做什麼？</h2>
   <textarea id="req">${esc(defaultReq || "")}</textarea>
   <div class="row">
-    <button class="primary" id="btnStart">🚀 啟動新任務</button>
-    <button class="ghost" id="btnSeed">▶ 從 spec 開始</button>
+    <button class="primary" id="btnStart">🚀 啟動新任務（先產規格）</button>
+    <button class="ghost" id="btnRoute">預覽模型路由</button>
     <label><input type="checkbox" id="autopilot" checked> 非停模式（全程不問，建議非開發者保持勾選）</label>
   </div>
+  <div class="row">
+    <label>本專案路由 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">多供應商（研究 Gemini／審查 Claude／實作 Codex）</option></select></label>
+    <button class="ghost" id="btnPreset">套用模式</button>
+  </div>
+  <div class="muted">套用模式會取代本專案的路由設定並備份舊設定；各供應商須先安裝 CLI 並登入。</div>
   <div class="row muted" id="status"></div>
+  <div class="muted" id="runState"></div>
 </div>
 
 <div class="card"><h2>七階段進度</h2>
@@ -424,6 +430,7 @@ function html(defaultReq) {
 
 <div class="row">
   <button class="ghost" id="btnPreview">🌐 即時預覽網頁 UI（內嵌）</button>
+  <button class="ghost" id="btnLogs">開啟任務日誌</button>
   <button class="ghost" id="btnTerm">🖥 顯示背景終端機（除錯用）</button>
 </div>
 
@@ -431,13 +438,16 @@ function html(defaultReq) {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
   $("btnStart").onclick = () => { vscode.postMessage({ type:"start", requirement:$("req").value, autopilot:$("autopilot").checked }); };
-  $("btnSeed").onclick  = () => { vscode.postMessage({ type:"seed",  intent:$("req").value, autopilot:$("autopilot").checked }); };
+  $("btnRoute").onclick = () => { vscode.postMessage({ type:"route", requirement:$("req").value }); };
+  $("btnPreset").onclick = () => { vscode.postMessage({ type:"preset", preset:$("preset").value }); };
+  $("btnLogs").onclick = () => { vscode.postMessage({ type:"logs" }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
   $("btnPreview").onclick = () => { vscode.postMessage({ type:"preview" }); };
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (m.type === "status") { $("status").textContent = m.text; return; }
     if (m.type !== "state") return;
+    $("runState").textContent = m.run ? "任務狀態：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
     const s = m.summary;
     if (!m.exists) { $("phaseText").textContent = "尚未開始——按上方「🚀 啟動新任務」。"; return; }
     const marker = s.marker || 0;
@@ -495,7 +505,11 @@ function wireDashboard(webview, deps) {
   webview.html = html(deps.defaultReq);
   const push = () => {
     const { exists, summary } = computeState(root);
-    webview.postMessage({ type: "state", exists, summary });
+    let run = null;
+    try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
+      if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
+    } catch {}
+    webview.postMessage({ type: "state", exists, summary, run });
   };
   const timer = setInterval(push, 2000);
   push();
@@ -503,6 +517,9 @@ function wireDashboard(webview, deps) {
     const reply = (text) => webview.postMessage({ type: "status", text });
     if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
+    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply);
+    else if (m.type === "preset" && deps.onPreset) deps.onPreset(m.preset, reply);
+    else if (m.type === "logs" && deps.onOpenLogs) deps.onOpenLogs();
     else if (m.type === "showTerminal") deps.onShowTerminal();
     else if (m.type === "preview" && deps.onPreview) deps.onPreview(reply);
   });

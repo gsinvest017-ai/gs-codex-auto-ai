@@ -2,7 +2,7 @@
   "name": "codexautoai",
   "displayName": "CodexAutoAI",
   "description": "一句話描述需求，Claude 調度 + Codex 寫碼，自動跑完需求→架構→寫碼→測試→交付。",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "gsinvest",
   "engines": {
     "vscode": "^1.75.0"
@@ -129,6 +129,14 @@
         "command": "codexautoai.abort",
         "title": "CodexAutoAI: 中止（下一個回合邊界停止）",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "codexautoai.openLogs",
+        "title": "CodexAutoAI: 開啟任務日誌"
+      },
+      {
+        "command": "codexautoai.previewRouting",
+        "title": "CodexAutoAI: 預覽任務模型路由"
       }
     ],
     "configuration": {

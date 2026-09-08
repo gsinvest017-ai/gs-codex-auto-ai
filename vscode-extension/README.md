@@ -21,11 +21,11 @@ code --install-extension codexautoai-x.y.z.vsix
 
 ## <img src="https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/icons/rocket.svg?raw=true" width="22" align="top"> 用法（指令面板 <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd>）
 
-按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 就會列出七個指令。
+按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> 打開指令面板，在輸入框打 `CodexAutoAI` 即可找到任務、路由與日誌等指令。
 
 ### ⓪ 開啟控制台（免終端機 GUI）— 非開發者建議只用這個
 不想碰 CLI/TUI？執行「**CodexAutoAI: 開啟控制台**」：在 VS Code 內嵌面板輸入需求 → 按
-「🚀 啟動新任務」或「▶ 從 spec 開始」→ terminal **隱藏在背景跑**（預設非停模式全程不問）。
+「🚀 啟動新任務（先產規格）」→ terminal **隱藏在背景跑**（預設非停模式全程不問）。
 面板即時顯示：七階段進度條、**分工證據**（Claude 規劃呼叫/tokens vs Codex 實作呼叫——
 進入 phase5 卻沒有 Codex 呼叫會亮紅色警示，確保不是只在 Claude 燒 token）、累計成本與迭代。
 「顯示背景終端機」按鈕是除錯逃生口。
@@ -39,10 +39,9 @@ code --install-extension codexautoai-x.y.z.vsix
 ![Step 3 啟動](https://github.com/gsinvest017-ai/gs-codex-auto-ai/blob/main/docs/guide/step3-launch.svg?raw=true)
 
 ### ③ 啟動新任務：從 spec 開始 — 先用 [gs-spec-forge](https://github.com/gsinvest017-ai/gs-spec-forge) 產規格再跑七階段
-在需求框打意圖 → 執行「CodexAutoAI: 啟動新任務：從 spec 開始」→ 背景產出 spec.md → 當七階段
-seed 自動開發。**開箱即用**：extension 內建 gs-spec-forge 輕量核心（只需 Python），不必裝 gh、
-不必有 repo 權限；若另裝完整版 gs-spec-forge（`install-spec-forge.ps1`，帶 gs-rag 語意檢索與引用）
-會自動優先使用，也可用設定 `codexautoai.specForgeCmd` 明確指定。
+輸入意圖 → 選「一般／非停」→ 產出 spec.md → 啟動七階段開發。「啟動新任務」與此指令共用這個流程。
+
+先嘗試設定 `codexautoai.specForgeCmd` 指定的工具、已安裝的 gs-spec-forge，以及建置時可選的快照；這些候選不可用時，最後使用內建純 Python 離線產生器建立規格草稿，再由需求階段細化。離線模式不含 gs-rag 檢索或來源引用，只需要 Python，不需要私人 repo 權限。若已安裝完整版 gs-spec-forge，可繼續使用其完整功能。
 
 ### ④ 即時預覽網頁 UI（內嵌）— pipeline 產出有前端的專案一鍵看結果
 執行「CodexAutoAI: 即時預覽網頁 UI」（或控制台的 🌐 按鈕），自動降級、全在 VS Code 內嵌：
@@ -67,3 +66,12 @@ seed 自動開發。**開箱即用**：extension 內建 gs-spec-forge 輕量核�
 
 框架預設 `bypassPermissions`（一般工具不問權限）；選「非停（autopilot）」連回合都不停，
 一路跑到交付。`commit` / `push` / 刪除等不可逆操作仍會停下來問你。
+
+
+### 0.13.0 任務入口與智慧路由
+
+啟動新任務會先產生規格，再啟動七階段流程，與桌面版的主入口一致。控制台可預覽 Python 共用 router 的 scenario、供應商、模型與原因，並套用「Codex 優先」或「多供應商」模式；設定只寫入目前專案的 `log/model-routing.json`，既有設定會備份。多供應商模式需要各 CLI 已安裝並登入；3D modeling 預設使用 Codex `gpt-6-astra`，是否能執行仍取決於該帳號模型權限。
+
+啟動時會寫入 `log/app-run.json` 並維護心跳；控制台的「開啟任務日誌」提供生命週期與路由紀錄。原始需求透過該 terminal 的環境變數交给 runner，spec 路徑不會取代任務分類上下文。關閉 terminal、extension 或 shell integration 回報 Claude 命令結束時停止心跳；未啟用 shell integration 時，由每次任務的唯一退出標記收尾，CLI 非零退出會顯示 failed；本次 Phase 7 成功事件也可停止心跳。
+
+本版沿用 VS Code 原生終端機與既有分工圖表，沒有移植桌面 ConPTY/xterm 多分頁；圖表的 token 統計仍以 Claude/Codex 為主，不代表其他供應商的完整用量。插件與桌面使用獨立版本號。
