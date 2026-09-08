@@ -6,3 +6,5 @@ release-vsix.ps1
 **/*.map
 **/*.release-bak
 node_modules/**
+
+**/*.test.js

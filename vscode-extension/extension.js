@@ -13,6 +13,16 @@ const globalOverlay = require("./globalOverlay"); // 啟動套用 / 關閉還原
 const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗試（含內建快照 fallback）
 const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
 const preview = require("./preview");
+const routing = require("./routing");
+const activeRuns = new Map();
+const launchingRoots = new Set();
+function reserveLaunch(root) {
+  const key = path.resolve(root).toLowerCase();
+  if (launchingRoots.has(key) || Array.from(activeRuns.values()).some((x) => x.key === key))
+    throw new Error("本專案已有任務或正在產生規格；請等待完成或關閉其終端機。");
+  launchingRoots.add(key);
+  return () => launchingRoots.delete(key);
+}
 const { safePrompt } = require("./prompt"); // 需求清理（與 launcher._safe_prompt 同規則） // 前端網頁 UI 內嵌即時預覽（Live Preview / Simple Browser 三層降級）
 
 // 供 preview.openPreview 使用的 vscode 介面（隔離讓 preview.js 保持純 Node 可測）。
@@ -60,12 +70,54 @@ async function abortPipeline(root) {
 let lastTerminal = null;
 
 // 在 root 開 terminal 跑 claude；hidden=true 時不搶焦點（控制台走這條，非開發者不用看 CLI）。
-function runClaudeInTerminal(root, inner, { hidden = false } = {}) {
-  const t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden });
+function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route = null } = {}) {
+  const key = path.resolve(root).toLowerCase();
+  if (Array.from(activeRuns.values()).some((x) => x.key === key)) throw new Error("本專案已有執行中的任務。");
+  const started = Date.now();
+  const run = routing.createRun(root, prompt, route);
+  let t;
+  try {
+    t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden,
+      env: { CODEXAUTOAI_TASK_PROMPT: prompt },
+      ...(process.platform === "win32" ? { shellPath: "powershell.exe", shellArgs: ["-NoLogo", "-NoProfile"] } : { shellPath: "/bin/sh", shellArgs: [] }) });
+  } catch (error) { run.stop("launch_failed"); throw error; }
+  const timer = setInterval(() => {
+    try {
+      if (fs.existsSync(run.exitFile)) {
+        const code = fs.readFileSync(run.exitFile, "utf8").trim();
+        if (/^-?\d+$/.test(code)) {
+          clearInterval(timer); run.stop(Number(code) === 0 ? "completed" : "failed"); activeRuns.delete(t); return;
+        }
+      }
+      const events = path.join(root, "log", "events.jsonl");
+      if (fs.existsSync(events) && fs.statSync(events).mtimeMs >= started) {
+        // Only this run's timestamped events can finish its heartbeat.
+        const lines = fs.readFileSync(events, "utf8").split(/\r?\n/).filter((line) => {
+          try { const event = JSON.parse(line); return Date.parse(event.ts || event.timestamp || "") >= started; } catch { return false; }
+        });
+        const summary = dashboard.summarizeEvents(lines);
+        if (summary.completed.includes(7)) {
+          clearInterval(timer); run.stop("completed"); activeRuns.delete(t); return;
+        }
+      }
+      run.heartbeat();
+    } catch {}
+  }, 2000);
+  activeRuns.set(t, { run, timer, key });
   lastTerminal = t;
-  if (!hidden) t.show();
-  if (process.platform === "win32") { t.sendText(`Set-Location -LiteralPath "${root}"`); }
-  t.sendText(inner);
+  try {
+    if (!hidden) t.show();
+    if (process.platform === "win32") t.sendText(`Set-Location -LiteralPath '${root.replace(/'/g, "''")}'`);
+    // Each run gets an immutable exit marker, even without shell integration.
+    if (process.platform === "win32") {
+      const marker = run.exitFile.replace(/'/g, "''");
+      t.sendText(`${inner}; $codexAutoAiExit = $LASTEXITCODE; if ($null -eq $codexAutoAiExit) { $codexAutoAiExit = 1 }; [System.IO.File]::WriteAllText('${marker}', [string]$codexAutoAiExit)`);
+    } else {
+      const marker = "'" + run.exitFile.replace(/'/g, "'\"'\"'") + "'";
+      t.sendText(`${inner}; codex_auto_ai_exit=$?; printf '%s' "$codex_auto_ai_exit" > ${marker}`);
+    }
+  }
+  catch (error) { clearInterval(timer); run.stop("launch_failed"); activeRuns.delete(t); throw error; }
   return t;
 }
 
@@ -141,7 +193,10 @@ const FRAMEWORK_CORE = ["setup.ps1", "setup.cmd", "setup.sh",
   "CLAUDE.md", "AGENTS.md", ".claude", "tools", ".githooks"];
 
 function refreshFrameworkCore(extPath, root) {
-  return copyFramework(extPath, root, { force: FRAMEWORK_CORE });
+  if (!copyFramework(extPath, root, { force: FRAMEWORK_CORE })) return false;
+  const engine = path.join(extPath, "framework", "src", "codexautoai_v2");
+  if (fs.existsSync(engine)) fs.cpSync(engine, path.join(root, "src", "codexautoai_v2"), { recursive: true, force: true });
+  return true;
 }
 
 // ── 環境 pre-check（已安裝+登入就跳過「設定/修復」，不開終端機）──────────────
@@ -444,32 +499,8 @@ function activate(context) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("codexautoai.start", async () => {
-      const root = workspaceRoot();
-      if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
-      refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
-
-      const cfg = vscode.workspace.getConfiguration("codexautoai");
-      const req = await vscode.window.showInputBox({
-        prompt: "你想做什麼？（CodexAutoAI 會自動跑完七階段）",
-        value: cfg.get("defaultRequirement", ""),
-        ignoreFocusOut: true,
-      });
-      if (req === undefined) return; // 取消
-
-      const mode = await vscode.window.showQuickPick(
-        [
-          { label: "一般", detail: "互動式，Phase 2 會問你細節" },
-          { label: "非停（autopilot）", detail: "連回合都不停，一路跑到交付（commit/push 仍會問）" },
-        ],
-        { placeHolder: "選擇執行模式" }
-      );
-      if (!mode) return;
-
-      // 確保在專案資料夾執行（有些 PowerShell profile 啟動會把 cwd 切到家目錄）——
-      // runClaudeInTerminal 內建 Set-Location 處理。
-      runClaudeInTerminal(root, buildInner(req, mode.label.startsWith("非停")));
-    })
+    vscode.commands.registerCommand("codexautoai.start", () =>
+      vscode.commands.executeCommand("codexautoai.seedFromSpec"))
   );
 
   // ── 控制台（webview 內嵌 GUI）：給不想碰 CLI/TUI 的使用者 ─────────────────
@@ -477,20 +508,29 @@ function activate(context) {
   function buildDashboardDeps() {
     const root = workspaceRoot();
     if (!root) return null;
-    refreshFrameworkCore(extPath, root); // 自癒：每次啟動刷新框架核心到 extension 版本
     const cfg = vscode.workspace.getConfiguration("codexautoai");
     return {
       vscode, root,
       defaultReq: cfg.get("defaultRequirement", ""),
       onStart: (requirement, autopilot, reply) => {
-        if (!(requirement || "").trim()) { reply("請先輸入需求。"); return; }
-        runClaudeInTerminal(root, buildInner(requirement, autopilot), { hidden: true });
-        reply("✓ 已在背景啟動，下方進度會自動更新（terminal 隱藏，可按「顯示背景終端機」查看）。");
+        return buildDashboardDeps().onSeed(requirement, autopilot, reply);
       },
+      onPreviewRoute: async (requirement, reply) => {
+        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); }
+        catch (e) { reply(e.message); }
+      },
+      onPreset: async (preset, reply) => {
+        try { await routing.applyPreset(root, preset); reply(`已套用 ${preset} 至本專案；既有設定由 router 備份。`); }
+        catch (error) { reply(error.message); }
+      },
+      onOpenLogs: () => vscode.commands.executeCommand("codexautoai.openLogs"),
       onSeed: (intent, autopilot, reply) => {
         if (!(intent || "").trim()) { reply("請先輸入要開發的功能意圖。"); return; }
+        let release;
+        try { release = reserveLaunch(root); } catch (error) { reply(error.message); return; }
+        if (!refreshFrameworkCore(extPath, root)) { release(); reply("無法準備框架，任務未啟動。"); return; }
         reply("產生 spec 中…");
-        seedThenBuildInner(root, intent, cfg).then((r) => {
+        seedThenBuildInner(root, intent, cfg).then(async (r) => {
           if (!r.ok) {
             const tail = r.errors.length ? r.errors[r.errors.length - 1].detail : "";
             reply(`產生 spec 失敗：${tail.slice(0, 160)}`);
@@ -499,9 +539,10 @@ function activate(context) {
           // 轉正斜線：路徑要穿過 buildInner 的 safePrompt，反斜線會被清掉。
           const safePath = r.specPath.replace(/\\/g, "/");
           runClaudeInTerminal(root,
-            buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot), { hidden: true });
+            buildInner(`依照規格檔 ${safePath} 開發，跑完整七階段`, autopilot),
+            { hidden: true, prompt: intent, route: await routing.previewRoute(root, intent) });
           reply(`✓ 已產生 spec（${r.specPath}）並在背景啟動。`);
-        });
+        }).catch((e) => reply(`啟動失敗：${e.message}`)).finally(release);
       },
       onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
       onPreview: (reply) => {
@@ -583,8 +624,17 @@ function activate(context) {
         value: cfg.get("defaultRequirement", ""),
         ignoreFocusOut: true,
       });
-      if (intent === undefined) return; // 取消
+      if (intent === undefined || !intent.trim()) return;
+      const mode = await vscode.window.showQuickPick([
+        { label: "非停（autopilot）", autopilot: true, detail: "自動續跑至交付" },
+        { label: "一般", autopilot: false, detail: "單次互動 session" },
+      ], { placeHolder: "選擇執行模式" });
+      if (!mode) return;
 
+      let release;
+      try { release = reserveLaunch(root); }
+      catch (error) { vscode.window.showErrorMessage(error.message); return; }
+      try {
       // spec 產在 workspace 下的 vault/，讓 spec 與專案同處、可被 pipeline 讀到。
       const cands = specforge.candidates(cfg.get("specForgeCmd", "spec-forge"), extPath);
       const env = Object.assign({}, process.env, { SPEC_VAULT: path.join(root, "vault") });
@@ -609,8 +659,11 @@ function activate(context) {
 
       // 交回既有 pipeline：以 spec 檔為依據跑七階段（沿用 start 的終端啟動慣例）。
       runClaudeInTerminal(root,
-        buildInner(`依照規格檔 ${specPath.replace(/\\/g, "/")} 開發，跑完整七階段`, false));
+        buildInner(`依照規格檔 ${specPath.replace(/\\/g, "/")} 開發，跑完整七階段`, mode.autopilot),
+        { prompt: intent, route: await routing.previewRoute(root, intent) });
       vscode.window.showInformationMessage(`✓ 已產生 spec：${specPath}，開始跑 pipeline。`);
+      } catch (error) { vscode.window.showErrorMessage(`啟動失敗：${error.message}`); }
+      finally { release(); }
     })
   );
 
@@ -623,11 +676,46 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.abort", () => abortPipeline(workspaceRoot()))
   );
 
+  const stopTerminalRun = (terminal, status) => {
+    const active = activeRuns.get(terminal);
+    if (active) { clearInterval(active.timer); active.run.stop(status); activeRuns.delete(terminal); }
+  };
+  context.subscriptions.push(vscode.window.onDidCloseTerminal((t) => stopTerminalRun(t, "terminal_closed")));
+  if (vscode.window.onDidEndTerminalShellExecution) {
+    context.subscriptions.push(vscode.window.onDidEndTerminalShellExecution((event) => {
+      // Ignore the preliminary Set-Location command.
+      if (/^claude(?:\s|$)/.test(event.execution.commandLine.value)) {
+        const active = activeRuns.get(event.terminal);
+        let code = event.exitCode;
+        try { if (active) code = Number(fs.readFileSync(active.run.exitFile, "utf8").trim()); } catch {}
+        stopTerminalRun(event.terminal, code === 0 ? "completed" : "failed");
+      }
+    }));
+  }
+  context.subscriptions.push(vscode.commands.registerCommand("codexautoai.openLogs", async () => {
+    const root = workspaceRoot();
+    if (!root) return;
+    const names = ["vscode-sessions.jsonl", "app-run.json", "model-routing-events.jsonl", "events.jsonl"]
+      .filter((name) => fs.existsSync(path.join(root, "log", name)));
+    if (!names.length) { vscode.window.showInformationMessage("尚無任務日誌。"); return; }
+    const selected = await vscode.window.showQuickPick(names, { placeHolder: "選擇任務日誌" });
+    if (selected) await vscode.window.showTextDocument(vscode.Uri.file(path.join(root, "log", selected)));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("codexautoai.previewRouting", async () => {
+    const root = workspaceRoot();
+    if (!root) return;
+    const prompt = await vscode.window.showInputBox({ prompt: "輸入需求，預覽供應商與模型" });
+    if (!prompt) return;
+    try { const r = await routing.previewRoute(root, prompt); vscode.window.showInformationMessage(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); }
+    catch (error) { vscode.window.showErrorMessage(error.message); }
+  }));
   // 啟動時背景檢查（不阻塞 activate；失敗靜默）。
   checkForUpdate(context).catch(() => {});
 }
 
 function deactivate() {
+  for (const { run, timer } of activeRuns.values()) { clearInterval(timer); try { run.stop("extension_closed"); } catch {} }
+  activeRuns.clear();
   // 關閉：還原啟動時暫套的全域 Claude/Codex 設定（最後一個 owner 才真的還原）。
   try {
     if (overlayToken) { globalOverlay.release(overlayToken); overlayToken = null; }
@@ -635,4 +723,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, runClaudeInTerminal, refreshFrameworkCore, reserveLaunch };

@@ -8,6 +8,7 @@
 //   4. bundled    — 內建快照（.vsix 隨附的 stdlib-first 核心，python -m 執行）
 //                   讓「沒裝 gh / 沒 repo 權限 / 沒裝 gs-spec-forge」的使用者開箱即用。
 const fs = require("fs");
+const { execFile } = require("child_process");
 const os = require("os");
 const path = require("path");
 
@@ -42,12 +43,25 @@ function candidates(configured, extPath) {
       list.push({ kind: "bundled-py", buildCmd: (a) => `py -3 -m gs_spec_forge.cli ${a}`, env });
     }
   }
+  // Public builds always include tools/. Final fallback is an offline draft,
+  // explicitly labelled as unverified; it does not require a private snapshot.
+  const localSeed = [
+    path.join(extPath, "framework", "tools", "spec_seed.py"),
+    path.join(extPath, "..", "tools", "spec_seed.py"),
+  ].find((candidate) => fs.existsSync(candidate));
+  if (localSeed) {
+    const env = { PYTHONIOENCODING: "utf-8" };
+    list.push({ kind: "offline", file: "python", args: [localSeed], env });
+    list.push({ kind: process.platform === "win32" ? "offline-py" : "offline-python3",
+      file: process.platform === "win32" ? "py" : "python3",
+      args: process.platform === "win32" ? ["-3", localSeed] : [localSeed], env });
+  }
   return list;
 }
 
 // 依序嘗試候選執行 seed。execFn 簽名同 child_process.exec(cmd, opts, cb)。
 // 成功條件：exit 0 且 stdout 末行是 .md 路徑。回傳 Promise<{ok, specPath?, kind?, errors[]}>
-function trySeed(cands, intentArg, baseOpts, execFn) {
+function trySeed(cands, intentArg, baseOpts, execFn, execFileFn = execFile) {
   const errors = [];
   const attempt = (i) => {
     if (i >= cands.length) return Promise.resolve({ ok: false, errors });
@@ -56,7 +70,7 @@ function trySeed(cands, intentArg, baseOpts, execFn) {
       env: Object.assign({}, baseOpts.env || {}, c.env),
     });
     return new Promise((resolve) => {
-      execFn(c.buildCmd(`seed "${intentArg}"`), opts, (err, stdout, stderr) => {
+      const finish = (err, stdout, stderr) => {
         const out = (stdout || "").trim();
         const last = out ? out.split(/\r?\n/).pop().trim() : "";
         if (!err && last.toLowerCase().endsWith(".md")) {
@@ -65,7 +79,9 @@ function trySeed(cands, intentArg, baseOpts, execFn) {
           errors.push({ kind: c.kind, detail: ((stderr || "") + (err ? ` [${err.message}]` : "")).trim().slice(0, 200) });
           resolve(attempt(i + 1));
         }
-      });
+      };
+      if (c.file) execFileFn(c.file, [...c.args, "seed", intentArg], opts, finish);
+      else execFn(c.buildCmd(`seed "${intentArg}"`), opts, finish);
     });
   };
   return attempt(0);
