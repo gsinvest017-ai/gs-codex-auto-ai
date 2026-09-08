@@ -76,7 +76,7 @@ def test_actual_adapter_argv(monkeypatch, provider):
     command = runner.provider_command({"provider": provider, "model": "chosen"}, "hello\nworld")
     assert command[0] == "/bin/" + provider
     if provider == "codex":
-        assert command[1:] == ["exec", "--sandbox", "workspace-write", "--json", "-m", "chosen", "hello\nworld"]
+        assert command[1:] == ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "-m", "chosen", "hello\nworld"]
     else:
         assert command[command.index("--model") + 1] == "chosen"
         assert command[command.index("--output-format") + 1] == "json"

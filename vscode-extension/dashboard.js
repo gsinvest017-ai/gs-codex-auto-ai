@@ -477,12 +477,14 @@ function html(defaultReq) {
 <div class="card"><h2>七階段進度</h2>
   <div class="bar" id="bar">░░░░░░░░</div>
   <div class="muted" id="phaseText">尚未開始——按上方「🚀 啟動新任務」。</div>
+  <div class="warn" id="failureReason" role="alert"></div>
 </div>
 
 <div class="card"><h2>工作區歷史觀測（不作為本次路由驗證）</h2>
+  <div class="muted" id="historyNotice">未載入；即時調度只讀取本專案事件。</div>
   <div class="grid">
-    <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">0</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
-    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> <span id="codexUnit">次工具觀測</span><div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
+    <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">—</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
+    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">—</b> <span id="codexUnit">次工具觀測</span><div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
   </div>
   <div class="muted" id="share" style="margin-top:8px;"></div>
   <div class="wait" id="divWait">⏳ 已派遣 builder 子代理，等待第一筆 Codex 呼叫紀錄……（builders 的 codex exec 會稍晚出現在子代理 transcript）</div>
@@ -557,13 +559,24 @@ function html(defaultReq) {
     showEvidence(m.routingStats);
     $("runState").textContent = m.run ? "任務狀態（預定路由）：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
     const s = m.summary;
+    $("failureReason").textContent = s.failureReason || "";
+    $("failureReason").style.display = s.failureReason ? "block" : "none";
     if (!m.exists) { $("phaseText").textContent = "尚未開始——按上方「🚀 啟動新任務」。"; return; }
     const marker = s.marker || 0;
     $("bar").textContent = Array.from({length:8}, (_,i) => i <= marker ? "▓" : "░").join("");
     const names = ${JSON.stringify(PHASES)};
     let state = s.failed ? "✗ 失敗/升級" : "● 進行中";
-    if (marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
+    if (!s.failed && marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
+    if (s.runStatus === "completed") state = "✓ 任務已完成";
+    else if (["stopped", "心跳逾期"].includes(s.runStatus)) state = s.runStatus === "stopped" ? "■ 任務已停止" : "⚠ 心跳逾期，狀態未知";
     $("phaseText").innerHTML = "Phase " + marker + "/7 " + names[marker] + "　<span class='" + (s.failed ? "bad" : "ok") + "'>" + state + "</span>";
+    if (s.historyLoaded === false) {
+      $("historyNotice").textContent="未載入；為保持即時更新，不掃描歷史 session。實際用量請看上方本次任務證據。";
+      for (const id of ["claudeCalls","codexCalls","claudeTok","codexTok","codexP5","cost"]) $(id).textContent="未載入";
+      $("codexUnit").textContent=""; $("share").textContent=""; $("iter").textContent=""; $("ts").textContent="";
+      $("divWarn").style.display="none"; $("divWait").style.display="none"; return;
+    }
+    $("historyNotice").textContent="已載入歷史觀測；不作為本次路由驗證。";
     $("claudeCalls").textContent = s.claude.calls;
     $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
       + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
@@ -592,9 +605,18 @@ function html(defaultReq) {
 
 // 一次性計算某 workspace 的當前狀態（供狀態列 poller 用；面板 push() 有自己的增量版）。
 // 純資料、不依賴 vscode——回傳 { exists, summary }（summary 同 combineSummaries）。
-function computeState(root) {
+function computeState(root, { includeHistory = true } = {}) {
   const { exists, lines } = readEventsFile(root);
-  const f = findTranscript(root);
+  let run = null;
+  try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
+    if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
+  } catch {}
+  let legacyRoutingLines = [];
+  try { legacyRoutingLines = fs.readFileSync(path.join(root, "log", "model-routing-events.jsonl"), "utf8").split(/\r?\n/); } catch {}
+  // The runner writes attempts to events.jsonl. Read legacy files only for compatibility;
+  // canonical updates win deduplication and the app run scopes all dispatcher/worker events.
+  const routingStats = summarizeRoutingAttempts([...legacyRoutingLines, ...lines], null, run && run.run_id);
+  const f = includeHistory ? findTranscript(root) : null;
   let trSum = null, sub = null;
   if (f) {
     let trLines = [];
@@ -602,10 +624,27 @@ function computeState(root) {
     trSum = summarizeTranscript(trLines);
     sub = readSubagentStats(f);
   }
-  const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+  const runStart = run && Number.isFinite(run.started_at) ? run.started_at * 1000 : null;
+  const sinceMs = runStart !== null ? runStart : trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+  // Current app progress requires timestamped evidence from this run. Untimestamped
+  // legacy phase7 must never turn a newly started task into an already completed one.
+  const progressLines = runStart === null ? filterEventsSince(lines, sinceMs) : lines.filter((line) => {
+    try { const event=JSON.parse(line); return Date.parse(event.ts || event.timestamp || "") >= runStart; } catch { return false; }
+  });
   const summary = combineSummaries(
-    summarizeEvents(filterEventsSince(lines, sinceMs)), trSum, sub, readCodexUsage(root, sinceMs));
-  return { exists: exists || !!f, summary };
+    summarizeEvents(progressLines), trSum, sub, includeHistory ? readCodexUsage(root, sinceMs) : null);
+  summary.historyLoaded = includeHistory;
+  summary.runStatus = run && run.status;
+  summary.failureReason = null;
+  if (run && ["failed", "launch_failed"].includes(run.status)) {
+    summary.failed = true;
+    const lastFailure = routingStats.attempts.filter((a) => ["failed", "quota_exhausted"].includes(a.outcome)).pop();
+    const detail = lastFailure && lastFailure.reason;
+    summary.failureReason = detail && /Not inside a trusted directory/.test(detail)
+      ? "啟動失敗：Codex 拒絕在未受信任的非 Git 目錄執行。原始錯誤：" + detail
+      : "任務已失敗：" + (detail || "模型呼叫尚未留下失敗原因；請開啟任務日誌或背景終端機查看退出資訊。");
+  }
+  return { exists: exists || !!f || !!run || routingStats.attempts.length > 0, summary, run, routingStats };
 }
 
 // 把一個 webview（面板或側欄 view 皆可）接上控制台：設 html、每 2s 推狀態、綁訊息。
@@ -614,14 +653,7 @@ function wireDashboard(webview, deps) {
   const { root } = deps;
   webview.html = html(deps.defaultReq);
   const push = () => {
-    const { exists, summary } = computeState(root);
-    let run = null;
-    try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
-      if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
-    } catch {}
-    let routingLines = [];
-    try { routingLines = fs.readFileSync(path.join(root, "log", "model-routing-events.jsonl"), "utf8").split(/\r?\n/); } catch {}
-    webview.postMessage({ type: "state", exists, summary, run, routingStats: summarizeRoutingAttempts(routingLines, null, run && run.run_id) });
+    webview.postMessage({ type: "state", ...computeState(root, { includeHistory: false }) });
   };
   const timer = setInterval(push, 2000);
   push();
@@ -663,7 +695,7 @@ function makeDashboardViewProvider(makeDeps) {
 }
 
 module.exports = {
-  html, summarizeRoutingAttempts, openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
+  html, wireDashboard, summarizeRoutingAttempts, openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };

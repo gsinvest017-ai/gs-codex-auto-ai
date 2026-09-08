@@ -155,6 +155,11 @@ def _expects_ok(cwd: Path, expects: list[str]) -> bool:
 # 這種失敗**重試幾次都一樣**（是設定問題，不是暫時性故障），所以要認出來、講清楚、
 # 而且不要浪費三次重派。
 _FATAL_PATTERNS = (
+    ("untrusted_directory", re.compile(
+        r"^\s*(?:error:\s*)?Not inside a trusted directory and --skip-git-repo-check was not specified[.\s]*$", re.I | re.M)),
+    ("invalid_cli_arguments", re.compile(
+        r"^\s*error:\s*(?:unexpected argument|unrecognized (?:argument|option)|"
+        r"unknown (?:argument|option)|invalid value|the following required arguments were not provided)\b[^\n]*", re.I | re.M)),
     ("model_not_supported", re.compile(
         r"The '([^']+)' model is not supported when using Codex with a (\w+) account", re.I)),
     ("not_logged_in", re.compile(r"not logged in|please run .?codex login", re.I)),
@@ -164,7 +169,7 @@ _FATAL_PATTERNS = (
 # **只有這些「重跑一定一樣」的才跳過重試。**
 # `quota` 刻意不在裡面：速率限制正是 retry-with-backoff 要處理的東西，把它判成
 # 不可恢復會白白丟掉重試預算。它仍然會被認出來、訊息仍然講清楚，只是照常重試。
-_FATAL_KINDS = frozenset({"model_not_supported", "not_logged_in"})
+_FATAL_KINDS = frozenset({"model_not_supported", "not_logged_in", "untrusted_directory", "invalid_cli_arguments"})
 
 # `not_logged_in` / `quota` 的字面很鬆——而 Codex 的工作就是讀寫與討論程式碼，
 # 「rate limit」「quota」「not logged in」完全可能是它**產出內容**裡的正常字眼
@@ -200,6 +205,10 @@ def classify_failure(output: str) -> tuple[str, str]:
                 f"Codex 設定的模型 '{model}' 不支援 {acct} 帳號。"
                 f"改用帳號支援的模型即可：`codex exec -m <model>`，"
                 f"或改掉 ~/.codex/config.toml 的 model=。重試不會有幫助。")
+        if kind == "untrusted_directory":
+            return kind, "Codex 拒絕在非 Git 目錄啟動；請保留 workspace-write 沙箱並傳入 --skip-git-repo-check。重試不會有幫助。"
+        if kind == "invalid_cli_arguments":
+            return kind, f"模型 CLI 啟動參數無效：{m.group(0).strip()}。請依該 CLI --help 修正；重試不會有幫助。"
         if kind == "not_logged_in":
             return kind, "Codex 尚未登入，請執行 `codex login`。重試不會有幫助。"
         return kind, "Codex 額度或速率限制——已照常重試（退避後可能就過了）。"
@@ -366,14 +375,16 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
             out = ""
         if result_metadata is not None:
             result_metadata.update(output_metadata(out))
-        if not ok and quota_exhausted(out):
-            reason = "quota_exhausted: provider explicitly reported exhausted usage quota"
-        elif not ok:
-            kind, hint = classify_failure(out) if provider == "codex" else ("", "")
+        if not ok:
+            kind, hint = classify_failure(out)
+            if provider != "codex" and kind != "invalid_cli_arguments":
+                kind, hint = "", ""
             if kind in _FATAL_KINDS:
                 reason = f"fatal:{kind} {hint}"
+            elif quota_exhausted(out):
+                reason = "quota_exhausted: provider explicitly reported exhausted usage quota"
             elif kind:
-                # 認得出來但可重試（例如速率限制）：講清楚，但不放棄重試。
+                # A transient rate limit remains retryable; startup rejection does not.
                 reason = f"{kind}: {hint}"
             elif out:
                 reason = f"{reason}｜輸出尾段：{out[-400:]}"
@@ -432,7 +443,10 @@ def provider_command(route: dict, prompt: str) -> list[str]:
         raise ValueError(f"provider unavailable: {provider}; install/authenticate its CLI or explicitly select another provider")
     cmd = resolve_codex(provider)
     if provider == "codex":
-        cmd += ["exec", "--sandbox", "workspace-write", "--json"]
+        # The runner's explicit cwd is the requested workspace, including fresh
+        # non-Git sandbox folders. Skip only the Git-presence preflight: keep the
+        # write sandbox and never persist trust or disable approvals globally.
+        cmd += ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json"]
         if model:
             cmd += ["-m", model]
         return cmd + [prompt]

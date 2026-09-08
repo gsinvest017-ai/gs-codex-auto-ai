@@ -299,7 +299,7 @@ class TestOnlyTrulyUnrecoverableSkipsRetries:
         assert "重試不會有幫助" not in hint, "訊息不能與實際行為矛盾（它其實會重試）"
 
     def test_config_problems_are_not_retryable(self):
-        assert codex_runner._FATAL_KINDS == {"model_not_supported", "not_logged_in"}
+        assert codex_runner._FATAL_KINDS == {"model_not_supported", "not_logged_in", "untrusted_directory", "invalid_cli_arguments"}
 
 
 class TestFatalReallyStopsTheRetryLoop:

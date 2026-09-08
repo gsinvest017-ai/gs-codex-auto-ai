@@ -430,7 +430,7 @@ function activate(context) {
     try {
       const root = workspaceRoot();
       if (!root) { statusItem.hide(); return; }
-      const { exists, summary: s } = dashboard.computeState(root);
+      const { exists, summary: s } = dashboard.computeState(root, { includeHistory: false });
       if (!exists) { statusItem.hide(); return; }
       const marker = s.marker || 0;
       const name = dashboard.PHASES[marker] || "";

@@ -62,3 +62,49 @@ test('blank CLI model saves through real Python router and catalog remains align
   const catalog=await routing.getCatalog(root); const rule=catalog.scenarios.find((s)=>s.name==='review');
   assert.equal(rule.provider,'claude'); assert.equal(rule.model,null);
 });
+
+
+test('real runner record_attempt output reaches the webview with failed app status and all attempts', () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-failed-bridge-'));
+  const fixture=require('../tests/fixtures/dashboard_failed_dispatcher.json');
+  const {execFileSync}=require('child_process');
+  const script="import json,sys; from pathlib import Path; from tools.codex_runner import record_attempt; data=json.loads(sys.stdin.buffer.read().decode('utf-8')); [record_attempt(Path(sys.argv[1]),e) for e in data]";
+  execFileSync('python',['-c',script,root],{cwd:path.join(__dirname,'..'),input:JSON.stringify(fixture.events),encoding:'utf8'});
+  fs.writeFileSync(path.join(root,'log','app-run.json'),JSON.stringify(fixture.run));
+  assert.equal(fs.existsSync(path.join(root,'log','model-routing-events.jsonl')),false);
+  let message; const bridge={html:'',postMessage(m){message=m;},onDidReceiveMessage(){return {dispose(){}};}};
+  const originalHome=os.homedir; os.homedir=()=>{throw new Error('formal polling must not scan home history');};
+  let dispose;
+  try {
+    dispose=dashboard.wireDashboard(bridge,{root});
+    assert.equal(message.summary.historyLoaded,false);
+    assert.equal(message.type,'state'); assert.equal(message.run.status,'failed'); assert.equal(message.summary.failed,true);
+    assert.equal(message.routingStats.parent_run_id,fixture.run.run_id);
+    assert.equal(message.routingStats.attempts.length,3); assert.ok(message.routingStats.attempts.every((a)=>a.outcome==='failed'));
+    assert.match(message.summary.failureReason,/非 Git/); assert.match(message.summary.failureReason,/Not inside a trusted directory/);
+    assert.equal(message.routingStats.providers.codex.inTok,null);
+    const elements=new Map(); let listener;
+    const elem=()=>({value:'',textContent:'',innerHTML:'',style:{},children:[],appendChild(e){this.children.push(e);},replaceChildren(){this.children=[];}});
+    const document={getElementById(id){if(!elements.has(id))elements.set(id,elem());return elements.get(id);},createElement:elem};
+    vm.runInNewContext(bridge.html.match(/<script>([\s\S]*?)<\/script>/)[1],{document,acquireVsCodeApi:()=>({postMessage(){}}),window:{addEventListener:(name,fn)=>listener=fn}});
+    listener({data:message});
+    assert.match(elements.get('phaseText').innerHTML,/失敗/); assert.doesNotMatch(elements.get('phaseText').innerHTML,/進行中/);
+    assert.match(elements.get('failureReason').textContent,/非 Git/); assert.equal(elements.get('attemptRows').children.length,3);
+    assert.equal(elements.get('codexCalls').textContent,'未載入');
+    assert.match(elements.get('historyNotice').textContent,/不掃描/);
+  } finally {os.homedir=originalHome;if(dispose)dispose();}
+});
+
+
+test('new app run never inherits an older phase7 or unscoped completion', () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-run-progress-'));
+  fs.mkdirSync(path.join(root,'log'));
+  const start=Date.parse('2026-09-08T09:00:00Z')/1000;
+  fs.writeFileSync(path.join(root,'log','app-run.json'),JSON.stringify({run_id:'new-app',status:'running',started_at:start,updated_at:Date.now()/1000}));
+  const old=[{event_type:'phase_end',phase:'phase7',status:'success',timestamp:'2026-09-08T08:59:59Z'}, {event_type:'phase_end',phase:'phase7',status:'success'}];
+  const eventPath=path.join(root,'log','events.jsonl'); fs.writeFileSync(eventPath,old.map(JSON.stringify).join('\n'));
+  let state=dashboard.computeState(root,{includeHistory:false});
+  assert.equal(state.summary.marker,0); assert.deepEqual(state.summary.completed,[]); assert.equal(state.summary.runStatus,'running');
+  fs.appendFileSync(eventPath,'\n'+JSON.stringify({event_type:'phase_start',phase:'phase2',ts:'2026-09-08T09:00:01Z'}));
+  state=dashboard.computeState(root,{includeHistory:false}); assert.equal(state.summary.marker,2);
+});

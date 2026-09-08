@@ -45,7 +45,7 @@ def execute(monkeypatch, tmp_path, capsys, failures):
     monkeypatch.setattr(runner, "run_once", fake_run)
     code = runner.main(["--prompt", "code", "--cwd", str(tmp_path), "--retries", "1"])
     result = json.loads(capsys.readouterr().out)
-    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
     return code, seen, result, events
 
 
@@ -142,7 +142,7 @@ def test_dispatcher_env_allows_children_and_records_parent(tmp_path):
     ok, _ = runner.run_once([sys.executable, "-c", program], tmp_path, [], 1, 1, poll=0.01,
                             provider="claude", role="dispatcher", attempt_id="root-id:1", result_metadata=metadata)
     assert ok
-    result = json.loads(Path(metadata["result_path"]).read_text())
+    result = json.loads(Path(metadata["result_path"]).read_text(encoding="utf-8"))
     assert result["worker"] is None and result["parent"] == "root-id"
 
 
@@ -158,9 +158,9 @@ def test_real_fake_process_fallback_writes_artifact(monkeypatch, tmp_path, capsy
     assert runner.main(["--prompt", "code", "--expect", "artifact.txt", "--cwd", str(tmp_path), "--retries", "1"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["actual_route"]["provider"] == "opencode"
-    assert (tmp_path / "artifact.txt").read_text() == "verified"
+    assert (tmp_path / "artifact.txt").read_text(encoding="utf-8") == "verified"
     assert result["usage"]["input_tokens"] == 11
-    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [e["actual_provider"] for e in events if e["outcome"] == "quota_exhausted"] == ["codex", "claude"]
     assert events[-1]["outcome"] == "ok" and events[-1]["role"] == "writer"
 
@@ -176,7 +176,7 @@ def test_fake_process_claude_quota_fallback_writer(monkeypatch, tmp_path, capsys
     assert runner.main(["--prompt", "code", "--expect", "artifact.txt", "--cwd", str(tmp_path), "--retries", "1"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["actual_route"]["provider"] == "claude"
-    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
     started = next(e for e in events if e["actual_provider"] == "claude" and e["outcome"] == "started")
     assert started["role"] == "writer" and started["authorization_expires_at"] > 0
 
@@ -192,5 +192,53 @@ def test_fake_dispatcher_uses_same_gate(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(runner, "provider_command", command)
     assert runner.main(["--dispatcher", "--prompt", "code", "--cwd", str(tmp_path), "--retries", "1"]) == 0
     result = json.loads(capsys.readouterr().out)
-    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert all(e["role"] == "dispatcher" and e["parent_run_id"] == result["run_id"] for e in events)
+
+
+@pytest.mark.parametrize("message,kind", [
+    ("Not inside a trusted directory and --skip-git-repo-check was not specified.", "untrusted_directory"),
+    ("error: unexpected argument '--full-auto' found", "invalid_cli_arguments"),
+    ("error: unexpected argument 'usage quota exhausted' found", "invalid_cli_arguments"),
+    ("error: invalid value 'bad' for '--sandbox <SANDBOX_MODE>'", "invalid_cli_arguments"),
+])
+def test_startup_errors_are_fatal_and_never_fallback(message, kind, tmp_path, monkeypatch, capsys):
+    launched = []
+    def command(route, prompt):
+        launched.append(route["provider"])
+        return [sys.executable, "-c", "import sys; print(" + repr(message) + ");sys.exit(2)"]
+    monkeypatch.setattr(runner, "provider_command", command)
+    assert runner.main(["--prompt", "check", "--cwd", str(tmp_path), "--retries", "3"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["attempts"] == 1 and result["fatal"] is True
+    assert result["reason"].startswith("fatal:" + kind)
+    assert set(launched) == {"codex"}
+    events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [e["actual_provider"] for e in events if e["outcome"] != "started"] == ["codex"]
+    assert events[-1]["quota_exhausted_providers"] == []
+
+
+def test_model_text_quoting_startup_errors_is_not_fatal():
+    message = "Not inside a trusted directory and --skip-git-repo-check was not specified."
+    output = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
+    assert runner.classify_failure(output) == ("", "")
+    assert runner.classify_failure('I found error: unexpected argument in the old logs') == ("", "")
+
+
+def test_non_git_workspace_multiline_argv_and_devnull(tmp_path, monkeypatch):
+    """A real child receives exactly one multiline argv and immediate stdin EOF."""
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/fake/" + name)
+    prompt = "first line\nsecond line & literal $(not-a-command)\nNON_GIT_MULTILINE_OK"
+    command = runner.provider_command({"provider": "codex", "model": None}, prompt)
+    assert "--skip-git-repo-check" in command
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    assert command[-1] == prompt
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+    child = tmp_path / "child.py"
+    child.write_text("import sys,json,pathlib\npathlib.Path('received.json').write_text(json.dumps({'args':sys.argv[1:],'stdin':sys.stdin.read()}))\n", encoding="utf-8")
+    metadata = {}
+    ok, _ = runner.run_once([sys.executable, str(child), *command[1:]], tmp_path,
+                            ["received.json"], 10, 10, poll=0.01, timeout=10, result_metadata=metadata)
+    assert ok and not (tmp_path / ".git").exists()
+    received = json.loads((tmp_path / "received.json").read_text(encoding="utf-8"))
+    assert received["args"][-1] == prompt and received["stdin"] == ""

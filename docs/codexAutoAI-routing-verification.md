@@ -72,3 +72,28 @@ python -m pytest tests/test_termserver.py -q
 | 不重疊合計 | **1,195 passed、3 skipped，另有 2 subtests passed** | — |
 
 最終兩組均通過。本紀錄保留原始全套曾停住的觀測，不把分組通過推定為原始卡住問題已重現並修復，也不把未執行的供應商呼叫寫成成功。
+
+
+## 0.14.1：非 Git 工作區與正式 UI 讀取路徑
+
+原 sandbox 的三次實際失敗紀錄，原因都是 Codex 啟動時拒絕未受信任的非 Git 目錄。0.14.1 在 Codex argv 加入 `--skip-git-repo-check`，同時保留 `--sandbox workspace-write`；只略過 Git 目錄預檢，沒有改寫全域信任設定、關閉沙箱或調整檔案 ACL。此類 trusted-directory 與無效 CLI 參數錯誤改為啟動階段 fatal，不重試，也不當成 quota_exhausted 開啟備援。
+
+主代理使用 PowerShell New-Item 在原 sandbox 的 `log/startup-selftest-20260908` 建立普通 ACL 的非 Git 測試目錄，真實寫檔驗證成功：
+
+| 欄位 | 實際結果 |
+|---|---|
+| Run ID | `17929477bbb24016ab4f1ef07141de27` |
+| 時間與次數 | 47.8 秒、1 attempt |
+| 產物 | smoke.txt，內容精確為 `NON_GIT_WRITE_OK` |
+| Input / output / cache tokens | 111,475 / 316 / 92,288 |
+| 實際模型名稱 | 未回報，維持未知 |
+
+另一次使用 Python mkdtemp 私有 ACL 目錄的測試未成功；不能以普通 ACL 目錄的成功掩蓋該結果。本次沒有為測試更改全域設定或 ACL。
+
+正式控制台接線由 `wireDashboard` 呼叫 `computeState`，讀取 runner 真正寫入的 `log/events.jsonl`，再按 App 的 parent_run_id 呈現 dispatcher 與 worker attempts。舊 `model-routing-events.jsonl` 僅作相容讀取。測試直接呼叫 Python runner 的 record_attempt 寫檔，再經正式 webview bridge 讀回三次失敗事件與原因，並確認失敗畫面不顯示為仍在執行。
+
+控制台及狀態列快速輪詢均使用 includeHistory=false；測試把 os.homedir 改為拋出錯誤，仍能完成正式 bridge 更新，證明該路徑不掃描歷史 session。歷史區顯示「未載入」，實際用量取自本次 attempt 事件。
+
+獨立審查另重現快速模式把舊任務 Phase 7 完成與錯誤帶入新 App 任務的問題，已以 app-run.started_at 篩選進度事件；實際 Node 重驗新任務不再繼承舊完成或失敗。新增 bridge 測試亦明確設定 Python stdin UTF-8，避免依賴主程序的 PYTHONUTF8 環境設定。
+
+0.14.1 最終相關測試批次為 Python 145 passed（61.12 秒）與 Node 10 passed（414 毫秒）。兩批部分驗證範圍重疊，不相加為另一個全套測試總數。主代理亦以真實工作區唯讀 fixture 經正式快速讀檔 bridge 驗證：GUI 顯示原本的 3 次 failed、未受信任目錄原因與 Phase 失敗狀態，不再顯示 running。這次使用真實既有事件；測試用合成事件與真實供應商呼叫證據仍分開記錄。
