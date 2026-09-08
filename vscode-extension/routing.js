@@ -32,6 +32,18 @@ async function applyPreset(root, preset, execute = execFile) {
   return runRouter(root, ['--preset', preset], execute);
 }
 
+async function getCatalog(root, execute = execFile) {
+  return runRouter(root, ['--catalog'], execute);
+}
+async function saveRoute(root, selection, execute = execFile) {
+  if (!selection || !['codex', 'claude'].includes(selection.provider)) throw new Error('主線僅允許 Codex 或 Claude');
+  if (typeof selection.scenario !== 'string' || !selection.scenario) throw new Error('請選擇場景');
+  const args = ['--save-route', '--scenario', selection.scenario, '--provider', selection.provider];
+  if (String(selection.model || '').trim()) args.push('--model', String(selection.model).trim());
+  if (selection.fallbackModel) args.push('--fallback-model', String(selection.fallbackModel));
+  return runRouter(root, args, execute);
+}
+
 function createRun(root, prompt, route, now = () => Date.now() / 1000) {
   const log = path.join(root, 'log');
   fs.mkdirSync(log, { recursive: true });
@@ -46,9 +58,10 @@ function createRun(root, prompt, route, now = () => Date.now() / 1000) {
   record.updated_at = now(); persist(); event('start');
   const owns = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')).run_id === record.run_id; } catch { return false; } };
   return {
+    runId: record.run_id,
     exitFile: record.exit_file,
     heartbeat() { if (!stopped && owns()) { record.updated_at = now(); persist(); } },
     stop(status = 'stopped') { if (stopped) return; stopped = true; record.status = status; record.updated_at = 0; record.ended_at = now(); if (owns()) persist(); event('end'); },
   };
 }
-module.exports = { previewRoute, applyPreset, createRun };
+module.exports = { previewRoute, applyPreset, getCatalog, saveRoute, createRun };

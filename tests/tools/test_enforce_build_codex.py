@@ -191,3 +191,29 @@ class TestAppRunArming:
         assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is None
         _write_app_run(tmp_path)
         assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is not None
+
+
+@pytest.mark.parametrize("mutation", [None, "missing_quota", "expired", "terminal", "wrong_attempt", "wrong_provider", "wrong_role"])
+def test_quota_writer_authorization_is_attempt_scoped(tmp_path, monkeypatch, mutation):
+    import time
+    _write_state(tmp_path, "phase5")
+    monkeypatch.setenv("CODEXAUTOAI_ROUTED_WORKER", "claude")
+    monkeypatch.setenv("CODEXAUTOAI_ROUTED_ROLE", "writer")
+    monkeypatch.setenv("CODEXAUTOAI_ROUTED_ATTEMPT", "r:2")
+    quota = {"type": "model_attempt", "run_id": "r", "attempt_id": "r:1",
+             "actual_provider": "codex", "outcome": "quota_exhausted"}
+    started = {"type": "model_attempt", "run_id": "r", "attempt_id": "r:2",
+               "actual_provider": "claude", "outcome": "started", "role": "writer",
+               "quota_exhausted_providers": ["codex"],
+               "authorization_expires_at": time.time() + 60}
+    events = [quota, started]
+    if mutation == "missing_quota": events = [started]
+    if mutation == "expired": started["authorization_expires_at"] = time.time() - 1
+    if mutation == "terminal": events.append({**started, "outcome": "ok"})
+    if mutation == "wrong_attempt": monkeypatch.setenv("CODEXAUTOAI_ROUTED_ATTEMPT", "other")
+    if mutation == "wrong_provider": started["actual_provider"] = "opencode"
+    if mutation == "wrong_role": started["role"] = "dispatcher"
+    (tmp_path / "log" / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events), encoding="utf-8")
+    assert (enf.evaluate(_payload("Write", tmp_path), tmp_path) is None) == (mutation is None)
+    assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is not None

@@ -63,7 +63,7 @@ def test_invalid_policy_fails(tmp_path):
 def test_preset_routes_and_backup(tmp_path):
     first = router.apply_preset(tmp_path, "multi-provider")
     assert first["backup_path"] is None
-    for prompt, provider in [("research", "gemini"), ("review", "claude"), ("document", "codex"), ("coding", "codex"), ("debugging", "codex")]:
+    for prompt, provider in [("research", "claude"), ("review", "claude"), ("document", "codex"), ("coding", "codex"), ("debugging", "codex")]:
         assert router.resolve_route(prompt, tmp_path)["provider"] == provider
     next_result = router.apply_preset(tmp_path, "codex-first")
     assert Path(next_result["backup_path"]).exists()
@@ -76,7 +76,7 @@ def test_actual_adapter_argv(monkeypatch, provider):
     command = runner.provider_command({"provider": provider, "model": "chosen"}, "hello\nworld")
     assert command[0] == "/bin/" + provider
     if provider == "codex":
-        assert command[1:] == ["exec", "--full-auto", "-m", "chosen", "hello\nworld"]
+        assert command[1:] == ["exec", "--sandbox", "workspace-write", "--json", "-m", "chosen", "hello\nworld"]
     else:
         assert command[command.index("--model") + 1] == "chosen"
         assert command[command.index("--output-format") + 1] == "json"

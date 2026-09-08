@@ -64,6 +64,8 @@ test('extension launch arms guard before sendText and passes scoped routing cont
     assert.equal(fs.readFileSync(path.join(root,'log','model-routing.json'),'utf8'),'CUSTOM');
     extension.runClaudeInTerminal(root,'claude "spec"',{prompt:'建立3D模型',route:{provider:'codex',model:'gpt-6-astra'}});
     assert.equal(options.env.CODEXAUTOAI_TASK_PROMPT,'建立3D模型'); assert.ok(sends > 0);
+    assert.equal(options.env.CODEXAUTOAI_PARENT_RUN_ID,JSON.parse(fs.readFileSync(path.join(root,'log','app-run.json'))).run_id);
+    assert.match(extension.buildInner('build task',true), /python tools\/codex_runner.py --dispatcher --prompt "\/autopilot on build task" --cwd \./);
     assert.throws(() => extension.runClaudeInTerminal(root, 'claude'), /本專案已有/);
     assert.throws(() => extension.reserveLaunch(root), /本專案已有/);
     const events = path.join(root,'log','events.jsonl');

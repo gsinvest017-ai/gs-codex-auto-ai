@@ -7,6 +7,36 @@ const path = require("path");
 
 const PHASES = ["初始化", "環境檢查", "需求分析", "架構設計", "審查", "並行開發", "測試", "交付"];
 
+// Keep semantics identical to tools/events_model.py routing_stats (parity tested).
+function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
+  let events = lines.flatMap((line) => { try { const e=typeof line === 'string' ? JSON.parse(line) : line; return e && typeof e === 'object' ? [e] : []; } catch { return []; } });
+  let scoped=events;
+  for(let i=events.length-1;i>=0;i--) { if(events[i].event_type === 'run_start') {scoped=events.slice(i+1); break;} }
+  const records=events.filter((e) => (e.type || e.event_type) === 'model_attempt' && e.run_id && e.attempt_id);
+  const latest=scoped.filter((e) => (e.type || e.event_type) === 'model_attempt' && e.run_id && e.attempt_id);
+  if(runId === null && parentRunId === null && latest.length) parentRunId=latest[latest.length-1].parent_run_id || null;
+  if(runId === null && parentRunId === null) runId=latest.length ? latest[latest.length-1].run_id : null;
+  const unique=new Map();
+  for(const e of records) if((parentRunId ? e.parent_run_id === parentRunId : e.run_id === runId) && ['ok','failed','quota_exhausted'].includes(e.outcome)) unique.set(JSON.stringify([e.run_id,e.attempt_id]),e);
+  const providers={}, attempts=[], exhausted=new Map(), violations=[];
+  for(const e of unique.values()) {
+    const provider=e.actual_provider; if(!provider) continue;
+    const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source']) attempt[key]=e[key] ?? null;
+    attempt.usage=usage; attempts.push(attempt);
+    const item=providers[provider] ||= {attempts:0,inTok:null,outTok:null,cacheTok:null,cost:null,usageKnown:0,inKnown:0,outKnown:0,cacheKnown:0,costKnown:0}; item.attempts++;
+    let known=false;
+    for(const [key,field] of [['input_tokens','inTok'],['output_tokens','outTok'],['cached_input_tokens','cacheTok']]) {const value=usage[key]; if(typeof value === 'number' && value>=0) {item[field]=(item[field] || 0)+value;item[{inTok:'inKnown',outTok:'outKnown',cacheTok:'cacheKnown'}[field]]++;known=true;} }
+    item.usageKnown+=Number(known);
+    if(typeof e.cost_usd === 'number' && e.cost_usd>=0) {item.cost=(item.cost || 0)+e.cost_usd;item.costKnown++;}
+    if(!exhausted.has(e.run_id)) exhausted.set(e.run_id,new Set());
+    const quota=exhausted.get(e.run_id);
+    if(provider === 'opencode' && !(quota.has('codex') && quota.has('claude')) && !violations.includes('opencode_without_primary_quota_exhaustion')) violations.push('opencode_without_primary_quota_exhaustion');
+    if(e.outcome === 'quota_exhausted' && ['codex','claude'].includes(provider)) quota.add(provider);
+  }
+  return {run_id:runId,parent_run_id:parentRunId,attempts,providers,status:attempts.length ? 'observed' : 'unverified',violations};
+}
+
 function phaseNum(v) {
   if (v === null || v === undefined) return null;
   if (typeof v === "number") return v;
@@ -282,6 +312,7 @@ const _codexCache = new Map(); // file -> { mtimeMs, size, cwd, ts, usage }
 
 function _parseRollout(file) {
   let cwd = null, usage = null;
+  const samples = [];
   let text;
   try { text = fs.readFileSync(file, "utf-8"); } catch { return { cwd, usage }; }
   for (const line of text.split(/\r?\n/)) {
@@ -292,10 +323,10 @@ function _parseRollout(file) {
     if (d.type === "session_meta") cwd = p.cwd || null;
     else if (d.type === "event_msg" && p.type === "token_count") {
       const u = (p.info || {}).total_token_usage;
-      if (u) usage = u; // 累計值，最後一筆為準
+      if (u) { usage = u; samples.push({ ts: Date.parse(d.timestamp), usage: u }); }
     }
   }
-  return { cwd, usage };
+  return { cwd, usage, samples };
 }
 
 // 彙總屬於此 workspace（cwd 相符）且 sinceMs 之後有活動的 codex sessions 用量。
@@ -319,15 +350,21 @@ function readCodexUsage(root, sinceMs) {
       let rec = _codexCache.get(full);
       if (!rec || rec.mtimeMs !== st.mtimeMs || rec.size !== st.size) {
         const parsed = _parseRollout(full);
-        rec = { mtimeMs: st.mtimeMs, size: st.size, cwd: parsed.cwd, usage: parsed.usage };
+        rec = { mtimeMs: st.mtimeMs, size: st.size, cwd: parsed.cwd, usage: parsed.usage, samples: parsed.samples };
         _codexCache.set(full, rec);
       }
       if (!rec.cwd || path.resolve(rec.cwd).toLowerCase() !== rootNorm) continue;
       if (!rec.usage) continue;
+      const samples = rec.samples || [];
+      const active = sinceMs ? samples.filter((sample) => Number.isFinite(sample.ts) && sample.ts >= sinceMs) : samples;
+      if (!active.length) continue;
+      const before = sinceMs ? samples.filter((sample) => sample.ts < sinceMs).pop() : null;
+      const baseUsage = before ? before.usage : {};
+      const current = active[active.length - 1].usage;
       out.sessions += 1;
-      out.inTok += rec.usage.input_tokens || 0;
-      out.outTok += (rec.usage.output_tokens || 0) + (rec.usage.reasoning_output_tokens || 0);
-      out.cacheTok += rec.usage.cached_input_tokens || 0;
+      out.inTok += Math.max(0, (current.input_tokens || 0) - (baseUsage.input_tokens || 0));
+      out.outTok += Math.max(0, (current.output_tokens || 0) - (baseUsage.output_tokens || 0));
+      out.cacheTok += Math.max(0, (current.cached_input_tokens || 0) - (baseUsage.cached_input_tokens || 0));
     }
   }
   return out;
@@ -392,6 +429,12 @@ function html(defaultReq) {
           border-radius:6px; padding:8px 10px; color:var(--vscode-inputValidation-warningForeground,var(--gold)); font-size:12px; margin-top:8px; display:none; }
   label { font-size:12px; color:var(--muted); }
   #status { min-height:16px; }
+  select,input[type=text] { background:var(--card); color:var(--fg); border:1px solid var(--line); padding:8px; border-radius:5px; }
+  .wiring { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:16px 0; }
+  .node { border:1px solid var(--gold); border-radius:8px; padding:12px; min-width:110px; }
+  .backup { border-style:dashed; border-color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:12px; } th,td { text-align:left; padding:9px; border-bottom:1px solid var(--line); }
+  @media(max-width:600px) { .grid {grid-template-columns:1fr} .node {min-width:80px} }
 </style></head><body>
 <h1>CodexAutoAI 控制台</h1>
 <div class="sub">全程免終端機：輸入需求 → 按啟動 → 在這裡看進度與分工。</div>
@@ -404,7 +447,7 @@ function html(defaultReq) {
     <label><input type="checkbox" id="autopilot" checked> 非停模式（全程不問，建議非開發者保持勾選）</label>
   </div>
   <div class="row">
-    <label>本專案路由 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">多供應商（研究 Gemini／審查 Claude／實作 Codex）</option></select></label>
+    <label>套用預設方案 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">雙主線（研究／審查 Claude，實作 Codex）</option></select></label>
     <button class="ghost" id="btnPreset">套用模式</button>
   </div>
   <div class="muted">套用模式會取代本專案的路由設定並備份舊設定；各供應商須先安裝 CLI 並登入。</div>
@@ -412,20 +455,39 @@ function html(defaultReq) {
   <div class="muted" id="runState"></div>
 </div>
 
+<div class="card"><h2>場景接線設定</h2>
+  <div class="muted">按需求自動辨識場景；儲存後套用至後續模型呼叫。預覽不會發出模型請求。</div>
+  <div class="row"><label>場景 <select id="scenario"></select></label>
+  <label>主線 <select id="provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+  <label>模型 <input type="text" id="routeModel" placeholder="留空使用 CLI 預設"></label>
+  <label>OpenCode 備援模型 <input type="text" id="fallbackInput" placeholder="provider/model（選填）"></label>
+  <button class="primary" id="btnSaveRoute">儲存此場景</button></div>
+  <div class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span>額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span>兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
+  <div class="muted" id="routeNotice">接線為設定預覽，尚未儲存。</div>
+  <div class="muted">OpenCode 的 Gemini／DeepSeek 僅在 Codex 與 Claude 額度皆耗盡時解鎖；一般錯誤不啟動備援。</div>
+  <div class="row muted" id="routePreview">尚無本次需求的預定路由。</div>
+</div>
+<div class="card"><h2>本次任務實際調度與用量</h2>
+  <div id="evidenceStatus" class="muted">尚無實際呼叫證據，未驗證。</div>
+  <div class="muted" id="evidenceRun"></div>
+  <table><thead><tr><th>實際供應商／模型</th><th>場景／結果</th><th>原因</th><th>Token in / out</th></tr></thead><tbody id="attemptRows"></tbody></table>
+  <div class="row muted" id="providerMetrics"></div>
+</div>
+
 <div class="card"><h2>七階段進度</h2>
   <div class="bar" id="bar">░░░░░░░░</div>
   <div class="muted" id="phaseText">尚未開始——按上方「🚀 啟動新任務」。</div>
 </div>
 
-<div class="card"><h2>分工證據（確保 Claude 規劃、Codex 實作）</h2>
+<div class="card"><h2>工作區歷史觀測（不作為本次路由驗證）</h2>
   <div class="grid">
     <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">0</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
-    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> 次呼叫<div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
+    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> <span id="codexUnit">次工具觀測</span><div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
   </div>
   <div class="muted" id="share" style="margin-top:8px;"></div>
   <div class="wait" id="divWait">⏳ 已派遣 builder 子代理，等待第一筆 Codex 呼叫紀錄……（builders 的 codex exec 會稍晚出現在子代理 transcript）</div>
   <div class="warn" id="divWarn">⚠ 已進入並行開發（phase5）但既沒派遣 builder 也偵測不到任何 Codex 呼叫——疑似只在 Claude 上花 token、未走 Codex 實作，請檢查。</div>
-  <div class="row muted"><span id="cost">累計成本 $0.0000</span><span id="iter"></span><span id="ts"></span></div>
+  <div class="row muted"><span id="cost">歷史成本未回報</span><span id="iter"></span><span id="ts"></span></div>
 </div>
 
 <div class="row">
@@ -443,11 +505,57 @@ function html(defaultReq) {
   $("btnLogs").onclick = () => { vscode.postMessage({ type:"logs" }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
   $("btnPreview").onclick = () => { vscode.postMessage({ type:"preview" }); };
+  let catalog = null;
+  function drawWiring() {
+    $("sourceNode").textContent = $("scenario").value || "場景";
+    $("primaryNode").textContent = $("provider").value + " / " + ($("routeModel").value || "CLI 預設");
+    $("secondaryNode").textContent = $("provider").value === "codex" ? "claude / CLI 預設" : "codex / CLI 預設";
+    $("fallbackModel").textContent = $("fallbackInput").value || "未設定，備援不可用";
+    $("routeNotice").textContent = "接線為設定預覽；修改後請儲存。";
+  }
+  $("scenario").onchange = () => {
+    const selected = catalog.scenarios.find((s) => s.name === $("scenario").value);
+    if (!selected) return;
+    $("provider").value = selected.provider; $("routeModel").value = selected.model || ""; drawWiring();
+    $("routeNotice").textContent = "目前已儲存的場景設定；不代表已實際執行。";
+  };
+  $("provider").onchange = () => { $("routeModel").value=""; drawWiring(); $("routeNotice").textContent="已切換供應商並清除舊模型；請重新選填模型後儲存。"; }; $("routeModel").oninput = drawWiring; $("fallbackInput").oninput = drawWiring;
+  $("btnSaveRoute").onclick = () => {
+    if (catalog && catalog.fallback && catalog.fallback.model && !$("fallbackInput").value.trim()) { $("status").textContent="已設定的備援模型不能留空清除；請填入完整 provider/model ID。本次未儲存。"; return; }
+    vscode.postMessage({type:"saveRoute", selection:{scenario:$("scenario").value,provider:$("provider").value,model:$("routeModel").value,fallbackModel:$("fallbackInput").value}});
+  };
+  const cell = (row, value) => { const td = document.createElement("td"); td.textContent = value; row.appendChild(td); };
+  function showEvidence(stats) {
+    stats = stats || {status:"unverified",attempts:[],providers:{},violations:[]};
+    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測實際呼叫；以下數據來自同一 run 的完成事件。" : "尚無實際完成呼叫證據，未驗證。";
+    $("evidenceStatus").className = stats.violations.length ? "bad" : "muted";
+    $("evidenceRun").textContent = (stats.parent_run_id || stats.run_id) ? "Run：" + (stats.parent_run_id || stats.run_id) : "尚無可歸屬的 run";
+    $("attemptRows").replaceChildren();
+    for (const a of stats.attempts) {
+      const row = document.createElement("tr");
+      cell(row, a.actual_provider + " / " + (a.actual_model || "未回報實際模型") + "；設定：" + (a.configured_model || "CLI 預設") + "；原請求：" + (a.requested_provider || "未知") + " / " + (a.requested_model || "CLI 預設"));
+      cell(row, (a.scenario || "—") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
+      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知"));
+      $("attemptRows").appendChild(row);
+    }
+    const metric = (value,known,total) => value === null || value === undefined ? "未知（" + total + " 筆未回報）" : value + "（" + (known < total ? "已知部分，" : "") + known + "/" + total + " 筆已知）";
+    $("providerMetrics").textContent = Object.entries(stats.providers).map(([name,p]) => name + ": " + p.attempts + " 次，in " + metric(p.inTok,p.inKnown,p.attempts) + " / out " + metric(p.outTok,p.outKnown,p.attempts) + " / cache " + metric(p.cacheTok,p.cacheKnown,p.attempts) + "，成本 USD " + metric(p.cost,p.costKnown,p.attempts)).join(" · ");
+  }
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (m.type === "status") { $("status").textContent = m.text; return; }
+    if (m.type === "catalog") {
+      catalog = m.catalog; const previous = $("scenario").value; $("scenario").replaceChildren();
+      for (const s of catalog.scenarios) { const option = document.createElement("option"); option.value=s.name; option.textContent=s.name; $("scenario").appendChild(option); }
+      if (catalog.scenarios.some((s) => s.name === previous)) $("scenario").value=previous;
+      $("fallbackModel").textContent = (catalog.fallback || {}).model || "未設定，備援不可用";
+      $("fallbackInput").value = (catalog.fallback || {}).model || "";
+      $("scenario").onchange(); return;
+    }
+    if (m.type === "routePreview") { const r=m.route; $("routePreview").textContent="預定路由（未執行）：" + r.scenario + " → " + r.provider + " / " + (r.model || "CLI 預設") + " · " + r.reason; return; }
     if (m.type !== "state") return;
-    $("runState").textContent = m.run ? "任務狀態：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
+    showEvidence(m.routingStats);
+    $("runState").textContent = m.run ? "任務狀態（預定路由）：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
     const s = m.summary;
     if (!m.exists) { $("phaseText").textContent = "尚未開始——按上方「🚀 啟動新任務」。"; return; }
     const marker = s.marker || 0;
@@ -462,6 +570,7 @@ function html(defaultReq) {
     // 「次呼叫」以 codex sessions（~/.codex/sessions 的實際 codex 執行數）為權威——
     // 0.9.5 起走 codex_runner，transcript 的 codex exec 字樣抓不到、regex 計數會是 0。
     $("codexCalls").textContent = s.codex.sessions || s.codex.calls;
+    $("codexUnit").textContent = s.codex.sessions ? "sessions" : "次工具觀測";
     $("codexTok").textContent = s.codex.sessions
       ? "tokens in " + s.codex.inTok + " / out " + s.codex.outTok
         + (s.codex.cacheTok ? "（cache " + s.codex.cacheTok + "）" : "") + "・" + s.codex.sessions + " sessions"
@@ -470,13 +579,14 @@ function html(defaultReq) {
       + (s.builders ? "・builders " + s.builders + " 個" : "");
     $("share").textContent = s.codexShare === null ? "" :
       "實作產出佔比（output tokens）：Codex " + s.codexShare + "% vs Claude " + (100 - s.codexShare) + "%"
-      + (s.codexShare < 50 ? "　⚠ Codex 佔比偏低" : "　✓ 符合 Codex-first");
+      + "（歷史觀測，不證明本次接線合規）";
     $("divWarn").style.display = s.divisionWarning ? "block" : "none";
     $("divWait").style.display = s.divisionWaiting ? "block" : "none";
-    $("cost").textContent = "累計成本 $" + (s.cost || 0).toFixed(4);
+    $("cost").textContent = s.cost ? "歷史回報成本 $" + s.cost.toFixed(4) : "歷史成本未回報（零值不視為免費）";
     $("iter").textContent = s.iteration ? "第 " + s.iteration + " 輪迭代" : "";
     $("ts").textContent = s.lastTs ? "最後事件 " + s.lastTs.replace("T", " ").slice(0, 19) : "";
   });
+  vscode.postMessage({type:"catalog"});
 </script></body></html>`;
 }
 
@@ -509,7 +619,9 @@ function wireDashboard(webview, deps) {
     try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
       if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
     } catch {}
-    webview.postMessage({ type: "state", exists, summary, run });
+    let routingLines = [];
+    try { routingLines = fs.readFileSync(path.join(root, "log", "model-routing-events.jsonl"), "utf8").split(/\r?\n/); } catch {}
+    webview.postMessage({ type: "state", exists, summary, run, routingStats: summarizeRoutingAttempts(routingLines, null, run && run.run_id) });
   };
   const timer = setInterval(push, 2000);
   push();
@@ -517,8 +629,10 @@ function wireDashboard(webview, deps) {
     const reply = (text) => webview.postMessage({ type: "status", text });
     if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
-    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply);
-    else if (m.type === "preset" && deps.onPreset) deps.onPreset(m.preset, reply);
+    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply, (route) => webview.postMessage({type:"routePreview", route}));
+    else if (m.type === "preset" && deps.onPreset) Promise.resolve(deps.onPreset(m.preset, reply)).then(() => deps.onCatalog && deps.onCatalog()).then((catalog) => {if(catalog) webview.postMessage({type:"catalog",catalog});}).catch((e) => reply(e.message));
+    else if (m.type === "catalog" && deps.onCatalog) Promise.resolve(deps.onCatalog()).then((catalog) => webview.postMessage({type:"catalog",catalog})).catch((e) => reply(e.message));
+    else if (m.type === "saveRoute" && deps.onSaveRoute) Promise.resolve(deps.onSaveRoute(m.selection)).then(() => deps.onCatalog()).then((catalog) => { webview.postMessage({type:"catalog",catalog}); reply("已儲存場景接線；套用至後續呼叫。"); }).catch((e) => reply(e.message));
     else if (m.type === "logs" && deps.onOpenLogs) deps.onOpenLogs();
     else if (m.type === "showTerminal") deps.onShowTerminal();
     else if (m.type === "preview" && deps.onPreview) deps.onPreview(reply);
@@ -549,7 +663,7 @@ function makeDashboardViewProvider(makeDeps) {
 }
 
 module.exports = {
-  openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
+  html, summarizeRoutingAttempts, openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };

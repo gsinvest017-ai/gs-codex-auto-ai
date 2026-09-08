@@ -78,7 +78,7 @@ function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route =
   let t;
   try {
     t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden,
-      env: { CODEXAUTOAI_TASK_PROMPT: prompt },
+      env: { CODEXAUTOAI_TASK_PROMPT: prompt, CODEXAUTOAI_PARENT_RUN_ID: run.runId },
       ...(process.platform === "win32" ? { shellPath: "powershell.exe", shellArgs: ["-NoLogo", "-NoProfile"] } : { shellPath: "/bin/sh", shellArgs: [] }) });
   } catch (error) { run.stop("launch_failed"); throw error; }
   const timer = setInterval(() => {
@@ -127,8 +127,8 @@ function buildInner(requirement, autopilot) {
   // safePrompt 會把 shell 語法字元刪掉或轉全形，規則與 launcher._safe_prompt 一致。
   // 注意：**路徑不要走這裡**（會吃掉 Windows 的反斜線），呼叫端先轉成正斜線。
   const safe = safePrompt(requirement);
-  if (autopilot) return `claude "/autopilot on ${safe}"`;
-  return safe ? `claude "${safe}"` : "claude";
+  const task = autopilot ? `/autopilot on ${safe}` : safe;
+  return `python tools/codex_runner.py --dispatcher --prompt "${task}" --cwd .`;
 }
 
 // 產 spec 再啟動（start 與控制台共用）。回傳 Promise<{ok, specPath?, error?}>。
@@ -515,10 +515,12 @@ function activate(context) {
       onStart: (requirement, autopilot, reply) => {
         return buildDashboardDeps().onSeed(requirement, autopilot, reply);
       },
-      onPreviewRoute: async (requirement, reply) => {
-        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); }
+      onPreviewRoute: async (requirement, reply, publish) => {
+        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
         catch (e) { reply(e.message); }
       },
+      onCatalog: () => routing.getCatalog(root),
+      onSaveRoute: (selection) => routing.saveRoute(root, selection),
       onPreset: async (preset, reply) => {
         try { await routing.applyPreset(root, preset); reply(`已套用 ${preset} 至本專案；既有設定由 router 備份。`); }
         catch (error) { reply(error.message); }
@@ -723,4 +725,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { activate, deactivate, runClaudeInTerminal, refreshFrameworkCore, reserveLaunch };
+module.exports = { buildInner, activate, deactivate, runClaudeInTerminal, refreshFrameworkCore, reserveLaunch };

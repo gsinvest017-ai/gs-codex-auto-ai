@@ -204,6 +204,78 @@ def division_stats(events: list[dict]) -> dict:
     }
 
 
+
+def routing_stats(events: list[dict], run_id: str | None = None,
+                  parent_run_id: str | None = None) -> dict:
+    """Completed execution evidence only; previews and legacy usage are not run metrics.
+
+    Attempt updates replace the same ID, so started/terminal/replayed events cannot
+    inflate calls or tokens. Unknown model, usage and price remain unknown.
+    """
+    scoped = events
+    for i in range(len(events) - 1, -1, -1):
+        if events[i].get("event_type") == "run_start":
+            scoped = events[i + 1:]
+            break
+    # Phase 0 can start inside a fallback dispatcher; its run_start must not
+    # erase earlier attempts or quota proof from the same invocation.
+    records = [e for e in events if
+               (e.get("type") or e.get("event_type")) == "model_attempt"
+               and e.get("run_id") and e.get("attempt_id")]
+    latest = [e for e in scoped if
+              (e.get("type") or e.get("event_type")) == "model_attempt"
+              and e.get("run_id") and e.get("attempt_id")]
+    if run_id is None and parent_run_id is None and latest:
+        parent_run_id = latest[-1].get("parent_run_id")
+    if run_id is None and parent_run_id is None:
+        run_id = latest[-1]["run_id"] if latest else None
+    unique = {}
+    for ev in records:
+        selected = (ev.get("parent_run_id") == parent_run_id if parent_run_id
+                    else ev["run_id"] == run_id)
+        if selected and ev.get("outcome") in {
+                "ok", "failed", "quota_exhausted"}:
+            unique[(ev["run_id"], ev["attempt_id"])] = ev
+    providers = {}
+    attempts = []
+    exhausted = {}
+    violations = []
+    for ev in unique.values():
+        provider = ev.get("actual_provider")
+        if not provider:
+            continue
+        usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+        attempts.append({k: ev.get(k) for k in (
+            "run_id", "parent_run_id", "role", "attempt_id", "actual_provider", "actual_model", "configured_model",
+            "requested_provider", "requested_model", "scenario", "outcome",
+            "reason", "duration_ms", "usage_source") } | {"usage": usage})
+        item = providers.setdefault(provider, {"attempts": 0, "inTok": None,
+            "outTok": None, "cacheTok": None, "cost": None, "usageKnown": 0,
+            "inKnown": 0, "outKnown": 0, "cacheKnown": 0, "costKnown": 0})
+        item["attempts"] += 1
+        known = False
+        for key, field in (("input_tokens", "inTok"), ("output_tokens", "outTok"),
+                           ("cached_input_tokens", "cacheTok")):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                item[field] = (item[field] or 0) + value
+                item[{"inTok": "inKnown", "outTok": "outKnown", "cacheTok": "cacheKnown"}[field]] += 1
+                known = True
+        item["usageKnown"] += int(known)
+        price = ev.get("cost_usd")
+        if isinstance(price, (int, float)) and not isinstance(price, bool) and price >= 0:
+            item["cost"] = (item["cost"] or 0) + price
+            item["costKnown"] += 1
+        quota_for_run = exhausted.setdefault(ev["run_id"], set())
+        if provider == "opencode" and not {"codex", "claude"}.issubset(quota_for_run):
+            if "opencode_without_primary_quota_exhaustion" not in violations:
+                violations.append("opencode_without_primary_quota_exhaustion")
+        if ev.get("outcome") == "quota_exhausted" and provider in {"codex", "claude"}:
+            quota_for_run.add(provider)
+    return {"run_id": run_id, "parent_run_id": parent_run_id, "attempts": attempts, "providers": providers,
+            "status": "observed" if attempts else "unverified", "violations": violations}
+
+
 def _marker(summary: dict) -> int:
     """進度條位置：取「當前 phase」與「已完成最高 phase」較大者。
 
@@ -269,8 +341,8 @@ def build_model(events: list[dict], *, log_exists: bool) -> dict:
 
     last_ts = None
     for ev in reversed(events):
-        if ev.get("timestamp"):
-            last_ts = ev["timestamp"]
+        if ev.get("timestamp") or ev.get("ts"):
+            last_ts = ev.get("timestamp") or ev["ts"]
             break
 
     return {
@@ -289,6 +361,7 @@ def build_model(events: list[dict], *, log_exists: bool) -> dict:
         "errors": errors,
         "last_event_ts": last_ts,
         "event_count": len(events),
+        "routing": routing_stats(events),
         **division_stats(scoped),
     }
 
