@@ -35,16 +35,21 @@ class TestOfflineSpec(unittest.TestCase):
 
     def test_cli_uses_vault_and_prints_existing_path(self):
         with tempfile.TemporaryDirectory() as temp:
-            vault = Path(temp) / "中文 空間"
-            result = subprocess.run(
-                [sys.executable, str(ROOT / "tools/spec_seed.py"), "seed", "建立模型"],
-                env={**os.environ, "SPEC_VAULT": str(vault)},
-                capture_output=True, text=True, encoding="utf-8", timeout=20,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            target = Path(result.stdout.strip())
-            self.assertTrue(target.is_file())
-            self.assertTrue(target.is_relative_to(vault))
+            root = Path(temp)
+            for base in (root, root / ".." / root.name):
+                with self.subTest(base=str(base)):
+                    vault = base / "中文 空間"
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / "tools/spec_seed.py"), "seed", "建立模型"],
+                        env={**os.environ, "SPEC_VAULT": str(vault)},
+                        capture_output=True, text=True, encoding="utf-8", timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    target = Path(result.stdout.strip())
+                    self.assertTrue(target.is_file())
+                    # seed resolves the vault; normalize both sides for aliases,
+                    # including Windows runner 8.3 paths and the parent alias above.
+                    self.assertTrue(target.resolve().is_relative_to(vault.resolve()))
 
     @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_packaged_candidate_without_private_snapshot(self):
