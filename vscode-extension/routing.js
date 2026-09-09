@@ -1,3 +1,4 @@
+const { currentRunEvent, validatedTaskResult } = require('./task-evidence');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -66,24 +67,11 @@ function createRun(root, prompt, route, now = () => Date.now() / 1000) {
   };
 }
 
-function currentRunEvent(event, run) {
-  return !!run && event.run_id === run.run_id && Number.isFinite(run.started_at)
-    && Date.parse(event.ts || event.timestamp || '') >= run.started_at * 1000;
-}
 function taskResult(root, run, exitCode = null) {
   let result;
   try { result = JSON.parse(fs.readFileSync(path.join(root, 'log', `task-result-${run.run_id}.json`), 'utf8')); } catch {}
-  if (result && result.schema_version === 1 && result.run_id === run.run_id
-      && Number.isFinite(result.started_at) && result.started_at >= run.started_at
-      && Number.isFinite(result.ended_at) && result.ended_at >= result.started_at
-      && ['completed', 'blocked', 'incomplete', 'failed'].includes(result.status)) {
-    if (result.status !== 'completed') return result;
-    const evidence = result.completion_evidence;
-    if ((exitCode === null || exitCode === 0) && evidence && currentRunEvent(evidence, run) && (evidence.event_type || evidence.type) === 'phase_end'
-        && String(evidence.phase).replace(/^phase/, '') === '7' && evidence.status === 'success'
-        && Array.isArray(evidence.artifacts) && evidence.artifacts.length > 0
-        && evidence.artifacts.every((a) => a && typeof a === 'object' && typeof a.path === 'string' && a.path && /^[a-f0-9]{64}$/i.test(a.sha256 || ''))) return result;
-  }
+  const validated = validatedTaskResult(result, run, exitCode);
+  if (validated) return validated;
   return {status: exitCode !== null && exitCode !== 0 ? 'failed' : 'incomplete',
     reason: exitCode !== null && exitCode !== 0 ? `執行程序退出碼 ${exitCode}；請查看任務日誌。`
       : '模型呼叫已結束，但未取得本次任務的 Phase 7 完成交付證據。'};

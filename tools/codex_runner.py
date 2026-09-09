@@ -19,8 +19,8 @@ codex_runner.py — codex exec 的防掛外殼：預防（stdin=DEVNULL）+ 治�
 輸出單行 JSON：{"status":"ok|failed","attempts":N,"duration_s":S,"reason":"…"}
 exit code：ok=0、failed=1。
 
-並行注意：心跳源是「全域最新 session」，多個 runner 並行時互為近似（活的會掩護死的）；
-批內建議序列派工（e2e 實測結論），或接受近似並靠 --expect 判成敗。
+並行心跳：只採本次 CLI 輸出與 thread.started 證實的 session／子 agent；
+其他任務的全域 session 更新不會掩護本次掛死。
 
 測試鉤子：--codex-cmd 可換掉底層指令；CODEX_RUNNER_SESSIONS_DIR 可指定 sessions 目錄。
 """
@@ -39,7 +39,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 try:
@@ -163,6 +163,62 @@ def _latest_session_mtime(since: float) -> float | None:
             continue
         if mt >= since and (latest is None or mt > latest):
             latest = mt
+    return latest
+
+
+def _owned_session_mtime(root_id: str | None, since: float, now: float) -> float | None:
+    """Heartbeat only for the thread emitted by this CLI and proven descendants.
+
+    File identity, parent links and creation timestamps are checked; unrelated
+    activity in the user's global sessions directory can never keep this run alive.
+    """
+    if not root_id:
+        return None
+    first = datetime.fromtimestamp(since, timezone.utc).date() - timedelta(days=1)
+    last = datetime.fromtimestamp(now, timezone.utc).date() + timedelta(days=1)
+    candidates = {}
+    day = first
+    while day <= last:
+        folder = _sessions_dir() / day.strftime("%Y/%m/%d")
+        for path in folder.glob("rollout-*.jsonl"):
+            try:
+                mt = path.stat().st_mtime
+                if mt < since:
+                    continue
+                with path.open(encoding="utf-8") as stream:
+                    for index, line in enumerate(stream):
+                        if index > 7:
+                            break
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(event, dict) or event.get("type") != "session_meta":
+                            continue
+                        meta = event.get("payload", {})
+                        if not isinstance(meta, dict):
+                            break
+                        stamp = datetime.fromisoformat(str(meta.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
+                        source = meta.get("source", {})
+                        subagent = source.get("subagent", {}) if isinstance(source, dict) else {}
+                        spawn = subagent.get("thread_spawn", {}) if isinstance(subagent, dict) else {}
+                        parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+                        identity = meta.get("id")
+                        if isinstance(identity, str) and since - 5 <= stamp <= now:
+                            candidates[identity] = (parent, mt)
+                        break
+            except (OSError, ValueError, OverflowError):
+                continue
+        day += timedelta(days=1)
+    accepted, latest = {root_id}, candidates.get(root_id, (None, None))[1]
+    while True:
+        linked = [(identity, value) for identity, value in candidates.items()
+                  if identity not in accepted and value[0] in accepted]
+        if not linked:
+            break
+        for identity, (_, mt) in linked:
+            accepted.add(identity)
+            latest = max(latest or 0, mt)
     return latest
 
 
@@ -357,7 +413,7 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
              session_grace: float, heartbeat: float, poll: float = 2.0,
              provider: str = "codex", timeout: float = 1800.0,
              result_metadata: dict | None = None, role: str = "worker",
-             attempt_id: str | None = None) -> tuple[bool, str]:
+             attempt_id: str | None = None, started_event: dict | None = None) -> tuple[bool, str]:
     """跑一次；回 (成功?, 原因)。原因前綴 `fatal:` 代表重試沒有意義。"""
     start = time.time()
     # **導到檔案而不是 PIPE。** 需要輸出才能講清楚失敗原因（見 classify_failure），
@@ -372,6 +428,8 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
         result_metadata["result_path"] = name
     os.close(fd)
     log = Path(name)
+    if started_event is not None:
+        record_attempt(cwd, {**started_event, "result_path": str(log)})
     fh = log.open("w", encoding="utf-8", errors="replace")
     try:
         env = codex_shell_environment(dict(os.environ)) if provider == "codex" else os.environ.copy()
@@ -430,7 +488,9 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
             pass
         return ok, reason
 
-    session_seen = False
+    session_seen, root_id = False, None
+    own_output_size, own_last_activity = 0, start
+    last_identity_check, linked_mtime = 0.0, None
     while True:
         rc = proc.poll()
         if rc is not None:
@@ -451,20 +511,32 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
         if provider != "codex":
             time.sleep(poll)
             continue
-        mt = _latest_session_mtime(start - 5)
-        if mt is not None:
+        try:
+            stat = log.stat()
+            if stat.st_size != own_output_size:
+                own_output_size = stat.st_size
+                own_last_activity = now
+                session_seen = True
+                if root_id is None:
+                    # thread.started occurs at startup, not in arbitrary model text.
+                    with log.open(encoding="utf-8", errors="replace") as stream:
+                        head = stream.read(65536)
+                    root_id = next((e.get("thread_id") for e in _payloads(head)
+                                    if e.get("type") == "thread.started" and isinstance(e.get("thread_id"), str)), None)
+        except OSError:
+            pass
+        if root_id and now - last_identity_check >= min(5.0, max(poll, heartbeat / 3)):
+            linked_mtime = _owned_session_mtime(root_id, start, now)
+            last_identity_check = now
+        if linked_mtime is not None:
+            own_last_activity = max(own_last_activity, linked_mtime)
             session_seen = True
         if not session_seen and now - start > session_grace:
             _kill_tree(proc)
-            return _done(False, f"no-session within {session_grace}s（#20919 型掛死）")
-        # 停寫判定要**同時**滿足「session 靜止超過 heartbeat」與「這次 attempt 自己也跑了
-        # 至少 heartbeat 秒」。少了後者，重派時上一個被殺掉的 attempt 留下的 session 檔
-        # 會讓新 attempt 在起跑 0.2 秒內就被誤判停寫、白白燒掉一次重試
-        # （`_latest_session_mtime` 的 start-5 寬限擋不住快速重派）。
-        if (session_seen and mt is not None
-                and now - mt > heartbeat and now - start > heartbeat):
+            return _done(False, f"no-session within {session_grace}s（本次CLI尚無輸出）")
+        if session_seen and now - own_last_activity > heartbeat and now - start > heartbeat:
             _kill_tree(proc)
-            return _done(False, f"heartbeat stalled {int(now - mt)}s（停寫型掛死）")
+            return _done(False, f"heartbeat stalled {int(now - own_last_activity)}s（本次CLI及已驗證子agent皆無活動）")
         time.sleep(poll)
 
 
@@ -623,7 +695,8 @@ def execute_with_fallback(route: dict, prompt: str, cwd: Path, args,
             try:
                 ok, reason = run_once(cmd, cwd, expects, args.session_grace, args.heartbeat,
                                       provider=provider, timeout=args.timeout, result_metadata=metadata,
-                                      role=actual["role"], attempt_id=event["attempt_id"])
+                                      role=actual["role"], attempt_id=event["attempt_id"],
+                                      started_event={**event, "outcome": "started", "duration_ms": 0, **output_metadata("")})
             except OSError as exc:
                 ok, reason = False, f"fatal:provider_launch {exc}"
             if provider == "codex" and actual["role"] == "dispatcher" and metadata.get("result_path"):

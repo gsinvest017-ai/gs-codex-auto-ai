@@ -14,6 +14,34 @@ const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗
 const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
 const preview = require("./preview");
 const routing = require("./routing");
+const preview3d = require("./preview3d");
+let modelViewer = null;
+function bundledTool(extensionPath, name) {
+  return [path.join(extensionPath,"framework","tools",name),path.join(extensionPath,"..","tools",name)].find(fs.existsSync);
+}
+function workbenchCall(root, action, extra = []) {
+  const script=bundledTool(__dirname,"workbench.py");
+  if(!script)return Promise.reject(new Error("Workbench API 尚未安裝"));
+  return new Promise((resolve,reject)=>execFile("python",[script,"--root",root,"--action",action,...extra],{cwd:root,windowsHide:true,timeout:15000,maxBuffer:8*1024*1024,encoding:"utf8"},(error,stdout)=>{if(error)return reject(error);try{resolve(JSON.parse(stdout));}catch(e){reject(e);}}));
+}
+function registerWorkbenchMcp(api, context, root) {
+  if (!api.lm?.registerMcpServerDefinitionProvider || !api.McpStdioServerDefinition || !root) return false;
+  const script=bundledTool(context.extensionPath,"workbench_mcp.py");if(!script)return false;
+  context.subscriptions.push(api.lm.registerMcpServerDefinitionProvider("codexautoai.workbench", {
+    provideMcpServerDefinitions: () => {
+      const label="CodexAutoAI Workbench",args=[script,"--root",root],env={PYTHONUTF8:"1"};
+      let definition=new api.McpStdioServerDefinition(label,"python",args,env,"0.15.0");
+      // Current stable VS Code uses positional parameters; tolerate a future object API.
+      if(definition.label!==label)definition=new api.McpStdioServerDefinition({label,command:"python",args,env,version:"0.15.0"});
+      definition.cwd=api.Uri.file(root);return [definition];
+    },
+  }));return true;
+}
+async function openPreferredPreview(root, options = {}) {
+  const models=preview3d.discover(root);
+  if(models.length && modelViewer){modelViewer.open(root,models[0].path);return {mode:"model3d",detail:models[0].path};}
+  return preview.openPreview(root,previewVsApi(root),options);
+}
 const activeRuns = new Map();
 const launchingRoots = new Set();
 function reserveLaunch(root) {
@@ -406,6 +434,11 @@ async function checkForUpdate(context, { manual = false } = {}) {
 
 function activate(context) {
   const extPath = context.extensionPath;
+  modelViewer=preview3d.createController(vscode,extPath,{onArtifact:({root,path:file})=>{workbenchCall(root,"register_artifact",["--path",file]).catch(()=>{});}});
+  for(const folder of vscode.workspace.workspaceFolders || [])modelViewer.watch(folder.uri.fsPath);
+  context.subscriptions.push({dispose:()=>modelViewer?.dispose()});
+  if(vscode.workspace.onDidChangeWorkspaceFolders)context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(e=>{for(const folder of e.removed)modelViewer.unwatch(folder.uri.fsPath);for(const folder of e.added)modelViewer.watch(folder.uri.fsPath);}));
+  try {registerWorkbenchMcp(vscode,context,workspaceRoot());} catch(e){console.warn("CodexAutoAI MCP provider unavailable:",e.message);}
 
   // 啟動：把 full-auto 友善設定暫時套到全域 Claude/Codex；deactivate 時還原。
   // 預設開啟，可用設定 codexautoai.applyGlobalSettings 關掉。
@@ -503,12 +536,23 @@ function activate(context) {
   function buildDashboardDeps() {
     const root = workspaceRoot();
     if (!root) return null;
+    setTimeout(()=>{try{modelViewer?.openExisting(root);}catch{}},0);
     const cfg = vscode.workspace.getConfiguration("codexautoai");
     return {
       vscode, root,
       defaultReq: cfg.get("defaultRequirement", ""),
       onStart: (requirement, autopilot, reply) => {
         return buildDashboardDeps().onSeed(requirement, autopilot, reply);
+      },
+      onActivity: () => workbenchCall(root,"activity"),
+      onListArtifacts: () => workbenchCall(root,"artifacts"),
+      onOpenArtifact: (relativePath, reply) => {
+        try {
+          const file=preview3d.inside(root,path.resolve(root,relativePath));
+          if(/\.(glb|gltf)$/i.test(file)){modelViewer.open(root,relativePath);reply("已開啟 3D 模型預覽。");}
+          else if(/\.(png|jpg|jpeg|webp|obj)$/i.test(file))return vscode.commands.executeCommand("vscode.open",vscode.Uri.file(file),{viewColumn:vscode.ViewColumn.Beside,preserveFocus:true}).then(()=>reply(/\.obj$/i.test(file)?"已開啟 OBJ 原始檔；互動 3D 預覽請使用 GLB / glTF。":"已開啟圖片預覽。"));
+          else reply("此格式尚無預覽入口。");
+        }catch(e){reply("產物預覽失敗："+e.message);}
       },
       onPreviewRoute: async (requirement, reply, publish) => {
         try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
@@ -543,10 +587,11 @@ function activate(context) {
       },
       onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
       onPreview: (reply) => {
-        reply("偵測網頁 UI / 啟動 server 中…");
-        preview.openPreview(root, previewVsApi(root))
+        reply("偵測 3D 模型或網頁預覽…");
+        openPreferredPreview(root)
           .then((r) => {
-            if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
+            if (r.mode === "model3d") reply(`✓ 已開啟 3D 模型：${r.detail}（拖曳旋轉、滾輪縮放）。`);
+            else if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
             else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
             else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
             else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
@@ -564,6 +609,7 @@ function activate(context) {
       const deps = buildDashboardDeps();
       if (!deps) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
       dashboard.openDashboard(deps);
+      try {modelViewer.openExisting(deps.root);} catch(e){vscode.window.showWarningMessage("3D 預覽："+e.message);}
     })
   );
 
@@ -585,6 +631,8 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.preview", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      const models=preview3d.discover(root);
+      if(models.length){try{let item=models[0].path;if(models.length>1)item=await vscode.window.showQuickPick(models.map(m=>m.path),{placeHolder:"選擇 3D 模型"});if(item)modelViewer.open(root,item);}catch(e){vscode.window.showErrorMessage(e.message);}return;}
       const hits = preview.findWebRoots(root);
       let pickIndex = 0;
       if (hits.length > 1) {
@@ -711,6 +759,7 @@ function activate(context) {
 }
 
 function deactivate() {
+  try {modelViewer?.dispose();modelViewer=null;} catch {}
   for (const { run, timer } of activeRuns.values()) { clearInterval(timer); try { run.stop("extension_closed"); } catch {} }
   activeRuns.clear();
   // 關閉：還原啟動時暫套的全域 Claude/Codex 設定（最後一個 owner 才真的還原）。
@@ -720,4 +769,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };
+module.exports = { registerWorkbenchMcp, workbenchCall, openPreferredPreview, buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };

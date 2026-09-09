@@ -154,3 +154,21 @@ provider 統計中，attempts 是所有完成紀錄筆數；cliAttempts 與 nati
 本次 E2E 使用啟動當時的 runtime 與 collector；原始 child 事件仍使用當時的 invocation run_id 與 native_agent_usage scope。最後版本對 native child run_id / scope 的正規化與 guard 修正，由回歸測試覆蓋；沒有改寫原始 E2E 事件，也不把一次先前 E2E 成功宣稱為最後所有增量皆再次完成了真實模型全程執行。
 
 0.14.3 最終回歸：Python 188 passed（67.23 秒）、Node 13 passed。VSIX 驗證包含 native_usage.py 且核心程式與測試來源相符，不包含 Python bytecode。瀏覽器以正式 webview bridge 顯示真實來源重播，CLI 與原生代理兩組數據、未知模型及本次原需求均與事件相符。
+
+## 0.15.0：活動、產物工作台與 MCP 相容層
+
+保留既有啟動與額度路由；新增本機 GLB/glTF viewer、可讀活動摘要、按需歷史、共用 Workbench API 與可選 MCP stdio provider。OpenCode 仍只能在 Codex 與 Claude 的明確額度耗盡證據都成立時使用。MCP 預設五個唯讀工具，不啟動模型或接管 host 的模型選擇。
+
+本輪驗證使用使用者已完成的 run `4c2b1d12-18b0-42c7-be69-ff86937ef69e`，只讀既有事件與產物，沒有重新消耗模型額度跑另一個七階段任務：
+
+- 正式 viewer HTML、Three.js、GLTFLoader 與 readModel 載入 assets/codexautoai-avatar.glb（755,316 bytes、94 meshes、6 materials），瀏覽器實際渲染成功。滑鼠旋轉後按重新載入，模型與視角保留；fit 可操作。
+- 自動開啟與更新由 VS Code API mock 驗證：檔案穩定後只建立一個 Beside/preserveFocus 面板；同路徑實際寫入新 GLB revision 後送出新模型內容，不建立第二個面板。原生 VS Code 視窗仍需重載後啟用新版，這項 mock 不冒充原生視窗實測。
+- 正式 dashboard bridge 只讀本專案，顯示 GLB、OBJ、PNG 三項產物、最後中文交付回報與活動。歷史按鈕成功載入三個舊任務；ca6ad6cb 顯示任務受阻、最後呼叫成功，兩種狀態分開。
+- UI summarizeRoutingAttempts 與 Workbench metrics 的完整 JSON 精確相等，含事件順序：3 次 CLI（已知 input 3,511,858/output 6,014，1/3 覆蓋）、6 筆完成 native records（input 5,099,360/output 38,391）。兩組不重加；未知成本、模型與未回報用量保留未知。
+- 真正啟動 MCP stdio 子行程，完成 initialize/initialized、tools/list、run_status、list_artifacts、resources/read；讀到相同 run、completed 任務、三項產物與公開 CLI 活動。預設工具列表僅五項讀取工具，reasoning_exposed=false。
+- Watchdog 子行程反例測試：本次 stdout 持續更新或明確關聯 child session 更新可維持正常執行；不相關 parent 的 session 更新不能掩護停滯。啟動事件現在立即包含 result_path，使執行中活動可讀。
+- MCP 與 JavaScript taskResult 以 11 種交付資料情境驗證狀態一致；舊 completed 缺證據改為 incomplete，保留 CLI 的成功與用量原義。
+
+核心既有回歸 188 passed；Workbench/MCP 新增組 28 passed、1 skipped（此 Windows 環境無建立 symlink 權限）。兩組測試範圍分列，未宣稱為整個 repository 全套。產物版本登記只保存 metadata 與雜湊，不提供舊 GLB 快照還原。
+
+最後 Node 回歸 26 passed。VSIX 0.15.0 共 123 檔、816,436 bytes；15 項關鍵封裝來源逐位元組一致，無 pyc/__pycache__。已安裝 gsinvest.codexautoai@0.15.0，11 項安裝後來源比對通過。VSIX SHA-256：7869555ebdbea764b52fe300c566a2c9f737663c3568511d9426b22e78f85903。Three.js 原版 vendor 有一處上游縮排空白，保留原始檔案未做格式重寫。
