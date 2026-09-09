@@ -1,10 +1,11 @@
+const wiringEditor = require('./wiring-editor');
 // dashboard.js — CodexAutoAI 控制台（VS Code Webview 內嵌 GUI）。
 // 給不想碰 CLI/TUI 的使用者：輸入需求 → 按鈕啟動（terminal 隱藏在背景跑）→
 // 在面板上看七階段進度與「Claude 規劃 vs Codex 實作」分工證據（來源 log/events.jsonl，
 // OBS-R2 事件：phase_start/phase_end/llm_call/tool_call）。純 Node + vanilla webview，無外部依賴。
 const fs = require("fs");
 const path = require("path");
-const { validatedTaskResult } = require("./task-evidence");
+const { validatedTaskResult, validatedGraphResult } = require("./task-evidence");
 const routing = require("./routing");
 
 const PHASES = ["初始化", "環境檢查", "需求分析", "架構設計", "審查", "並行開發", "測試", "交付"];
@@ -25,7 +26,7 @@ function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
   for(const e of unique.values()) {
     const provider=e.actual_provider; if(!provider) continue;
     const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
-    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed']) attempt[key]=e[key] ?? null;
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed','routing_policy','config_digest','graph_id','graph_node_id','graph_digest']) attempt[key]=e[key] ?? null;
     attempt.usage=usage; attempts.push(attempt);
     const group=providers[provider] ||= {...emptyUsage(),cliAttempts:0,nativeAgents:0,nativeUsage:emptyUsage()}; group.attempts++;
     const native=e.role === "native_worker"; group[native ? "nativeAgents" : "cliAttempts"]++;
@@ -36,7 +37,8 @@ function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
     if(typeof e.cost_usd === 'number' && e.cost_usd>=0) {item.cost=(item.cost || 0)+e.cost_usd;item.costKnown++;}
     if(!exhausted.has(e.run_id)) exhausted.set(e.run_id,new Set());
     const quota=exhausted.get(e.run_id);
-    if(provider === 'opencode' && !(quota.has('codex') && quota.has('claude')) && !violations.includes('opencode_without_primary_quota_exhaustion')) violations.push('opencode_without_primary_quota_exhaustion');
+    const explicit=(e.routing_policy==='explicit-primary' && typeof e.config_digest==='string' && /^[a-f0-9]{64}$/i.test(e.config_digest)) || (e.routing_policy==='explicit-graph' && e.graph_id && e.graph_node_id && typeof e.graph_digest==='string' && /^[a-f0-9]{64}$/i.test(e.graph_digest));
+    if(provider === 'opencode' && !explicit && !(quota.has('codex') && quota.has('claude')) && !violations.includes('opencode_without_primary_quota_exhaustion')) violations.push('opencode_without_primary_quota_exhaustion');
     if(e.outcome === 'quota_exhausted' && ['codex','claude'].includes(provider)) quota.add(provider);
   }
   return {run_id:runId,parent_run_id:parentRunId,attempts,providers,status:attempts.length ? 'observed' : 'unverified',violations};
@@ -73,14 +75,24 @@ async function loadProjectHistory(root, currentRunId = null) {
       const id=e.parent_run_id || e.run_id;if(!id){unscoped++;continue;}if(id===currentRunId)continue;
       const entries=groups.get(id) || [];entries.push(e);groups.delete(id);groups.set(id,entries);
     }
+    const sessions=new Map();
+    try {const sessionPath=await confined(path.join(root,'log/vscode-sessions.jsonl'));const sessionHandle=await fs.promises.open(sessionPath,'r');try{const stat=await sessionHandle.stat(),size=Math.min(stat.size,limit),buffer=Buffer.alloc(size);await sessionHandle.read(buffer,0,size,Math.max(0,stat.size-size));for(const line of buffer.toString('utf8').split(/\r?\n/)){try{const record=JSON.parse(line);if(record.run_id)sessions.set(record.run_id,record);}catch{}}}finally{await sessionHandle.close();}}catch{}
+    const readJson=async name=>{const p=await confined(path.join(root,'log',name));if((await fs.promises.stat(p)).size>65536)throw Error('oversized result');return JSON.parse(await fs.promises.readFile(p,'utf8'));};
     const runs=await Promise.all([...groups.entries()].slice(-20).reverse().map(async([id,events])=>{
       const parent=events.some(e=>e.parent_run_id===id);
       const stats=summarizeRoutingAttempts(events,parent?null:id,parent?id:null);
       const last=events[events.length-1];let taskStatus='unknown';
       if(/^[a-zA-Z0-9_-]{1,128}$/.test(id))try{const resultPath=await confined(path.join(root,'log','task-result-'+id+'.json'));const resultStat=await fs.promises.stat(resultPath);if(resultStat.size<=65536){const result=JSON.parse(await fs.promises.readFile(resultPath,'utf8'));if(result.run_id===id){const runStart=events.find(e=>e.event_type==='run_start' && Number.isFinite(Date.parse(e.ts || e.timestamp || '')));const baseline=runStart?Date.parse(runStart.ts || runStart.timestamp)/1000:result.started_at;const validated=validatedTaskResult(result,{run_id:id,started_at:baseline});taskStatus=validated?validated.status:'incomplete';}}}catch{}
+      const session=sessions.get(id);const graphMode=session && session.route && session.route.mode==='graph';
+      if(graphMode && /^[a-zA-Z0-9_-]{1,128}$/.test(id)) {
+        taskStatus='incomplete';let exitCode=null;
+        try{if(session.exit_file){const p=await confined(path.resolve(root,session.exit_file));const raw=(await fs.promises.readFile(p,'utf8')).trim();if(/^-?\d+$/.test(raw))exitCode=Number(raw);}}catch{}
+        try{const graph=await readJson('graph-result-'+id+'.json');const valid=validatedGraphResult(graph,session,exitCode);if(valid)taskStatus=graph.status;}catch{}
+        if(exitCode!==null && exitCode!==0)taskStatus='failed';
+      }
       const outcome={ok:'成功',failed:'失敗',quota_exhausted:'額度耗盡',started:'已開始'};
       const latest=(last.type || last.event_type)==='model_attempt' ? '最後呼叫：'+(outcome[last.outcome] || '狀態未知') : '最後事件：'+String(last.event_type || last.type || '未知');
-      return {run_id:id,task_status:taskStatus,last_update:last.ts || last.timestamp || null,event_count:events.length,
+      return {run_id:id,task_status:taskStatus,execution_mode:graphMode?'graph':'pipeline',task_delivery_verified:graphMode?false:taskStatus==='completed',last_update:last.ts || last.timestamp || null,event_count:events.length,
         latest,providers:stats.providers};
     }));
     return {source:'project_events',runs,partial:offset>0,unscoped,
@@ -492,6 +504,7 @@ function html(defaultReq) {
   #usageSummary,#activityCurrent { line-height:1.6; } #artifactList>div { margin:8px 0; }
   table { width:100%; border-collapse:collapse; font-size:12px; } th,td { text-align:left; padding:9px; border-bottom:1px solid var(--line); }
   @media(max-width:600px) { .grid {grid-template-columns:1fr} .node {min-width:80px} }
+${wiringEditor.styles}
 </style></head><body>
 <h1>CodexAutoAI 控制台</h1>
 <div class="sub">全程免終端機：輸入需求 → 按啟動 → 在這裡看進度與分工。</div>
@@ -504,8 +517,8 @@ function html(defaultReq) {
     <label><input type="checkbox" id="autopilot" checked> 非停模式（全程不問，建議非開發者保持勾選）</label>
   </div>
   <div class="row">
-    <label>套用預設方案 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">雙主線（研究／審查 Claude，實作 Codex）</option></select></label>
-    <button class="ghost" id="btnPreset">套用模式</button>
+    <label>套用預設方案 <select id="preset"><option value="codex-first">Codex 優先</option><option value="claude-first">Claude 優先</option><option value="opencode-first">OpenCode 優先（明確啟用）</option><option value="review-codex-build-claude">Codex 審查 → Claude 實作</option><option value="multi-provider">雙主線（研究／審查 Claude，實作 Codex）</option></select></label>
+    <input id="presetModel" type="text" disabled placeholder="OpenCode 優先必填 provider/model"><button class="ghost" id="btnPreset">套用模式</button>
   </div>
   <div class="muted">套用模式會取代本專案的路由設定並備份舊設定；各供應商須先安裝 CLI 並登入。</div>
   <div class="row muted" id="status"></div>
@@ -515,15 +528,16 @@ function html(defaultReq) {
 <div class="card"><h2>場景接線設定</h2>
   <div class="muted">按需求自動辨識場景；儲存後套用至後續模型呼叫。預覽不會發出模型請求。</div>
   <div class="row"><label>場景 <select id="scenario"></select></label>
-  <label>主線 <select id="provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+  <label>主線 <select id="provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode（須先套用明確啟用方案）</option></select></label>
   <label>模型 <input type="text" id="routeModel" placeholder="留空使用 CLI 預設"></label>
   <label>OpenCode 備援模型 <input type="text" id="fallbackInput" placeholder="provider/model（選填）"></label>
   <button class="primary" id="btnSaveRoute">儲存此場景</button></div>
-  <div class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span>額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span>兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
+  <div class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span id="secondaryArrow">額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span id="fallbackArrow">兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
   <div class="muted" id="routeNotice">接線為設定預覽，尚未儲存。</div>
-  <div class="muted">OpenCode 的 Gemini／DeepSeek 僅在 Codex 與 Claude 額度皆耗盡時解鎖；一般錯誤不啟動備援。</div>
+  <div class="muted">預設 OpenCode 僅在兩主線額度皆耗盡時解鎖；明確選擇 OpenCode 優先方案或圖節點可覆寫此預設。一般錯誤不啟動備援。</div>
   <div class="row muted" id="routePreview">尚無本次需求的預定路由。</div>
 </div>
+${wiringEditor.markup}
 <div class="card"><h2>本次任務實際調度與用量</h2>
   <div id="evidenceStatus" class="muted">尚無實際呼叫證據，未驗證。</div>
   <div class="muted" id="evidenceRun"></div>
@@ -543,7 +557,7 @@ function html(defaultReq) {
 <div class="card"><h2>產物與預覽</h2><button class="ghost" id="btnArtifacts">重新整理產物</button>
   <div id="artifactNotice" class="muted">載入本專案產物清單。</div><div id="artifactList"></div>
 </div>
-<div class="card"><h2>七階段進度</h2>
+<div class="card"><h2 id="progressTitle">七階段進度</h2>
   <div class="bar" id="bar">░░░░░░░░</div>
   <div class="muted" id="phaseText">尚未開始——按上方「🚀 啟動新任務」。</div>
   <div class="warn" id="failureReason" role="alert"></div>
@@ -574,9 +588,12 @@ function html(defaultReq) {
 <script>
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
+  ${wiringEditor.clientScript()}
+  const scenarioExamples = ${JSON.stringify(wiringEditor.examples()).replace(/</g,"\\u003c")};
+  ${wiringEditor.placeholder.toString()}
   $("btnStart").onclick = () => { vscode.postMessage({ type:"start", requirement:$("req").value, autopilot:$("autopilot").checked }); };
   $("btnRoute").onclick = () => { vscode.postMessage({ type:"route", requirement:$("req").value }); };
-  $("btnPreset").onclick = () => { vscode.postMessage({ type:"preset", preset:$("preset").value }); };
+  $("btnPreset").onclick = () => { vscode.postMessage({ type:"preset", preset:$("preset").value, model:$("preset").value === "opencode-first" ? $("presetModel").value : undefined }); };
   $("btnLogs").onclick = () => { vscode.postMessage({ type:"logs" }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
   $("btnPreview").onclick = () => { vscode.postMessage({ type:"preview" }); };
@@ -608,7 +625,7 @@ function html(defaultReq) {
     $("btnHistory").disabled=false;$("projectHistoryNotice").textContent=history.notice || history.error || "已載入本專案歷史。";$("projectHistoryList").replaceChildren();
     if(!history.runs || !history.runs.length) {const p=document.createElement('p');p.textContent="沒有其他可歸屬的歷史任務；不將缺少紀錄視為零用量。";$("projectHistoryList").appendChild(p);return;}
     const statusLabels={completed:'已完成',blocked:'受阻',incomplete:'未完成',failed:'失敗',stopped:'已停止',running:'進行中',unknown:'未知'};
-    for(const run of history.runs) {const p=document.createElement('p');const metrics=Object.entries(run.providers).map(([name,g])=>name+' CLI '+g.cliAttempts+' 次：'+briefUsage(g)+(g.nativeAgents?'；原生代理 '+g.nativeAgents+' 筆：'+briefUsage(g.nativeUsage):'')).join(' · ');const time=run.last_update?new Date(run.last_update).toLocaleString('zh-TW'):'更新時間未知';p.title=run.run_id;p.textContent=String(run.run_id).slice(0,8)+' · '+time+' · 任務狀態：'+(statusLabels[run.task_status] || '未知')+' · '+run.latest+' · '+(metrics || '用量未回報');$("projectHistoryList").appendChild(p);}
+    for(const run of history.runs) {const p=document.createElement('p');const metrics=Object.entries(run.providers).map(([name,g])=>name+' CLI '+g.cliAttempts+' 次：'+briefUsage(g)+(g.nativeAgents?'；原生代理 '+g.nativeAgents+' 筆：'+briefUsage(g.nativeUsage):'')).join(' · ');const time=run.last_update?new Date(run.last_update).toLocaleString('zh-TW'):'更新時間未知';p.title=run.run_id;p.textContent=String(run.run_id).slice(0,8)+' · '+time+' · '+(run.execution_mode==='graph'?'接線狀態（非七階段交付）：':'任務狀態：')+(statusLabels[run.task_status] || '未知')+' · '+run.latest+' · '+(metrics || '用量未回報');$("projectHistoryList").appendChild(p);}
   }
   function showArtifacts(result) {
     $("artifactList").replaceChildren();const entries=Array.isArray(result)?result:(result.artifacts || result.items || []);
@@ -616,10 +633,13 @@ function html(defaultReq) {
     for(const a of entries.slice(0,100)) {const row=document.createElement('div'),button=document.createElement('button');button.textContent=a.label || a.name || a.relative_path || a.path || a.id;button.onclick=()=>vscode.postMessage({type:'openArtifact',id:a.relative_path || a.path || a.id});row.appendChild(button);const note=document.createElement('span');note.textContent=' · '+(a.format || a.kind || a.type || '檔案')+(a.status?' · '+a.status:'');row.appendChild(note);$("artifactList").appendChild(row);}
   }
   function drawWiring() {
+    $("req").placeholder=placeholder(scenarioExamples,$("scenario").value,$("provider").value,$("routeModel").value)+"\\n非停："+$("autopilot").checked+" · 方案："+$("preset").value+" · 備援："+($("fallbackInput").value || "未設定");
     $("sourceNode").textContent = $("scenario").value || "場景";
     $("primaryNode").textContent = $("provider").value + " / " + ($("routeModel").value || "CLI 預設");
     $("secondaryNode").textContent = $("provider").value === "codex" ? "claude / CLI 預設" : "codex / CLI 預設";
     $("fallbackModel").textContent = $("fallbackInput").value || "未設定，備援不可用";
+    $("secondaryArrow").textContent=$("provider").value === "opencode"?"→":"額度耗盡 →";$("fallbackArrow").textContent=$("provider").value === "opencode"?"→":"兩者皆耗盡 →";
+    if($("provider").value === "opencode") {$("secondaryNode").textContent="不自動切換其他供應商";$("fallbackModel").textContent="此方案未啟用備援";}
     $("routeNotice").textContent = "接線為設定預覽；修改後請儲存。";
   }
   $("scenario").onchange = () => {
@@ -658,6 +678,7 @@ function html(defaultReq) {
     if (m.type === "history") { showHistory(m.history); return; }
     if (m.type === "artifacts") { showArtifacts(m.result); return; }
     if (m.type === "status") { $("status").textContent = m.text; return; }
+    graphEditor.message(m);
     if (m.type === "catalog") {
       catalog = m.catalog; const previous = $("scenario").value; $("scenario").replaceChildren();
       for (const s of catalog.scenarios) { const option = document.createElement("option"); option.value=s.name; option.textContent=s.name; $("scenario").appendChild(option); }
@@ -691,6 +712,15 @@ function html(defaultReq) {
     else if (s.runStatus === "incomplete") state = "⚠ 已停止，任務未完成";
     else if (["stopped", "心跳逾期"].includes(s.runStatus)) state = s.runStatus === "stopped" ? "■ 任務已停止" : "⚠ 心跳逾期，狀態未知";
     $("phaseText").innerHTML = "Phase " + marker + "/7 " + names[marker] + "　<span class='" + (s.failed ? "bad" : "ok") + "'>" + state + "</span>";
+    const graphMode=m.run && m.run.route && m.run.route.mode==='graph';
+    $("progressTitle").textContent=graphMode?'接線執行結果（非七階段交付）':'七階段進度';
+    if(graphMode) {
+      $("runState").textContent='接線執行：'+m.run.status+' · '+m.run.route.graph_id;
+      $("bar").textContent='';
+      const graph=m.graphResult;
+      const labels={ok:'成功',failed:'失敗',quota_exhausted:'額度耗盡',skipped:'未執行'};
+      $("phaseText").textContent=(graph?'接線'+(graph.status==='completed'?'已完成':'受阻')+'；'+Object.entries(graph.graph_states || {}).map(([id,status])=>id+'：'+(labels[status] || status)).join(' · '):'等待本次接線執行結果')+'。未驗證七階段交付。';
+    }
     if (s.historyLoaded === false) {
       $("historyNotice").textContent="未載入；為保持即時更新，不掃描歷史 session。實際用量請看上方本次任務證據。";
       for (const id of ["claudeCalls","codexCalls","claudeTok","codexTok","codexP5","cost"]) $(id).textContent="未載入";
@@ -720,6 +750,8 @@ function html(defaultReq) {
     $("iter").textContent = s.iteration ? "第 " + s.iteration + " 輪迭代" : "";
     $("ts").textContent = s.lastTs ? "最後事件 " + s.lastTs.replace("T", " ").slice(0, 19) : "";
   });
+  $("autopilot").onchange=drawWiring; $("preset").onchange=()=>{$("presetModel").value="";$("presetModel").disabled=$("preset").value!=="opencode-first";drawWiring();};
+  vscode.postMessage({type:"graphList"});
   vscode.postMessage({type:"catalog"});
   vscode.postMessage({type:"artifacts"});
 </script></body></html>`;
@@ -777,7 +809,8 @@ function computeState(root, { includeHistory = true } = {}) {
       ? "啟動失敗：Codex 拒絕在未受信任的非 Git 目錄執行。原始錯誤：" + detail
       : (run.status === "blocked" ? "任務受阻：" : run.status === "incomplete" ? "任務未完成：" : "任務已失敗：") + (detail || "模型呼叫尚未留下失敗原因；請開啟任務日誌或背景終端機查看退出資訊。");
   }
-  return { exists: exists || !!f || !!run || routingStats.attempts.length > 0, summary, run, routingStats };
+  const graphResult = run && run.route && run.route.mode === 'graph' ? routing.taskResult(root, run).graph || null : null;
+  return { exists: exists || !!f || !!run || routingStats.attempts.length > 0, summary, run, routingStats, graphResult };
 }
 
 // 把一個 webview（面板或側欄 view 皆可）接上控制台：設 html、每 2s 推狀態、綁訊息。
@@ -799,10 +832,15 @@ function wireDashboard(webview, deps) {
   let historyPending=false,artifactsPending=false;
   const sub = webview.onDidReceiveMessage((m) => {
     const reply = (text) => webview.postMessage({ type: "status", text });
-    if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
+    if (m.type.startsWith("graph") && deps.onGraphApi && m.type !== "graphRun") {
+      const action={graphList:'list',graphGet:'get',graphSave:'save',graphDelete:'delete'}[m.type];
+      if(action) Promise.resolve().then(()=>deps.onGraphApi(action,{graphId:m.graphId,graph:m.graph})).then(result=>webview.postMessage({type:({graphList:'graphList',graphGet:'graphLoaded',graphSave:'graphSaved',graphDelete:'graphList'})[m.type],result})).catch(e=>webview.postMessage({type:'graphError',message:e.message}));
+    }
+    else if(m.type === 'graphRun' && deps.onGraphRun) Promise.resolve().then(()=>deps.onGraphRun(m.graphId,m.requirement,reply)).catch(e=>webview.postMessage({type:'graphError',message:e.message}));
+    else if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
     else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply, (route) => webview.postMessage({type:"routePreview", route}));
-    else if (m.type === "preset" && deps.onPreset) Promise.resolve(deps.onPreset(m.preset, reply)).then(() => deps.onCatalog && deps.onCatalog()).then((catalog) => {if(catalog) webview.postMessage({type:"catalog",catalog});}).catch((e) => reply(e.message));
+    else if (m.type === "preset" && deps.onPreset) Promise.resolve(deps.onPreset(m.preset, reply, {model:m.model})).then(() => deps.onCatalog && deps.onCatalog()).then((catalog) => {if(catalog) webview.postMessage({type:"catalog",catalog}); if(deps.onGraphApi) Promise.resolve(deps.onGraphApi("list",{})).then(result=>webview.postMessage({type:"graphList",result}));}).catch((e) => reply(e.message));
     else if (m.type === "catalog" && deps.onCatalog) Promise.resolve(deps.onCatalog()).then((catalog) => webview.postMessage({type:"catalog",catalog})).catch((e) => reply(e.message));
     else if (m.type === "saveRoute" && deps.onSaveRoute) Promise.resolve(deps.onSaveRoute(m.selection)).then(() => deps.onCatalog()).then((catalog) => { webview.postMessage({type:"catalog",catalog}); reply("已儲存場景接線；套用至後續呼叫。"); }).catch((e) => reply(e.message));
     else if (m.type === "history") {

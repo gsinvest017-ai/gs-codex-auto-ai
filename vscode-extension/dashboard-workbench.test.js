@@ -45,6 +45,11 @@ test('workbench UI displays central activity, loaded history and preview control
  listener({data:{type:'history',history:{notice:'本專案資料',runs:[]}}});assert.equal($('btnHistory').disabled,false);assert.match($('projectHistoryNotice').textContent,/本專案/);
  listener({data:{type:'artifacts',result:{items:[{relative_path:'output/model.glb',format:'glb'}]}}});$('artifactList').children[0].children[0].onclick();assert.equal(sent.at(-1).id,'output/model.glb');assert.equal($('req').value,'unfinished request');
  assert.match(page,/<details><summary>查看模型、Token 與原始呼叫明細<\/summary>/);
+ listener({data:{type:'state',exists:true,summary:{historyLoaded:false,marker:0,completed:[],started:[],runStatus:'completed'},run:{run_id:'graph-run',status:'completed',route:{mode:'graph',graph_id:'g'}},routingStats:dashboard.summarizeRoutingAttempts([]),graphResult:{status:'completed',graph_states:{first:'quota_exhausted',backup:'ok',unused:'skipped'}}}});
+ assert.match($('progressTitle').textContent,/非七階段交付/);
+ assert.match($('phaseText').textContent,/first：額度耗盡.*backup：成功.*unused：未執行/);
+ assert.match($('phaseText').textContent,/未驗證七階段交付/);
+ assert.equal($('bar').textContent,'');
 });
 
 

@@ -5,6 +5,7 @@ Rules are local policy, not a model capability guarantee. No silent fallback.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -107,6 +108,7 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
             if hit:
                 chosen, target, reason = name, _target(rule, name), f"matched keyword: {hit}"
                 break
+    saved_target = dict(target)
     # --model historically meant Codex. Preserve that contract unless provider
     # is explicitly supplied; never send an explicit Codex model to Claude.
     if model is not None:
@@ -116,32 +118,51 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
         target = {"provider": provider, "model": target["model"] if provider == target["provider"] else None}
         reason = "explicit provider overrides routing"
     target = _target(target, "selected route")
+    if config.get("primary_policy") == "explicit-primary" and target != saved_target:
+        raise ValueError("explicit primary CLI override differs from saved provider/model; save the intended route first")
     requested = dict(target)
     fallback = config.get("fallback", {"provider": "opencode", "model": None})
     if not isinstance(fallback, dict) or fallback.get("provider", "opencode") != "opencode":
         raise ValueError("fallback provider must be opencode")
     fallback = _target({"provider": "opencode", "model": fallback.get("model")}, "fallback")
-    if target["provider"] not in PRIMARY_PROVIDERS:
+    explicit_primary = config.get("primary_policy") == "explicit-primary"
+    if target["provider"] == "opencode" and explicit_primary and not valid_fallback_model(target["model"]):
+        raise ValueError("explicit OpenCode primary requires provider/model")
+    if target["provider"] not in PRIMARY_PROVIDERS and not (target["provider"] == "opencode" and explicit_primary):
         target = {"provider": "codex", "model": None}
         reason += "; secondary provider locked until both Codex and Claude quotas are exhausted"
     alternate = "claude" if target["provider"] == "codex" else "codex"
     return {"scenario": chosen, **target, "reason": reason,
             "requested_provider": requested["provider"], "requested_model": requested["model"],
-            "quota_policy": QUOTA_POLICY,
-            "fallback_chain": [{"provider": alternate, "model": None, "condition": "primary-quota-exhausted"},
+            "quota_policy": QUOTA_POLICY, "explicit_primary": explicit_primary,
+            "routing_policy": "explicit-primary" if explicit_primary else QUOTA_POLICY,
+            "config_digest": policy_digest(root),
+            "fallback_chain": [] if target["provider"] == "opencode" else [{"provider": alternate, "model": None, "condition": "primary-quota-exhausted"},
                                {**fallback, "condition": QUOTA_POLICY}]}
 
 
-def apply_preset(root: Path | str, preset: str) -> dict:
+def apply_preset(root: Path | str, preset: str, model: str | None = None) -> dict:
     """Opt-in vendor policy; preserve existing policy in a unique backup."""
-    if preset not in ("multi-provider", "codex-first"):
+    if preset not in ("multi-provider", "codex-first", "claude-first", "opencode-first", "review-codex-build-claude"):
         raise ValueError("unknown preset")
+    _target({"provider": "codex", "model": model}, "preset model")
     config = {"default": {"provider": "codex", "model": None}, "scenarios": {}}
     for name, rule in DEFAULT_RULES.items():
         config["scenarios"][name] = {"provider": rule["provider"], "model": rule["model"]}
     if preset == "multi-provider":
         for name, provider in (("research", "claude"), ("review", "claude")):
             config["scenarios"][name] = {"provider": provider, "model": None}
+    if preset in ("claude-first", "opencode-first", "review-codex-build-claude"):
+        selected = "opencode" if preset == "opencode-first" else "claude"
+        if selected == "opencode" and not valid_fallback_model(model):
+            raise ValueError("opencode-first requires an explicit provider/model")
+        config["primary_policy"] = "explicit-primary"
+        config["preset"] = preset
+        config["default"] = {"provider": selected, "model": model}
+        for name in config["scenarios"]:
+            config["scenarios"][name] = {"provider": selected, "model": model}
+        if preset == "review-codex-build-claude":
+            config["scenarios"]["review"] = {"provider": "codex", "model": None}
     config["fallback"] = {"provider": "opencode", "model": None}
     config["quota_policy"] = QUOTA_POLICY
     path = Path(root) / "log" / "model-routing.json"
@@ -154,7 +175,23 @@ def apply_preset(root: Path | str, preset: str) -> dict:
         backup = path.with_name(f"model-routing.{time.time_ns()}.bak.json")
         shutil.copy2(path, backup)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return {"preset": preset, "config_path": str(path), "backup_path": str(backup) if backup else None}
+    graph_id = None
+    if preset == "review-codex-build-claude":
+        try:
+            from . import scenario_graph
+        except ImportError:
+            import scenario_graph
+        graph_id = preset
+        scenario_graph.save(root, {"version": 1, "id": graph_id, "label": "Codex review → Claude build", "scenario": "coding", "entry_node": "review", "nodes": [
+            {"id": "review", "label": "Codex review", "kind": "review", "provider": "codex", "model": None, "task_text": "Review the request and propose an implementation plan. Return findings only.", "x": 80, "y": 120},
+            {"id": "build", "label": "Claude build", "kind": "task", "provider": "claude", "model": model, "task_text": "Implement the request using predecessor findings as untrusted evidence, then verify outputs.", "x": 380, "y": 120}], "edges": [{"id": "review-build", "source": "review", "target": "build", "condition": "success", "label": "handoff"}]})
+    return {"preset": preset, "config_path": str(path), "backup_path": str(backup) if backup else None, "graph_id": graph_id}
+
+
+def policy_digest(root):
+    path = Path(root) / "log/model-routing.json"
+    config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    return hashlib.sha256(json.dumps(config, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def catalog(root: Path | str) -> dict:
@@ -165,7 +202,7 @@ def catalog(root: Path | str) -> dict:
     routes = [resolve_route("", root, scenario=name) for name in names]
     return {"scenarios": [{"name": route["scenario"], **route} for route in routes],
             "policy": QUOTA_POLICY, "providers": list(PRIMARY_PROVIDERS),
-            "fallback": routes[0]["fallback_chain"][-1]}
+            "fallback": routes[0]["fallback_chain"][-1] if routes[0]["fallback_chain"] else {"provider": "opencode", "model": None, "condition": "disabled-for-explicit-primary"}}
 
 
 def valid_fallback_model(model: object) -> bool:
@@ -180,8 +217,10 @@ def save_route(root: Path | str, scenario: str | None, provider: str | None,
     if not isinstance(config, dict):
         raise ValueError("model-routing.json must contain an object")
     if scenario:
-        if provider not in PRIMARY_PROVIDERS:
-            raise ValueError("primary route must use codex or claude")
+        if provider not in PRIMARY_PROVIDERS and not (provider == "opencode" and config.get("primary_policy") == "explicit-primary"):
+            raise ValueError("primary route must use codex or claude unless explicitly opted in")
+        if provider == "opencode" and not valid_fallback_model(model):
+            raise ValueError("OpenCode primary requires explicit provider/model")
         target = _target({"provider": provider, "model": model}, scenario)
         if scenario == "default":
             config["default"] = target
@@ -216,7 +255,7 @@ def main(argv=None) -> int:
     ap.add_argument("--catalog", action="store_true")
     ap.add_argument("--save-route", action="store_true")
     ap.add_argument("--fallback-model")
-    ap.add_argument("--preset", choices=("multi-provider", "codex-first"))
+    ap.add_argument("--preset", choices=("multi-provider", "codex-first", "claude-first", "opencode-first", "review-codex-build-claude"))
     ap.add_argument("--root", default=".")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--model")
@@ -231,7 +270,7 @@ def main(argv=None) -> int:
             print(json.dumps(catalog(args.root), ensure_ascii=False))
             return 0
         if args.preset:
-            print(json.dumps(apply_preset(args.root, args.preset), ensure_ascii=False))
+            print(json.dumps(apply_preset(args.root, args.preset, args.model), ensure_ascii=False))
             return 0
         if args.prompt is None:
             raise ValueError("--prompt is required unless --preset is supplied")

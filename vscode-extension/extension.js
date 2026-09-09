@@ -1,3 +1,4 @@
+const wiringEditor = require('./wiring-editor');
 // CodexAutoAI VS Code extension — 啟動器（自帶框架快照）。
 // 面板四個指令：安裝設定（初始化＋登入修復合一）、啟動新任務（輸入需求跑 claude）、
 // 啟動新任務：從 spec 開始（gs-spec-forge 產 spec 再跑 pipeline）、檢查更新。
@@ -558,10 +559,22 @@ function activate(context) {
         try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
         catch (e) { reply(e.message); }
       },
+      onGraphApi: (action, options) => {if(['save','delete'].includes(action) && [...activeRuns.values()].some(x=>x.root===root && x.run.record.route?.mode==='graph'))throw new Error('接線執行中，請完成或停止後再修改。');return wiringEditor.graphApi(root,action,options);},
+      onGraphRun: async (graphId, requirement, reply) => {
+        if(!String(requirement || '').trim())throw new Error('請輸入本次需求');
+        const release=reserveLaunch(root);
+        try {
+          if(!refreshFrameworkCore(extPath,root))throw new Error('無法準備框架');
+          const graph=await wiringEditor.graphApi(root,'preview',{graphId});
+          const route={mode:'graph',graph_id:graph.id,scenario:graph.scenario,graph_snapshot:graph,graph_digest:graph.digest};
+          runClaudeInTerminal(root,`python tools/codex_runner.py --graph-id "${safePrompt(graph.id)}" --graph-digest "${graph.digest}" --prompt "${safePrompt(requirement)}" --cwd .`,{hidden:true,prompt:requirement,route});
+          reply('已啟動儲存接線；這次驗證圖節點，不代表七階段交付。');
+        }finally{release();}
+      },
       onCatalog: () => routing.getCatalog(root),
       onSaveRoute: (selection) => routing.saveRoute(root, selection),
-      onPreset: async (preset, reply) => {
-        try { await routing.applyPreset(root, preset); reply(`已套用 ${preset} 至本專案；既有設定由 router 備份。`); }
+      onPreset: async (preset, reply, options) => {
+        try { await routing.applyPreset(root, preset, undefined, options); reply(`已套用 ${preset} 至本專案；既有設定由 router 備份。`); }
         catch (error) { reply(error.message); }
       },
       onOpenLogs: () => vscode.commands.executeCommand("codexautoai.openLogs"),

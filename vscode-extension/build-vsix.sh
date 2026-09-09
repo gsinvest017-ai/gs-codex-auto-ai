@@ -4,6 +4,7 @@ set -euo pipefail
 EXT="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$EXT")"
 cd "$EXT"
+node bundle-examples.js
 
 FW="$EXT/framework"
 rm -rf "$FW"; mkdir -p "$FW/src" "$FW/docs"

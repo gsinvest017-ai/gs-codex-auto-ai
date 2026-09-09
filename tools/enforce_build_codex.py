@@ -9,6 +9,10 @@ CodexAutoAI 的核心不變式是「Claude 規劃、Codex 實作」（見 CLAUDE
 自己的 Edit/Write/MultiEdit。因此「擋掉 Claude 對這些目錄的 Edit/Write」就等於
 強制所有實作走 Codex。
 
+上述為預設策略。明確保存的 explicit-primary / explicit-graph 可對當次 writer
+授權，須核對 run、attempt、有效期、設定摘要與節點/provider/model；單靠 prompt
+不能解除。OpenCode 不執行 Claude PreToolUse，本 hook 不宣稱管制其原生工具。
+
 守門範圍見下方常數：`_GUARDED_DIRS`（src/tests/docs）、`_WHITELIST_FILES`
 （Phase 2 的規劃產物，屬 Claude 職責）。
 
@@ -187,6 +191,67 @@ def _authorized_quota_writer(root: Path) -> bool:
         return False
 
 
+def _authorized_graph_writer(root: Path) -> bool:
+    """A saved explicit graph/preset grants only its live invocation writing rights.
+
+    This hook runs in Claude, not OpenCode. The same provider binding is checked
+    for shared adapters; it is not an OpenCode permission enforcement mechanism.
+    """
+    provider = os.environ.get('CODEXAUTOAI_ROUTED_WORKER')
+    attempt = os.environ.get('CODEXAUTOAI_ROUTED_ATTEMPT')
+    parent = os.environ.get('CODEXAUTOAI_PARENT_RUN_ID')
+    if provider not in ('claude', 'opencode') or not attempt or not parent or os.environ.get('CODEXAUTOAI_ROUTED_ROLE') != 'writer':
+        return False
+    try:
+        try:
+            from tools import scenario_graph, model_router
+        except ImportError:
+            import scenario_graph
+            import model_router
+        latest = None
+        for line in (root / 'log/events.jsonl').read_text(encoding='utf-8').splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get('type') == 'model_attempt' and event.get('attempt_id') == attempt:
+                latest = event
+        if not latest or latest.get('routing_policy') not in ('explicit-graph', 'explicit-primary') or latest.get('outcome') != 'started':
+            return False
+        expiry = latest.get('authorization_expires_at')
+        if (latest.get('actual_provider') != provider or latest.get('role') != 'writer'
+                or (latest.get('parent_run_id') or latest.get('run_id')) != parent
+                or not isinstance(expiry, (int, float)) or isinstance(expiry, bool)
+                or not time.time() < expiry < time.time() + 86400):
+            return False
+        app_path = root / 'log/app-run.json'
+        if app_path.exists():
+            app = json.loads(app_path.read_text(encoding='utf-8'))
+            if app.get('run_id') != parent or app.get('status') != 'running' or not _app_run_active(root):
+                return False
+        if latest['routing_policy'] == 'explicit-primary':
+            config = json.loads((root / 'log/model-routing.json').read_text(encoding='utf-8-sig'))
+            if (config.get('primary_policy') != 'explicit-primary' or not latest.get('config_digest')
+                    or latest['config_digest'] != os.environ.get('CODEXAUTOAI_CONFIG_DIGEST')
+                    or model_router.policy_digest(root) != latest['config_digest']):
+                return False
+            node = config.get('scenarios', {}).get(latest.get('scenario'), config.get('default', {}))
+            return bool(node.get('provider') == provider and node.get('model') == latest.get('configured_model')
+                        and (provider != 'opencode' or model_router.valid_fallback_model(node.get('model'))))
+        for field, env in [('graph_id', 'CODEXAUTOAI_GRAPH_ID'), ('graph_node_id', 'CODEXAUTOAI_NODE_ID'), ('graph_digest', 'CODEXAUTOAI_CONFIG_DIGEST')]:
+            if not latest.get(field) or latest[field] != os.environ.get(env):
+                return False
+        graph = scenario_graph.get(root, latest['graph_id'])
+        if graph is None or scenario_graph.digest(graph) != latest['graph_digest']:
+            return False
+        node = next((n for n in graph['nodes'] if n['id'] == latest['graph_node_id']), None)
+        return bool(node and node.get('kind', 'task') == 'task' and node['provider'] == provider
+                    and node.get('model') == latest.get('configured_model')
+                    and graph['scenario'] == latest.get('scenario'))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
+        return False
+
+
 def evaluate(payload: dict, root: Path) -> Optional[str]:
     """回傳 deny 理由字串代表要擋；回傳 None 代表放行。純函式，方便測試。"""
     if (os.environ.get("CODEXAUTOAI_NO_BUILD_ENFORCE") or "").strip():
@@ -207,7 +272,7 @@ def evaluate(payload: dict, root: Path) -> Optional[str]:
         return None
     if not _under_src(root, file_path):
         return None
-    if _authorized_quota_writer(root):
+    if _authorized_quota_writer(root) or _authorized_graph_writer(root):
         return None
     return _DENY_REASON
 

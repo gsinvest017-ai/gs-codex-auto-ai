@@ -1,4 +1,4 @@
-const { currentRunEvent, validatedTaskResult } = require('./task-evidence');
+const { currentRunEvent, validatedTaskResult, validatedGraphResult } = require('./task-evidence');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -28,16 +28,18 @@ async function previewRoute(root, prompt, execute = execFile) {
   if (!route.scenario || !route.provider || typeof route.reason !== 'string') throw new Error('Invalid routing response');
   return route;
 }
-async function applyPreset(root, preset, execute = execFile) {
-  if (!['multi-provider', 'codex-first'].includes(preset)) throw new Error('未知路由模式');
-  return runRouter(root, ['--preset', preset], execute);
+async function applyPreset(root, preset, execute = execFile, options = {}) {
+  if (!['multi-provider', 'codex-first','claude-first','opencode-first','review-codex-build-claude'].includes(preset)) throw new Error('未知路由模式');
+  if(preset==='opencode-first' && !String(options.model || '').trim()) throw new Error('OpenCode 優先必須指定 provider/model');
+  return runRouter(root, ['--preset', preset, ...(options.model?['--model',options.model]:[])], execute);
 }
 
 async function getCatalog(root, execute = execFile) {
   return runRouter(root, ['--catalog'], execute);
 }
 async function saveRoute(root, selection, execute = execFile) {
-  if (!selection || !['codex', 'claude'].includes(selection.provider)) throw new Error('主線僅允許 Codex 或 Claude');
+  if (!selection || !['codex', 'claude','opencode'].includes(selection.provider)) throw new Error('主線僅允許 Codex 或 Claude');
+  if(selection.provider==='opencode' && !/^[^/\s]+(?:\/[^/\s]+)+$/.test(String(selection.model || '').trim()))throw new Error('OpenCode 主線須先明確啟用並指定 provider/model');
   if (typeof selection.scenario !== 'string' || !selection.scenario) throw new Error('請選擇場景');
   const args = ['--save-route', '--scenario', selection.scenario, '--provider', selection.provider];
   if (String(selection.model || '').trim()) args.push('--model', String(selection.model).trim());
@@ -68,6 +70,13 @@ function createRun(root, prompt, route, now = () => Date.now() / 1000) {
 }
 
 function taskResult(root, run, exitCode = null) {
+  if(run.route?.mode==='graph') {
+    if(exitCode===null && run.exit_file)try{const file=fs.realpathSync(path.resolve(root,run.exit_file)),rel=path.relative(fs.realpathSync(root),file);if(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel)){const raw=fs.readFileSync(file,'utf8').trim();if(/^-?\d+$/.test(raw))exitCode=Number(raw);}}catch{}
+    let graph;try{graph=JSON.parse(fs.readFileSync(path.join(root,'log',`graph-result-${run.run_id}.json`),'utf8'));}catch{}
+    if(validatedGraphResult(graph,run,exitCode))
+      return {status:exitCode!==null && exitCode!==0?'failed':graph.status==='completed'?'completed':'blocked',reason:'接線執行'+(graph.status==='completed'?'完成':'受阻')+'；未驗證七階段交付。'+(graph.reason || ''),graph};
+    return {status:exitCode!==null && exitCode!==0?'failed':'incomplete',reason:'未取得本次接線執行結果；未驗證七階段交付。'};
+  }
   let result;
   try { result = JSON.parse(fs.readFileSync(path.join(root, 'log', `task-result-${run.run_id}.json`), 'utf8')); } catch {}
   const validated = validatedTaskResult(result, run, exitCode);
