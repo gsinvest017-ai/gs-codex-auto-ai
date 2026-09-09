@@ -69,11 +69,17 @@ async function abortPipeline(root) {
 // 最近一次背景啟動的 terminal（控制台「顯示終端機」逃生口用）。
 let lastTerminal = null;
 
+function finishTerminalRun(terminal, exitCode) {
+  const active = activeRuns.get(terminal);
+  if (!active) return;
+  const result = routing.taskResult(active.root, active.run.record, exitCode ?? 1);
+  clearInterval(active.timer); active.run.stop(result.status, result.reason); activeRuns.delete(terminal);
+}
+
 // 在 root 開 terminal 跑 claude；hidden=true 時不搶焦點（控制台走這條，非開發者不用看 CLI）。
 function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route = null } = {}) {
   const key = path.resolve(root).toLowerCase();
   if (Array.from(activeRuns.values()).some((x) => x.key === key)) throw new Error("本專案已有執行中的任務。");
-  const started = Date.now();
   const run = routing.createRun(root, prompt, route);
   let t;
   try {
@@ -86,24 +92,13 @@ function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route =
       if (fs.existsSync(run.exitFile)) {
         const code = fs.readFileSync(run.exitFile, "utf8").trim();
         if (/^-?\d+$/.test(code)) {
-          clearInterval(timer); run.stop(Number(code) === 0 ? "completed" : "failed"); activeRuns.delete(t); return;
-        }
-      }
-      const events = path.join(root, "log", "events.jsonl");
-      if (fs.existsSync(events) && fs.statSync(events).mtimeMs >= started) {
-        // Only this run's timestamped events can finish its heartbeat.
-        const lines = fs.readFileSync(events, "utf8").split(/\r?\n/).filter((line) => {
-          try { const event = JSON.parse(line); return Date.parse(event.ts || event.timestamp || "") >= started; } catch { return false; }
-        });
-        const summary = dashboard.summarizeEvents(lines);
-        if (summary.completed.includes(7)) {
-          clearInterval(timer); run.stop("completed"); activeRuns.delete(t); return;
+          finishTerminalRun(t, Number(code)); return;
         }
       }
       run.heartbeat();
     } catch {}
   }, 2000);
-  activeRuns.set(t, { run, timer, key });
+  activeRuns.set(t, { run, timer, key, root });
   lastTerminal = t;
   try {
     if (!hidden) t.show();
@@ -434,11 +429,11 @@ function activate(context) {
       if (!exists) { statusItem.hide(); return; }
       const marker = s.marker || 0;
       const name = dashboard.PHASES[marker] || "";
-      const done = marker === 7 && (s.completed.includes(7) || s.started.includes(7));
-      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : "$(sync~spin)");
+      const done = s.runStatus === "completed";
+      const stopped = s.runStatus && s.runStatus !== "running";
+      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : stopped ? "$(debug-stop)" : "$(sync~spin)");
       statusItem.text = `${icon} CodexAutoAI ${marker}/7 ${name}`;
-      statusItem.tooltip = s.failed ? "pipeline 失敗/升級——點開控制台查看"
-        : (done ? "已到交付階段——點開控制台" : `並行實作中・Codex ${s.codex.sessions || 0} sessions——點開控制台`);
+      statusItem.tooltip = s.failureReason || (done ? "任務交付完成——點開控制台" : stopped ? "任務已停止——點開控制台" : "任務執行中——點開控制台查看實際進度");
       statusItem.show();
     } catch { statusItem.hide(); }
   };
@@ -686,11 +681,11 @@ function activate(context) {
   if (vscode.window.onDidEndTerminalShellExecution) {
     context.subscriptions.push(vscode.window.onDidEndTerminalShellExecution((event) => {
       // Ignore the preliminary Set-Location command.
-      if (/^claude(?:\s|$)/.test(event.execution.commandLine.value)) {
+      if (/^(?:claude(?:\s|$)|(?:python(?:3)?|"[^"\r\n]*python(?:\.exe)?")\s+tools[\\/]codex_runner\.py\s)/.test(event.execution.commandLine.value)) {
         const active = activeRuns.get(event.terminal);
         let code = event.exitCode;
         try { if (active) code = Number(fs.readFileSync(active.run.exitFile, "utf8").trim()); } catch {}
-        stopTerminalRun(event.terminal, code === 0 ? "completed" : "failed");
+        finishTerminalRun(event.terminal, code);
       }
     }));
   }
@@ -725,4 +720,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { buildInner, activate, deactivate, runClaudeInTerminal, refreshFrameworkCore, reserveLaunch };
+module.exports = { buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };

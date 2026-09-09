@@ -27,6 +27,7 @@ exit code：ok=0、failed=1。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -52,6 +53,28 @@ except ImportError:
     resolve_route = _router_module.resolve_route
 
 IS_WIN = os.name == "nt"
+
+
+def codex_shell_environment(env: dict[str, str]) -> dict[str, str]:
+    """Avoid Store execution aliases in the sandbox child's executable search.
+
+    WindowsApps aliases can launch interactively but fail CreateProcessAsUserW
+    under Codex's restricted token. Keep real installations and the system
+    PowerShell fallback; never change the user's PATH or sandbox permissions.
+    """
+    child = env.copy()
+    if not IS_WIN:
+        return child
+    path_key = next((key for key in child if key.casefold() == "path"), "PATH")
+    entries = child.get(path_key, "").split(";")
+    entries = [entry for entry in entries if not entry.strip('"').replace("/", "\\").rstrip("\\").casefold().endswith(
+        "\\microsoft\\windowsapps")]
+    system_root = child.get("SystemRoot") or child.get("SYSTEMROOT") or r"C:\Windows"
+    system_shell_dir = str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0")
+    if (Path(system_shell_dir) / "powershell.exe").is_file() and system_shell_dir.casefold() not in [entry.casefold() for entry in entries]:
+        entries.append(system_shell_dir)
+    child[path_key] = ";".join(entries)
+    return child
 
 
 # npm 的 .CMD shim 最後一行長這樣：
@@ -342,7 +365,7 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
     log = Path(name)
     fh = log.open("w", encoding="utf-8", errors="replace")
     try:
-        env = os.environ.copy()
+        env = codex_shell_environment(dict(os.environ)) if provider == "codex" else os.environ.copy()
         env["CLAUDE_PROJECT_DIR"] = str(cwd)
         if role != "dispatcher":
             env["CODEXAUTOAI_ROUTED_WORKER"] = provider
@@ -447,6 +470,8 @@ def provider_command(route: dict, prompt: str) -> list[str]:
         # non-Git sandbox folders. Skip only the Git-presence preflight: keep the
         # write sandbox and never persist trust or disable approvals globally.
         cmd += ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json"]
+        if IS_WIN:
+            cmd += ["-c", "allow_login_shell=false"]
         if model:
             cmd += ["-m", model]
         return cmd + [prompt]
@@ -578,6 +603,72 @@ def execute_with_fallback(route: dict, prompt: str, cwd: Path, args,
     return False, reason, metadata, actual
 
 
+def dispatcher_prompt(prompt: str) -> str:
+    return prompt + "\n\nRuntime delivery contract (independent of provider-specific slash-command hooks): " \
+        "Read the project's phase skills and execute the pipeline. Use python tools/run_phase.py start, " \
+        "then begin --phase N and end --phase N --status success|failure at actual phase boundaries. " \
+        "The active run id is inherited from CODEXAUTOAI_PARENT_RUN_ID; do not override it. " \
+        "Only after actual verification and delivery, end phase7 with --status success and repeat " \
+        "--artifact <project-relative-file> for the delivery report and verified output files. " \
+        "If blocked, end the current phase with --status failure --error <reason> and report the blocker. " \
+        "Never manufacture completion events or artifacts merely to satisfy this contract."
+
+
+def dispatcher_outcome(cwd: Path, parent_id: str, started_at: float, event_offset: int,
+                       cli_ok: bool, reason: str, result_path: str | None = None) -> dict:
+    """CLI success is separate from delivery; accept only fresh, run-scoped evidence."""
+    events = []
+    try:
+        with (cwd / "log" / "events.jsonl").open("rb") as stream:
+            stream.seek(event_offset)
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()
+        for line in lines:
+            try:
+                event = json.loads(line)
+                stamp = datetime.fromisoformat(str(event.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
+                if event.get("run_id") == parent_id and stamp >= started_at:
+                    events.append(event)
+            except (ValueError, TypeError, AttributeError):
+                continue
+    except OSError:
+        pass
+    phase_ends = [e for e in events if e.get("event_type") == "phase_end"]
+    latest = {}
+    for event in phase_ends:
+        latest[event.get("phase")] = event
+    failures = [e for e in latest.values() if e.get("status") == "failure"]
+    candidate = latest.get("phase7", {})
+    artifacts = candidate.get("artifacts")
+    valid = bool(isinstance(artifacts, list) and artifacts)
+    for artifact in artifacts if isinstance(artifacts, list) else []:
+        try:
+            target = (cwd / artifact["path"]).resolve()
+            valid = valid and target.is_relative_to(cwd.resolve()) and target.is_file() and target.stat().st_size > 0
+            valid = valid and hashlib.sha256(target.read_bytes()).hexdigest() == artifact["sha256"]
+        except (OSError, TypeError, KeyError):
+            valid = False
+    if cli_ok and not failures and candidate.get("status") == "success" and valid:
+        return {"status": "completed", "reason": "verified_phase7_delivery", "completion_evidence": candidate}
+    if failures:
+        return {"status": "blocked", "reason": str(failures[-1].get("error") or "phase_failed"), "completion_evidence": None}
+    # Restrict environmental diagnosis to actual tool-result records, not arbitrary final prose.
+    try:
+        output = Path(result_path).read_text(encoding="utf-8", errors="replace") if result_path else ""
+        for line in output.splitlines():
+            try:
+                payload = json.loads(line)
+                item = payload.get("item", {})
+                if item.get("type") == "command_execution" and re.search(
+                    r"CreateProcessAsUserW failed:\s*5|spawn EPERM|E_ACCESSDENIED", str(item.get("aggregated_output", ""))):
+                    return {"status": "blocked", "reason": "environment_process_creation_denied", "completion_evidence": None}
+            except (ValueError, AttributeError):
+                pass
+    except OSError:
+        pass
+    return {"status": "incomplete" if cli_ok else "failed",
+            "reason": "missing_verified_phase7_delivery" if cli_ok else reason, "completion_evidence": None}
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -630,9 +721,13 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.time()
     run_id, counter, exhausted = uuid.uuid4().hex, [0], set()
+    parent_id = os.environ.get("CODEXAUTOAI_PARENT_RUN_ID") or run_id
+    event_file = cwd / "log" / "events.jsonl"
+    event_offset = event_file.stat().st_size if event_file.exists() else 0
     readonly_review = route["provider"] == "claude" and not args.dispatcher and bool(args.expect)
     ok, reason, result_metadata, actual = execute_with_fallback(
-        route, args.prompt, cwd, args, run_id, counter, [] if readonly_review else args.expect, exhausted)
+        route, dispatcher_prompt(args.prompt) if args.dispatcher else args.prompt,
+        cwd, args, run_id, counter, [] if readonly_review else args.expect, exhausted)
     if ok and readonly_review:
         writer_route = resolve_route("", cwd, provider="codex", scenario="default")
         writer_route.update(scenario="writing_results", model=None,
@@ -649,7 +744,24 @@ def main(argv: list[str] | None = None) -> int:
                                writer_metadata=writer_metadata)
         if not ok:
             reason = ("fatal:" if reason.startswith("fatal:") else "") + "writer_failed: " + reason
-    print(json.dumps({"status": "ok" if ok else "failed", "attempts": counter[0],
+    task_result = None
+    if args.dispatcher:
+        task_result = {"schema_version": 1, "run_id": parent_id, "invocation_run_id": run_id,
+                       "started_at": t0, "ended_at": time.time(),
+                       **dispatcher_outcome(cwd, parent_id, t0, event_offset, ok, reason,
+                                            result_metadata.get("result_path"))}
+        # The app generates UUIDs; never interpolate arbitrary inherited paths.
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", parent_id)
+        result_file = cwd / "log" / f"task-result-{safe_id}.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = result_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(task_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(result_file)
+        result_metadata["task_result_path"] = str(result_file)
+        result_metadata["task_status"] = task_result["status"]
+        ok = task_result["status"] == "completed"
+        reason = task_result["reason"]
+    print(json.dumps({"status": (task_result["status"] if task_result else "ok" if ok else "failed"), "attempts": counter[0],
                       "duration_s": round(time.time() - t0, 1), "reason": reason,
                       "fatal": reason.startswith("fatal:"), "route": route, "actual_route": actual,
                       "run_id": run_id, "quota_exhausted_providers": sorted(exhausted), **result_metadata},

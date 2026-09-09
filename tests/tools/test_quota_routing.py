@@ -190,8 +190,9 @@ def test_fake_dispatcher_uses_same_gate(monkeypatch, tmp_path, capsys):
                   "import json; print(json.dumps({'type':'text','part':{'text':'done'}}))")
         return [sys.executable, "-c", script]
     monkeypatch.setattr(runner, "provider_command", command)
-    assert runner.main(["--dispatcher", "--prompt", "code", "--cwd", str(tmp_path), "--retries", "1"]) == 0
+    assert runner.main(["--dispatcher", "--prompt", "code", "--cwd", str(tmp_path), "--retries", "1"]) == 1
     result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "incomplete"  # Model fallback succeeded; pipeline delivery did not occur.
     events = [json.loads(line) for line in (tmp_path / "log/events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert all(e["role"] == "dispatcher" and e["parent_run_id"] == result["run_id"] for e in events)
 

@@ -97,3 +97,15 @@ python -m pytest tests/test_termserver.py -q
 獨立審查另重現快速模式把舊任務 Phase 7 完成與錯誤帶入新 App 任務的問題，已以 app-run.started_at 篩選進度事件；實際 Node 重驗新任務不再繼承舊完成或失敗。新增 bridge 測試亦明確設定 Python stdin UTF-8，避免依賴主程序的 PYTHONUTF8 環境設定。
 
 0.14.1 最終相關測試批次為 Python 145 passed（61.12 秒）與 Node 10 passed（414 毫秒）。兩批部分驗證範圍重疊，不相加為另一個全套測試總數。主代理亦以真實工作區唯讀 fixture 經正式快速讀檔 bridge 驗證：GUI 顯示原本的 3 次 failed、未受信任目錄原因與 Phase 失敗狀態，不再顯示 running。這次使用真實既有事件；測試用合成事件與真實供應商呼叫證據仍分開記錄。
+
+## 0.14.2：CLI 呼叫成功與任務交付分離
+
+dispatcher 結束時寫入 `log/task-result-{appRunId}.json`，schema_version=1，包含 run_id、invocation_run_id、started_at、ended_at、status、reason 與 completion_evidence。只有 `completed` 回傳 exit 0；`blocked`、`incomplete`、`failed` 都回傳 exit 1。`model_attempt.outcome=ok` 保留模型呼叫成功的原義，並不聲稱 pipeline 完成，tokens 也不因任務阻塞而歸零。
+
+完成判定要求本次 runner 開始後追加的 Phase 7 success event，run_id 必須匹配本次 parent，而且 artifacts 記載的專案內非空檔案必須存在、SHA-256 必須相符。舊 run、舊 timestamp、舊事件、被改動或遺失的產物不構成完成證據。這是事件與交付檔案一致性驗證，不是對產品品質的獨立證明。Phase failure 會標示 blocked；exit 0 但缺交付證據標示 incomplete。
+
+`run_phase.py` 優先繼承 CODEXAUTOAI_PARENT_RUN_ID，拒絕衝突的 explicit run id，phase_start/end 都附 run_id。啟用 dispatcher 時 Phase 7 `end --status success` 必須提供 `--artifact`；CLI 明確回報驗證錯誤。dispatcher prompt 直接說明 phase bridge 與交付契約，不依賴 Claude 專屬 slash-command hooks 啟動。
+
+新增 `tests/tools/test_dispatcher_completion.py`：13 passed（4.77 秒），包括 stale run/time/offset 排除、hash 變更、Phase failure、parent 衝突，以及兩項真正子行程 fake CLI → runner → task-result 測試（缺交付 incomplete；實際 run_phase 與檔案證據 completed）。這些 fake CLI 測試不使用付費模型，也不代表使用者的 3D 機器人任務已完成。
+
+0.14.2 最終整合驗證：Python 169 passed（64.79 秒），Node 12 passed。Windows 真實 shell smoke 1 attempt 成功，input 44,418／output 546／cache 21,760；實際 PowerShell、Git、Python 均可啟動，測試檔精確為 SHELL_WRITE_OK。主代理另以正式 webview bridge 讀取原使用者工作區並在瀏覽器核對：舊 completed 紀錄显示 incomplete／已停止，任務未完成，原 input 328,567／output 1,769／cache 293,504 原樣保留。驗證未改寫原任務日誌，亦未宣稱已重新完成使用者的 3D 任務。

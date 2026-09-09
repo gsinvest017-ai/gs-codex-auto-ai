@@ -101,10 +101,28 @@ test('new app run never inherits an older phase7 or unscoped completion', () => 
   fs.mkdirSync(path.join(root,'log'));
   const start=Date.parse('2026-09-08T09:00:00Z')/1000;
   fs.writeFileSync(path.join(root,'log','app-run.json'),JSON.stringify({run_id:'new-app',status:'running',started_at:start,updated_at:Date.now()/1000}));
-  const old=[{event_type:'phase_end',phase:'phase7',status:'success',timestamp:'2026-09-08T08:59:59Z'}, {event_type:'phase_end',phase:'phase7',status:'success'}];
+  const old=[{event_type:'phase_end',phase:'phase7',status:'success',timestamp:'2026-09-08T08:59:59Z'}, {event_type:'phase_end',phase:'phase7',status:'success'},
+    {event_type:'phase_end',phase:'phase7',status:'success',run_id:'other-current-run',timestamp:'2026-09-08T09:00:01Z'}];
   const eventPath=path.join(root,'log','events.jsonl'); fs.writeFileSync(eventPath,old.map(JSON.stringify).join('\n'));
   let state=dashboard.computeState(root,{includeHistory:false});
   assert.equal(state.summary.marker,0); assert.deepEqual(state.summary.completed,[]); assert.equal(state.summary.runStatus,'running');
-  fs.appendFileSync(eventPath,'\n'+JSON.stringify({event_type:'phase_start',phase:'phase2',ts:'2026-09-08T09:00:01Z'}));
+  fs.appendFileSync(eventPath,'\n'+JSON.stringify({event_type:'phase_start',phase:'phase2',run_id:'new-app',ts:'2026-09-08T09:00:01Z'}));
   state=dashboard.computeState(root,{includeHistory:false}); assert.equal(state.summary.marker,2);
+});
+
+test('legacy exit-zero run is incomplete without delivery proof and keeps actual call metrics', () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-false-complete-')); fs.mkdirSync(path.join(root,'log'));
+  const run={run_id:'legacy-app',status:'completed',started_at:1000};
+  const runPath=path.join(root,'log','app-run.json'); const original=JSON.stringify(run); fs.writeFileSync(runPath,original);
+  fs.writeFileSync(path.join(root,'log','events.jsonl'),JSON.stringify({type:'model_attempt',run_id:'invoke',parent_run_id:run.run_id,attempt_id:'a',outcome:'ok',actual_provider:'codex',usage:{input_tokens:328567,output_tokens:1769,cached_input_tokens:293504}}));
+  let state=dashboard.computeState(root,{includeHistory:false});
+  assert.equal(state.run.status,'incomplete'); assert.equal(state.summary.failed,true);
+  assert.match(state.summary.failureReason,/Phase 7/); assert.equal(state.routingStats.providers.codex.inTok,328567);
+  assert.equal(state.routingStats.providers.codex.outTok,1769); assert.equal(state.routingStats.providers.codex.cacheTok,293504);
+  assert.equal(fs.readFileSync(runPath,'utf8'),original);
+  const file=path.join(root,'log',`task-result-${run.run_id}.json`);
+  fs.writeFileSync(file,JSON.stringify({schema_version:1,ended_at:1003,run_id:run.run_id,status:'completed',started_at:1001,completion_evidence:{run_id:'other-run',event_type:'phase_end',phase:7,status:'success',ts:new Date(1002000).toISOString()}}));
+  state=dashboard.computeState(root,{includeHistory:false}); assert.equal(state.run.status,'incomplete');
+  fs.writeFileSync(file,JSON.stringify({schema_version:1,ended_at:1003,run_id:run.run_id,status:'blocked',started_at:1001,reason:'CreateProcessAsUserW failed: 5'}));
+  state=dashboard.computeState(root,{includeHistory:false}); assert.equal(state.run.status,'blocked'); assert.match(state.summary.failureReason,/CreateProcessAsUserW/);
 });

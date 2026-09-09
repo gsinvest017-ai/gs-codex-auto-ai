@@ -71,12 +71,15 @@ def test_preset_routes_and_backup(tmp_path):
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "gemini"])
-def test_actual_adapter_argv(monkeypatch, provider):
+@pytest.mark.parametrize("is_windows", [True, False])
+def test_actual_adapter_argv(monkeypatch, provider, is_windows):
+    monkeypatch.setattr(runner, "IS_WIN", is_windows)
     monkeypatch.setattr(runner.shutil, "which", lambda value: "/bin/" + value)
     command = runner.provider_command({"provider": provider, "model": "chosen"}, "hello\nworld")
     assert command[0] == "/bin/" + provider
     if provider == "codex":
-        assert command[1:] == ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "-m", "chosen", "hello\nworld"]
+        shell_config = ["-c", "allow_login_shell=false"] if is_windows else []
+        assert command[1:] == ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json"] + shell_config + ["-m", "chosen", "hello\nworld"]
     else:
         assert command[command.index("--model") + 1] == "chosen"
         assert command[command.index("--output-format") + 1] == "json"

@@ -13,13 +13,14 @@ Dispatcher 在每個 phase 邊界呼叫本 CLI，由 v2 的 `EventBus` 確定性
     python tools/run_phase.py status                         # 印目前 run_id
 
 設計原則（沿用 dispatch_hook 的 fail-open）：
-  - 一律 exit 0；logging bridge 永不 crash pipeline。
+  - logging I/O 失敗保留 exit 0；run 關聯或交付驗證失敗 exit 1。
   - 時間戳一律由 EventBus 的系統時鐘產生（C3），呼叫端不傳 timestamp。
   - 重複 begin/end 無害（progress.summarize 是 set / last-write-wins）。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from datetime import datetime
@@ -52,7 +53,12 @@ def _mint_run_id() -> str:
 
 
 def _resolve_run_id(paths: dict, explicit: str | None) -> str:
-    """優先序：--run-id 旗標 > current_run.txt > mint 新 id（fail-safe）。"""
+    """優先序：active parent > --run-id > current_run.txt > mint；拒絕 parent 衝突。"""
+    parent = os.environ.get("CODEXAUTOAI_PARENT_RUN_ID")
+    if parent:
+        if explicit and explicit != parent:
+            raise ValueError("--run-id conflicts with active dispatcher run")
+        return parent
     if explicit:
         return explicit
     ptr: Path = paths["run_ptr"]
@@ -92,7 +98,7 @@ def _phase_label(n: str) -> str:
 
 def cmd_start(root: Path, run_id: str | None) -> str:
     paths = _paths(root)
-    rid = run_id or _mint_run_id()
+    rid = _resolve_run_id(paths, run_id) if os.environ.get("CODEXAUTOAI_PARENT_RUN_ID") else run_id or _mint_run_id()
     _write_ptr(paths, rid)
     orch = _build_orch(paths, rid)
     orch.state.checkpoint(paths["state"])
@@ -112,22 +118,35 @@ def cmd_begin(root: Path, phase: str, run_id: str | None) -> None:
     # 跨 run 共用，沒有這顆標記的話 UI 會一直顯示上一輪的失敗。
     if label == "phase0":
         orch.events.emit("run_start", phase=label, run_id=rid, status="in_progress")
-    orch.events.emit("phase_start", phase=label, status="in_progress")
+    orch.events.emit("phase_start", phase=label, status="in_progress", run_id=rid)
     orch.audit.append({"event": "phase_start", "phase": label})
     orch.state.checkpoint(paths["state"])
 
 
-def cmd_end(root: Path, phase: str, status: str, error: str | None, run_id: str | None) -> None:
+def cmd_end(root: Path, phase: str, status: str, error: str | None, run_id: str | None,
+            artifacts: list[str] | None = None) -> None:
     paths = _paths(root)
     rid = _resolve_run_id(paths, run_id)
     orch = _build_orch(paths, rid)
     label = _phase_label(phase)
-    fields = {"phase": label, "status": status}
+    fields = {"phase": label, "status": status, "run_id": rid}
+    if label == "phase7" and status == "success":
+        evidence = []
+        for name in artifacts or []:
+            target = (root / name).resolve()
+            if not target.is_relative_to(root.resolve()) or not target.is_file() or not target.stat().st_size:
+                raise ValueError("delivery artifact must be a nonempty file inside the project")
+            evidence.append({"path": target.relative_to(root.resolve()).as_posix(),
+                             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        if not evidence and os.environ.get("CODEXAUTOAI_PARENT_RUN_ID"):
+            raise ValueError("phase7 success requires --artifact for the delivery report and verified outputs")
+        fields["artifacts"] = evidence
     if error:
         fields["error"] = error
     orch.events.emit("phase_end", **fields)
     orch.audit.append({"event": "phase_end", "phase": label, "status": status})
-    orch.state.mark_done(f"{label}-end")
+    if status == "success":
+        orch.state.mark_done(f"{label}-end")
     orch.state.checkpoint(paths["state"])
 
 
@@ -170,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     p_end = sub.add_parser("end")
     p_end.add_argument("--phase", required=True)
     p_end.add_argument("--status", choices=["success", "failure"], required=True)
+    p_end.add_argument("--artifact", action="append", default=[], help="Verified delivered file; required for phase7 success")
     p_end.add_argument("--error"); p_end.add_argument("--run-id")
     sub.add_parser("status")
     sub.add_parser("resume")
@@ -177,18 +197,21 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = _project_dir()
 
-    # fail-open：任何錯誤印 stderr 後仍 exit 0，絕不 crash pipeline。
+    # Legacy logging failures remain fail-open; invalid delivery claims must be visible.
     try:
         if args.cmd == "start":
             cmd_start(root, args.run_id)
         elif args.cmd == "begin":
             cmd_begin(root, args.phase, args.run_id)
         elif args.cmd == "end":
-            cmd_end(root, args.phase, args.status, args.error, args.run_id)
+            cmd_end(root, args.phase, args.status, args.error, args.run_id, args.artifact)
         elif args.cmd == "status":
             cmd_status(root)
         elif args.cmd == "resume":
             cmd_resume(root)
+    except ValueError as exc:
+        print(f"run_phase: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(f"run_phase: {type(exc).__name__}: {exc}", file=sys.stderr)
     return 0

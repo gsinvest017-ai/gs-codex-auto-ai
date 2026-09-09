@@ -45,3 +45,18 @@ python -m pytest tests/tools/test_model_router.py tests/test_codex_runner.py tes
 ```
 
 測試以假 CLI 子程序產生成功、明確額度耗盡、一般錯誤、token 回報等可重現輸出，檢查 runner 真正啟動順序、argv、事件與 UI 彙總。假程序不消耗模型額度，也不能代替真實供應商驗證。本次環境 OpenCode 不在 PATH，因此沒有宣稱完成 Gemini / DeepSeek 經 OpenCode 的實機付費呼叫驗證。
+
+## Windows 子行程啟動修復（0.14.2）
+
+2026-09-09 的實際任務在 Phase 1 選到 `Microsoft\WindowsApps\pwsh.exe` 執行別名，由受限子行程啟動時得到 `CreateProcessAsUserW failed: 5`。這是環境啟動失敗，不能當成額度耗盡，也不能因模型最後正常退出而宣告交付完成。
+
+Windows 上的 Codex runner 現在只調整該次子行程的環境副本：從 PATH 排除 `Microsoft\WindowsApps` 別名目錄，保留實體程式路徑並補入系統 WindowsPowerShell 路徑。若 PATH 有實體 `pwsh.exe` 仍可使用；沒有時 Codex 可選系統 `powershell.exe`。單次 CLI 同時使用 `-c allow_login_shell=false`，避免 PowerShell profile 的額外啟動副作用。此修復不變更全域 PATH、Codex config、ACL 或 `workspace-write` sandbox；非 Windows 行為保持原狀。`allow_login_shell` 語意依據 [OpenAI 官方設定文件](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+真實驗證在原測試工作區的 `log/shell-selftest-20260909` 進行，目錄由 PowerShell `New-Item` 建立並繼承正常 ACL。刻意把 WindowsApps 放到 PATH 最前面、移除 Codex App 附帶 PowerShell 路徑後，再透過 runner 呼叫真實 Codex，要求只用預設 shell 寫入、讀回檔案及執行 Git/Python，禁用 Node 檔案寫入替代方案。
+
+- invocation：`cd00d0a239504d15adf9fe22dc890438`；1 次呼叫、21.6 秒，未觸發備援。
+- 真實 `command_execution` 使用 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile`，exit code 0。
+- `smoke.txt` 原始位元組精確為 `SHELL_WRITE_OK`；Git 2.53.0.windows.1、Python 3.12.10 均 exit code 0。
+- 證據：`log/shell-selftest-20260909/log/model-routing-results/codex_8_kqmnru.log`。此為 shell 啟動與讀寫驗證，並不代表原機器人任務已完成七階段交付。
+
+`tests/tools/test_runner_shell.py` 覆蓋 Windows 別名排除、大小寫與斜線、保留實體工具 PATH、不修改原始環境與 `os.environ`、非 Windows 不變，以及保留 sandbox 的 CLI 參數。

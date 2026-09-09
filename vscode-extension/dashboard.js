@@ -4,6 +4,7 @@
 // OBS-R2 事件：phase_start/phase_end/llm_call/tool_call）。純 Node + vanilla webview，無外部依賴。
 const fs = require("fs");
 const path = require("path");
+const routing = require("./routing");
 
 const PHASES = ["初始化", "環境檢查", "需求分析", "架構設計", "審查", "並行開發", "測試", "交付"];
 
@@ -529,7 +530,7 @@ function html(defaultReq) {
   const cell = (row, value) => { const td = document.createElement("td"); td.textContent = value; row.appendChild(td); };
   function showEvidence(stats) {
     stats = stats || {status:"unverified",attempts:[],providers:{},violations:[]};
-    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測實際呼叫；以下數據來自同一 run 的完成事件。" : "尚無實際完成呼叫證據，未驗證。";
+    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測實際呼叫；以下數據來自同一 run 的呼叫事件。呼叫成功與 Token 用量不代表任務交付完成。" : "尚無實際完成呼叫證據，未驗證。";
     $("evidenceStatus").className = stats.violations.length ? "bad" : "muted";
     $("evidenceRun").textContent = (stats.parent_run_id || stats.run_id) ? "Run：" + (stats.parent_run_id || stats.run_id) : "尚無可歸屬的 run";
     $("attemptRows").replaceChildren();
@@ -568,6 +569,8 @@ function html(defaultReq) {
     let state = s.failed ? "✗ 失敗/升級" : "● 進行中";
     if (!s.failed && marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
     if (s.runStatus === "completed") state = "✓ 任務已完成";
+    else if (s.runStatus === "blocked") state = "⚠ 任務受阻";
+    else if (s.runStatus === "incomplete") state = "⚠ 已停止，任務未完成";
     else if (["stopped", "心跳逾期"].includes(s.runStatus)) state = s.runStatus === "stopped" ? "■ 任務已停止" : "⚠ 心跳逾期，狀態未知";
     $("phaseText").innerHTML = "Phase " + marker + "/7 " + names[marker] + "　<span class='" + (s.failed ? "bad" : "ok") + "'>" + state + "</span>";
     if (s.historyLoaded === false) {
@@ -629,20 +632,27 @@ function computeState(root, { includeHistory = true } = {}) {
   // Current app progress requires timestamped evidence from this run. Untimestamped
   // legacy phase7 must never turn a newly started task into an already completed one.
   const progressLines = runStart === null ? filterEventsSince(lines, sinceMs) : lines.filter((line) => {
-    try { const event=JSON.parse(line); return Date.parse(event.ts || event.timestamp || "") >= runStart; } catch { return false; }
+    try { const event=JSON.parse(line); return routing.currentRunEvent(event, run); } catch { return false; }
   });
   const summary = combineSummaries(
     summarizeEvents(progressLines), trSum, sub, includeHistory ? readCodexUsage(root, sinceMs) : null);
   summary.historyLoaded = includeHistory;
+  if (run && !["running", "心跳逾期"].includes(run.status)) {
+    const result = routing.taskResult(root, run);
+    // Repair old exit-zero records at read time; never rewrite their original logs.
+    if (run.status === "completed" || ["blocked", "incomplete"].includes(result.status) && result.run_id) {
+      run.status = result.status; run.reason = result.reason;
+    }
+  }
   summary.runStatus = run && run.status;
   summary.failureReason = null;
-  if (run && ["failed", "launch_failed"].includes(run.status)) {
+  if (run && ["failed", "launch_failed", "blocked", "incomplete"].includes(run.status)) {
     summary.failed = true;
     const lastFailure = routingStats.attempts.filter((a) => ["failed", "quota_exhausted"].includes(a.outcome)).pop();
-    const detail = lastFailure && lastFailure.reason;
+    const detail = run.reason || (lastFailure && lastFailure.reason);
     summary.failureReason = detail && /Not inside a trusted directory/.test(detail)
       ? "啟動失敗：Codex 拒絕在未受信任的非 Git 目錄執行。原始錯誤：" + detail
-      : "任務已失敗：" + (detail || "模型呼叫尚未留下失敗原因；請開啟任務日誌或背景終端機查看退出資訊。");
+      : (run.status === "blocked" ? "任務受阻：" : run.status === "incomplete" ? "任務未完成：" : "任務已失敗：") + (detail || "模型呼叫尚未留下失敗原因；請開啟任務日誌或背景終端機查看退出資訊。");
   }
   return { exists: exists || !!f || !!run || routingStats.attempts.length > 0, summary, run, routingStats };
 }
