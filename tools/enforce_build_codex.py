@@ -4,7 +4,7 @@ enforce_build_codex.py — PreToolUse 守門員：禁止 Claude 直接寫 src/�
 （Codex-first 硬分工）。
 
 CodexAutoAI 的核心不變式是「Claude 規劃、Codex 實作」（見 CLAUDE.md：你不直接寫程式碼）。
-內容產出必須由 `codex exec --full-auto` 產生——Codex 透過自己的行程寫檔，
+內容產出必須由 `python tools/codex_runner.py --prompt` 產生——Codex 透過自己的行程寫檔，
 **不經 Claude 的 Edit/Write 工具層**，所以本 hook 看不到 Codex 的寫入；它只攔得到 Claude
 自己的 Edit/Write/MultiEdit。因此「擋掉 Claude 對這些目錄的 Edit/Write」就等於
 強制所有實作走 Codex。
@@ -52,7 +52,7 @@ _DENY_REASON = (
     "CodexAutoAI Codex-first 規則：Phase 3–7 期間 src/、tests/、docs/ 的內容產出"
     "必須由 Codex 產生，不可由 Claude 直接 Edit/Write/MultiEdit。\n"
     "請改用：\n"
-    "    codex exec --full-auto \"根據規格產出/修正 {目標檔案} …\"\n"
+    "    python tools/codex_runner.py --prompt \"根據規格產出/修正 {目標檔案} …\"\n"
     "（Codex 會直接寫檔，不經工具層。如需暫時停用此檢查："
     "設環境變數 CODEXAUTOAI_NO_BUILD_ENFORCE=1）"
 )
@@ -145,6 +145,48 @@ def _under_src(root: Path, file_path: str) -> bool:
     return False
 
 
+def _authorized_quota_writer(root: Path) -> bool:
+    """Permit only a current, bounded Claude writer attempt after Codex quota.
+
+    This is workflow enforcement, not a security boundary against a local actor
+    able to change the event log or environment. It never disables other hooks.
+    """
+    if (os.environ.get("CODEXAUTOAI_ROUTED_WORKER") != "claude" or
+            os.environ.get("CODEXAUTOAI_ROUTED_ROLE") != "writer"):
+        return False
+    attempt = os.environ.get("CODEXAUTOAI_ROUTED_ATTEMPT")
+    if not attempt:
+        return False
+    try:
+        lines = (root / "log" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        latest = None
+        codex_quota_runs = set()
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict) or ev.get("type") != "model_attempt":
+                continue
+            if ev.get("actual_provider") == "codex" and ev.get("outcome") == "quota_exhausted":
+                codex_quota_runs.add(ev.get("run_id"))
+            if ev.get("attempt_id") == attempt:
+                latest = ev
+                if latest.get("run_id") not in codex_quota_runs:
+                    latest = None
+        if not latest:
+            return False
+        expiry = latest.get("authorization_expires_at")
+        return bool(latest.get("outcome") == "started" and
+                    latest.get("actual_provider") == "claude" and
+                    latest.get("role") == "writer" and
+                    "codex" in latest.get("quota_exhausted_providers", []) and
+                    isinstance(expiry, (int, float)) and not isinstance(expiry, bool) and
+                    time.time() < expiry < time.time() + 86400)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def evaluate(payload: dict, root: Path) -> Optional[str]:
     """回傳 deny 理由字串代表要擋；回傳 None 代表放行。純函式，方便測試。"""
     if (os.environ.get("CODEXAUTOAI_NO_BUILD_ENFORCE") or "").strip():
@@ -164,6 +206,8 @@ def evaluate(payload: dict, root: Path) -> Optional[str]:
     if not (_is_building(root) or _app_run_active(root)):
         return None
     if not _under_src(root, file_path):
+        return None
+    if _authorized_quota_writer(root):
         return None
     return _DENY_REASON
 

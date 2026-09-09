@@ -14,6 +14,34 @@ const specforge = require("./specforge"); // spec-forge 候選解析 + 逐一嘗
 const dashboard = require("./dashboard"); // 控制台（webview 內嵌 GUI，非開發者免 CLI）
 const preview = require("./preview");
 const routing = require("./routing");
+const preview3d = require("./preview3d");
+let modelViewer = null;
+function bundledTool(extensionPath, name) {
+  return [path.join(extensionPath,"framework","tools",name),path.join(extensionPath,"..","tools",name)].find(fs.existsSync);
+}
+function workbenchCall(root, action, extra = []) {
+  const script=bundledTool(__dirname,"workbench.py");
+  if(!script)return Promise.reject(new Error("Workbench API 尚未安裝"));
+  return new Promise((resolve,reject)=>execFile("python",[script,"--root",root,"--action",action,...extra],{cwd:root,windowsHide:true,timeout:15000,maxBuffer:8*1024*1024,encoding:"utf8"},(error,stdout)=>{if(error)return reject(error);try{resolve(JSON.parse(stdout));}catch(e){reject(e);}}));
+}
+function registerWorkbenchMcp(api, context, root) {
+  if (!api.lm?.registerMcpServerDefinitionProvider || !api.McpStdioServerDefinition || !root) return false;
+  const script=bundledTool(context.extensionPath,"workbench_mcp.py");if(!script)return false;
+  context.subscriptions.push(api.lm.registerMcpServerDefinitionProvider("codexautoai.workbench", {
+    provideMcpServerDefinitions: () => {
+      const label="CodexAutoAI Workbench",args=[script,"--root",root],env={PYTHONUTF8:"1"};
+      let definition=new api.McpStdioServerDefinition(label,"python",args,env,"0.15.0");
+      // Current stable VS Code uses positional parameters; tolerate a future object API.
+      if(definition.label!==label)definition=new api.McpStdioServerDefinition({label,command:"python",args,env,version:"0.15.0"});
+      definition.cwd=api.Uri.file(root);return [definition];
+    },
+  }));return true;
+}
+async function openPreferredPreview(root, options = {}) {
+  const models=preview3d.discover(root);
+  if(models.length && modelViewer){modelViewer.open(root,models[0].path);return {mode:"model3d",detail:models[0].path};}
+  return preview.openPreview(root,previewVsApi(root),options);
+}
 const activeRuns = new Map();
 const launchingRoots = new Set();
 function reserveLaunch(root) {
@@ -69,16 +97,22 @@ async function abortPipeline(root) {
 // 最近一次背景啟動的 terminal（控制台「顯示終端機」逃生口用）。
 let lastTerminal = null;
 
+function finishTerminalRun(terminal, exitCode) {
+  const active = activeRuns.get(terminal);
+  if (!active) return;
+  const result = routing.taskResult(active.root, active.run.record, exitCode ?? 1);
+  clearInterval(active.timer); active.run.stop(result.status, result.reason); activeRuns.delete(terminal);
+}
+
 // 在 root 開 terminal 跑 claude；hidden=true 時不搶焦點（控制台走這條，非開發者不用看 CLI）。
 function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route = null } = {}) {
   const key = path.resolve(root).toLowerCase();
   if (Array.from(activeRuns.values()).some((x) => x.key === key)) throw new Error("本專案已有執行中的任務。");
-  const started = Date.now();
   const run = routing.createRun(root, prompt, route);
   let t;
   try {
     t = vscode.window.createTerminal({ name: "CodexAutoAI", cwd: root, hideFromUser: !!hidden,
-      env: { CODEXAUTOAI_TASK_PROMPT: prompt },
+      env: { CODEXAUTOAI_TASK_PROMPT: prompt, CODEXAUTOAI_PARENT_RUN_ID: run.runId },
       ...(process.platform === "win32" ? { shellPath: "powershell.exe", shellArgs: ["-NoLogo", "-NoProfile"] } : { shellPath: "/bin/sh", shellArgs: [] }) });
   } catch (error) { run.stop("launch_failed"); throw error; }
   const timer = setInterval(() => {
@@ -86,24 +120,13 @@ function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route =
       if (fs.existsSync(run.exitFile)) {
         const code = fs.readFileSync(run.exitFile, "utf8").trim();
         if (/^-?\d+$/.test(code)) {
-          clearInterval(timer); run.stop(Number(code) === 0 ? "completed" : "failed"); activeRuns.delete(t); return;
-        }
-      }
-      const events = path.join(root, "log", "events.jsonl");
-      if (fs.existsSync(events) && fs.statSync(events).mtimeMs >= started) {
-        // Only this run's timestamped events can finish its heartbeat.
-        const lines = fs.readFileSync(events, "utf8").split(/\r?\n/).filter((line) => {
-          try { const event = JSON.parse(line); return Date.parse(event.ts || event.timestamp || "") >= started; } catch { return false; }
-        });
-        const summary = dashboard.summarizeEvents(lines);
-        if (summary.completed.includes(7)) {
-          clearInterval(timer); run.stop("completed"); activeRuns.delete(t); return;
+          finishTerminalRun(t, Number(code)); return;
         }
       }
       run.heartbeat();
     } catch {}
   }, 2000);
-  activeRuns.set(t, { run, timer, key });
+  activeRuns.set(t, { run, timer, key, root });
   lastTerminal = t;
   try {
     if (!hidden) t.show();
@@ -127,8 +150,8 @@ function buildInner(requirement, autopilot) {
   // safePrompt 會把 shell 語法字元刪掉或轉全形，規則與 launcher._safe_prompt 一致。
   // 注意：**路徑不要走這裡**（會吃掉 Windows 的反斜線），呼叫端先轉成正斜線。
   const safe = safePrompt(requirement);
-  if (autopilot) return `claude "/autopilot on ${safe}"`;
-  return safe ? `claude "${safe}"` : "claude";
+  const task = autopilot ? `/autopilot on ${safe}` : safe;
+  return `python tools/codex_runner.py --dispatcher --prompt "${task}" --cwd .`;
 }
 
 // 產 spec 再啟動（start 與控制台共用）。回傳 Promise<{ok, specPath?, error?}>。
@@ -411,6 +434,11 @@ async function checkForUpdate(context, { manual = false } = {}) {
 
 function activate(context) {
   const extPath = context.extensionPath;
+  modelViewer=preview3d.createController(vscode,extPath,{onArtifact:({root,path:file})=>{workbenchCall(root,"register_artifact",["--path",file]).catch(()=>{});}});
+  for(const folder of vscode.workspace.workspaceFolders || [])modelViewer.watch(folder.uri.fsPath);
+  context.subscriptions.push({dispose:()=>modelViewer?.dispose()});
+  if(vscode.workspace.onDidChangeWorkspaceFolders)context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(e=>{for(const folder of e.removed)modelViewer.unwatch(folder.uri.fsPath);for(const folder of e.added)modelViewer.watch(folder.uri.fsPath);}));
+  try {registerWorkbenchMcp(vscode,context,workspaceRoot());} catch(e){console.warn("CodexAutoAI MCP provider unavailable:",e.message);}
 
   // 啟動：把 full-auto 友善設定暫時套到全域 Claude/Codex；deactivate 時還原。
   // 預設開啟，可用設定 codexautoai.applyGlobalSettings 關掉。
@@ -430,15 +458,15 @@ function activate(context) {
     try {
       const root = workspaceRoot();
       if (!root) { statusItem.hide(); return; }
-      const { exists, summary: s } = dashboard.computeState(root);
+      const { exists, summary: s } = dashboard.computeState(root, { includeHistory: false });
       if (!exists) { statusItem.hide(); return; }
       const marker = s.marker || 0;
       const name = dashboard.PHASES[marker] || "";
-      const done = marker === 7 && (s.completed.includes(7) || s.started.includes(7));
-      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : "$(sync~spin)");
+      const done = s.runStatus === "completed";
+      const stopped = s.runStatus && s.runStatus !== "running";
+      const icon = s.failed ? "$(warning)" : (done ? "$(pass)" : stopped ? "$(debug-stop)" : "$(sync~spin)");
       statusItem.text = `${icon} CodexAutoAI ${marker}/7 ${name}`;
-      statusItem.tooltip = s.failed ? "pipeline 失敗/升級——點開控制台查看"
-        : (done ? "已到交付階段——點開控制台" : `並行實作中・Codex ${s.codex.sessions || 0} sessions——點開控制台`);
+      statusItem.tooltip = s.failureReason || (done ? "任務交付完成——點開控制台" : stopped ? "任務已停止——點開控制台" : "任務執行中——點開控制台查看實際進度");
       statusItem.show();
     } catch { statusItem.hide(); }
   };
@@ -508,6 +536,7 @@ function activate(context) {
   function buildDashboardDeps() {
     const root = workspaceRoot();
     if (!root) return null;
+    setTimeout(()=>{try{modelViewer?.openExisting(root);}catch{}},0);
     const cfg = vscode.workspace.getConfiguration("codexautoai");
     return {
       vscode, root,
@@ -515,10 +544,22 @@ function activate(context) {
       onStart: (requirement, autopilot, reply) => {
         return buildDashboardDeps().onSeed(requirement, autopilot, reply);
       },
-      onPreviewRoute: async (requirement, reply) => {
-        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); }
+      onActivity: () => workbenchCall(root,"activity"),
+      onListArtifacts: () => workbenchCall(root,"artifacts"),
+      onOpenArtifact: (relativePath, reply) => {
+        try {
+          const file=preview3d.inside(root,path.resolve(root,relativePath));
+          if(/\.(glb|gltf)$/i.test(file)){modelViewer.open(root,relativePath);reply("已開啟 3D 模型預覽。");}
+          else if(/\.(png|jpg|jpeg|webp|obj)$/i.test(file))return vscode.commands.executeCommand("vscode.open",vscode.Uri.file(file),{viewColumn:vscode.ViewColumn.Beside,preserveFocus:true}).then(()=>reply(/\.obj$/i.test(file)?"已開啟 OBJ 原始檔；互動 3D 預覽請使用 GLB / glTF。":"已開啟圖片預覽。"));
+          else reply("此格式尚無預覽入口。");
+        }catch(e){reply("產物預覽失敗："+e.message);}
+      },
+      onPreviewRoute: async (requirement, reply, publish) => {
+        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
         catch (e) { reply(e.message); }
       },
+      onCatalog: () => routing.getCatalog(root),
+      onSaveRoute: (selection) => routing.saveRoute(root, selection),
       onPreset: async (preset, reply) => {
         try { await routing.applyPreset(root, preset); reply(`已套用 ${preset} 至本專案；既有設定由 router 備份。`); }
         catch (error) { reply(error.message); }
@@ -546,10 +587,11 @@ function activate(context) {
       },
       onShowTerminal: () => { if (lastTerminal) lastTerminal.show(); },
       onPreview: (reply) => {
-        reply("偵測網頁 UI / 啟動 server 中…");
-        preview.openPreview(root, previewVsApi(root))
+        reply("偵測 3D 模型或網頁預覽…");
+        openPreferredPreview(root)
           .then((r) => {
-            if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
+            if (r.mode === "model3d") reply(`✓ 已開啟 3D 模型：${r.detail}（拖曳旋轉、滾輪縮放）。`);
+            else if (r.mode === "livePreview") reply(`✓ 已用 Live Preview 開啟 ${r.detail}（內嵌、hot reload）。`);
             else if (r.mode === "staticServer") reply(`✓ 已起本機 static server 並開啟內嵌預覽：${r.detail}`);
             else if (r.mode === "urlLive") reply(`✓ server 已在跑，開啟內嵌預覽：${r.detail}`);
             else if (r.mode === "serverStarted") reply(`✓ 已一鍵啟動 server 並開啟內嵌預覽：${r.detail}`);
@@ -567,6 +609,7 @@ function activate(context) {
       const deps = buildDashboardDeps();
       if (!deps) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
       dashboard.openDashboard(deps);
+      try {modelViewer.openExisting(deps.root);} catch(e){vscode.window.showWarningMessage("3D 預覽："+e.message);}
     })
   );
 
@@ -588,6 +631,8 @@ function activate(context) {
     vscode.commands.registerCommand("codexautoai.preview", async () => {
       const root = workspaceRoot();
       if (!root) { vscode.window.showErrorMessage("請先開啟一個資料夾。"); return; }
+      const models=preview3d.discover(root);
+      if(models.length){try{let item=models[0].path;if(models.length>1)item=await vscode.window.showQuickPick(models.map(m=>m.path),{placeHolder:"選擇 3D 模型"});if(item)modelViewer.open(root,item);}catch(e){vscode.window.showErrorMessage(e.message);}return;}
       const hits = preview.findWebRoots(root);
       let pickIndex = 0;
       if (hits.length > 1) {
@@ -684,11 +729,11 @@ function activate(context) {
   if (vscode.window.onDidEndTerminalShellExecution) {
     context.subscriptions.push(vscode.window.onDidEndTerminalShellExecution((event) => {
       // Ignore the preliminary Set-Location command.
-      if (/^claude(?:\s|$)/.test(event.execution.commandLine.value)) {
+      if (/^(?:claude(?:\s|$)|(?:python(?:3)?|"[^"\r\n]*python(?:\.exe)?")\s+tools[\\/]codex_runner\.py\s)/.test(event.execution.commandLine.value)) {
         const active = activeRuns.get(event.terminal);
         let code = event.exitCode;
         try { if (active) code = Number(fs.readFileSync(active.run.exitFile, "utf8").trim()); } catch {}
-        stopTerminalRun(event.terminal, code === 0 ? "completed" : "failed");
+        finishTerminalRun(event.terminal, code);
       }
     }));
   }
@@ -714,6 +759,7 @@ function activate(context) {
 }
 
 function deactivate() {
+  try {modelViewer?.dispose();modelViewer=null;} catch {}
   for (const { run, timer } of activeRuns.values()) { clearInterval(timer); try { run.stop("extension_closed"); } catch {} }
   activeRuns.clear();
   // 關閉：還原啟動時暫套的全域 Claude/Codex 設定（最後一個 owner 才真的還原）。
@@ -723,4 +769,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { activate, deactivate, runClaudeInTerminal, refreshFrameworkCore, reserveLaunch };
+module.exports = { registerWorkbenchMcp, workbenchCall, openPreferredPreview, buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };

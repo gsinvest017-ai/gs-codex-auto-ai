@@ -1,0 +1,6 @@
+# Reproducible large per-attempt evidence stays local; retain compact summaries.
+reports/**/report.json
+reports/**/ui-parity.json
+reports/**/manifest.json
+__pycache__/
+reports/live-ui-audit.json

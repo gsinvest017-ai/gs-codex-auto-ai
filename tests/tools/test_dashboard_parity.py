@@ -207,3 +207,152 @@ def test_run_level_error_has_no_phase_to_clear_it():
                            log_exists=True)
     assert model["failed"] is True
     assert [e["reason"] for e in model["errors"]] == ["boom"]
+
+
+def _attempt(provider="codex", outcome="ok", attempt_id="r:1", **extra):
+    return {"type": "model_attempt", "run_id": "r", "attempt_id": attempt_id,
+            "actual_provider": provider, "actual_model": None, "outcome": outcome,
+            "scenario": "build", **extra}
+
+
+ROUTING_SCENARIOS = {
+    "native_dispatcher_usage_is_not_worker_verification": [
+        _attempt(role="dispatcher", usage_scope="dispatcher_cli_usage",
+            native_agent_usage_verified=False, usage={"input_tokens": 20, "output_tokens": 4})],
+    "native_usage_is_separate_from_cli": [
+        _attempt(parent_run_id="app", role="dispatcher", usage_scope="dispatcher_cli_usage",
+            native_agent_usage_verified=False, native_children_observed=2,
+            usage={"input_tokens": 20, "output_tokens": 4}),
+        _attempt(parent_run_id="app", run_id="child", attempt_id="native:child",
+            role="native_worker", usage_scope="native_agent_rollout", usage_source="codex_rollout",
+            actual_model="reported-child-model", usage={"input_tokens": 30, "output_tokens": 9}),
+        _attempt(parent_run_id="app", run_id="child", attempt_id="native:child",
+            role="native_worker", usage_scope="native_agent_rollout", usage_source="codex_rollout",
+            actual_model="reported-child-model", usage={"input_tokens": 30, "output_tokens": 9}),
+        _attempt(parent_run_id="app", run_id="pending", attempt_id="native:pending",
+            role="native_worker", outcome="started")],
+    "planned_is_not_executed": [{"type": "route_preview", "run_id": "r",
+                                  "actual_provider": "codex"}],
+    "started_is_not_completed": [_attempt(outcome="started")],
+    "duplicate_attempt": [_attempt(outcome="started"),
+        _attempt(usage={"input_tokens": 10, "output_tokens": 4}),
+        _attempt(usage={"input_tokens": 10, "output_tokens": 4})],
+    "normal_error_not_quota": [_attempt(outcome="failed"),
+        _attempt("claude", "quota_exhausted", "r:2"),
+        _attempt("opencode", "ok", "r:3")],
+    "verified_fallback": [_attempt(outcome="quota_exhausted"),
+        _attempt("claude", "quota_exhausted", "r:2"),
+        _attempt("opencode", "ok", "r:3", usage={"input_tokens": 5,
+            "output_tokens": 2, "cached_input_tokens": 1})],
+    "mixed_known_and_unknown_attempts": [
+        _attempt(usage={"input_tokens": 12, "output_tokens": 4}),
+        _attempt(attempt_id="r:2", usage={"input_tokens": None, "output_tokens": 3})],
+    "partially_known_usage": [_attempt(usage={"input_tokens": None, "output_tokens": 13})],
+    "unknown_usage_and_price": [_attempt(usage={"input_tokens": None,
+        "output_tokens": None, "cached_input_tokens": None})],
+    "new_run_excludes_old": [_attempt(usage={"input_tokens": 100}),
+        _attempt(run_id="new", attempt_id="new:1", usage={"input_tokens": 2})],
+    "run_start_resets": [_attempt(), {"event_type": "run_start"}],
+    "phase0_does_not_erase_dispatcher_quota": [
+        _attempt(outcome="quota_exhausted", parent_run_id="app"),
+        {"event_type": "run_start", "phase": "phase0"},
+        _attempt("claude", "quota_exhausted", "r:2", parent_run_id="app"),
+        _attempt("opencode", "ok", "r:3", parent_run_id="app")],
+    "parent_run_collects_workers": [
+        _attempt(parent_run_id="app", run_id="a", usage={"input_tokens": 3}),
+        _attempt(parent_run_id="app", run_id="b", usage={"input_tokens": 5})],
+    "parent_cannot_share_quota_between_workers": [
+        _attempt(parent_run_id="app", run_id="a", outcome="quota_exhausted"),
+        _attempt("claude", "quota_exhausted", "r:2", parent_run_id="app", run_id="a"),
+        _attempt("opencode", "ok", "r:3", parent_run_id="app", run_id="b")],
+}
+
+
+@pytest.mark.parametrize("name", list(ROUTING_SCENARIOS))
+def test_routing_evidence_python_js_parity(name):
+    events = ROUTING_SCENARIOS[name]
+    driver = """const d=require(process.argv[1]);
+const e=JSON.parse(process.argv[2]);
+process.stdout.write(JSON.stringify(d.summarizeRoutingAttempts(e.map(JSON.stringify))));"""
+    proc = subprocess.run([shutil.which("node"), "-e", driver,
+        DASHBOARD.as_posix(), json.dumps(events)], capture_output=True,
+        text=True, encoding="utf-8", timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == em.routing_stats(events)
+
+
+def test_routing_metrics_are_attempt_deltas_not_plans_or_replays():
+    assert em.routing_stats(ROUTING_SCENARIOS["planned_is_not_executed"])["status"] == "unverified"
+    assert em.routing_stats(ROUTING_SCENARIOS["started_is_not_completed"])["providers"] == {}
+    result = em.routing_stats(ROUTING_SCENARIOS["duplicate_attempt"])
+    assert result["providers"]["codex"]["attempts"] == 1
+    assert result["providers"]["codex"]["inTok"] == 10
+    assert result["providers"]["codex"]["outTok"] == 4
+    assert result["providers"]["codex"]["cost"] is None
+    assert result["attempts"][0]["actual_model"] is None
+
+
+def test_fallback_evidence_requires_both_primary_quota_failures():
+    assert em.routing_stats(ROUTING_SCENARIOS["normal_error_not_quota"])["violations"]
+    assert not em.routing_stats(ROUTING_SCENARIOS["verified_fallback"])["violations"]
+
+
+def test_latest_run_and_unknown_usage_are_honest():
+    assert em.routing_stats(ROUTING_SCENARIOS["new_run_excludes_old"])["providers"]["codex"]["inTok"] == 2
+    unknown = em.routing_stats(ROUTING_SCENARIOS["unknown_usage_and_price"])
+    assert unknown["providers"]["codex"]["usageKnown"] == 0
+    assert unknown["providers"]["codex"]["cost"] is None
+    assert em.routing_stats(ROUTING_SCENARIOS["run_start_resets"])["status"] == "unverified"
+
+
+def test_parent_run_aggregates_workers_without_sharing_quota_proof():
+    result = em.routing_stats(ROUTING_SCENARIOS["parent_run_collects_workers"])
+    assert result["parent_run_id"] == "app"
+    assert result["providers"]["codex"]["attempts"] == 2
+    assert result["providers"]["codex"]["inTok"] == 8
+    assert em.routing_stats(ROUTING_SCENARIOS["parent_cannot_share_quota_between_workers"])["violations"]
+
+
+def test_phase0_boundary_preserves_prior_dispatcher_quota_attempts():
+    events = ROUTING_SCENARIOS["phase0_does_not_erase_dispatcher_quota"]
+    result = em.routing_stats(events)
+    assert len(result["attempts"]) == 3
+    assert result["violations"] == []
+    assert em.build_model(events, log_exists=True)["routing"] == result
+
+
+def test_unknown_input_usage_does_not_become_zero_when_output_is_known():
+    result = em.routing_stats(ROUTING_SCENARIOS["partially_known_usage"])
+    assert result["providers"]["codex"]["inTok"] is None
+    assert result["providers"]["codex"]["outTok"] == 13
+    assert result["providers"]["codex"]["cacheTok"] is None
+
+
+def test_partial_totals_include_per_field_coverage():
+    result = em.routing_stats(ROUTING_SCENARIOS["mixed_known_and_unknown_attempts"])
+    provider = result["providers"]["codex"]
+    assert provider["attempts"] == 2
+    assert provider["inTok"] == 12 and provider["inKnown"] == 1
+    assert provider["outTok"] == 7 and provider["outKnown"] == 2
+    assert provider["cacheTok"] is None and provider["cacheKnown"] == 0
+    assert provider["cost"] is None and provider["costKnown"] == 0
+
+
+def test_native_dispatcher_never_fabricates_worker_usage_or_models():
+    result = em.routing_stats(ROUTING_SCENARIOS["native_dispatcher_usage_is_not_worker_verification"])
+    assert len(result["attempts"]) == 1
+    attempt = result["attempts"][0]
+    assert attempt["usage_scope"] == "dispatcher_cli_usage"
+    assert attempt["native_agent_usage_verified"] is False
+    assert attempt["actual_model"] is None
+    assert result["providers"]["codex"]["attempts"] == 1
+
+
+def test_native_agent_records_do_not_inflate_cli_calls_or_tokens():
+    result = em.routing_stats(ROUTING_SCENARIOS["native_usage_is_separate_from_cli"])
+    group = result["providers"]["codex"]
+    assert group["attempts"] == 2 and group["cliAttempts"] == 1 and group["nativeAgents"] == 1
+    assert group["inTok"] == 20 and group["outTok"] == 4
+    assert group["nativeUsage"]["inTok"] == 30 and group["nativeUsage"]["outTok"] == 9
+    assert group["nativeUsage"]["cacheTok"] is None
+    assert result["attempts"][1]["actual_model"] == "reported-child-model"

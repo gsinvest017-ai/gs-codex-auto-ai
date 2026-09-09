@@ -4,8 +4,92 @@
 // OBS-R2 事件：phase_start/phase_end/llm_call/tool_call）。純 Node + vanilla webview，無外部依賴。
 const fs = require("fs");
 const path = require("path");
+const { validatedTaskResult } = require("./task-evidence");
+const routing = require("./routing");
 
 const PHASES = ["初始化", "環境檢查", "需求分析", "架構設計", "審查", "並行開發", "測試", "交付"];
+
+// Keep semantics identical to tools/events_model.py routing_stats (parity tested).
+function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
+  let events = lines.flatMap((line) => { try { const e=typeof line === 'string' ? JSON.parse(line) : line; return e && typeof e === 'object' ? [e] : []; } catch { return []; } });
+  let scoped=events;
+  for(let i=events.length-1;i>=0;i--) { if(events[i].event_type === 'run_start') {scoped=events.slice(i+1); break;} }
+  const records=events.filter((e) => (e.type || e.event_type) === 'model_attempt' && e.run_id && e.attempt_id);
+  const latest=scoped.filter((e) => (e.type || e.event_type) === 'model_attempt' && e.run_id && e.attempt_id);
+  if(runId === null && parentRunId === null && latest.length) parentRunId=latest[latest.length-1].parent_run_id || null;
+  if(runId === null && parentRunId === null) runId=latest.length ? latest[latest.length-1].run_id : null;
+  const unique=new Map();
+  for(const e of records) if((parentRunId ? e.parent_run_id === parentRunId : e.run_id === runId) && ['ok','failed','quota_exhausted'].includes(e.outcome)) unique.set(JSON.stringify([e.run_id,e.attempt_id]),e);
+  const providers={}, attempts=[], exhausted=new Map(), violations=[];
+  const emptyUsage=()=>({attempts:0,inTok:null,outTok:null,cacheTok:null,cost:null,usageKnown:0,inKnown:0,outKnown:0,cacheKnown:0,costKnown:0});
+  for(const e of unique.values()) {
+    const provider=e.actual_provider; if(!provider) continue;
+    const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed']) attempt[key]=e[key] ?? null;
+    attempt.usage=usage; attempts.push(attempt);
+    const group=providers[provider] ||= {...emptyUsage(),cliAttempts:0,nativeAgents:0,nativeUsage:emptyUsage()}; group.attempts++;
+    const native=e.role === "native_worker"; group[native ? "nativeAgents" : "cliAttempts"]++;
+    const item=native ? group.nativeUsage : group; if(native)item.attempts++;
+    let known=false;
+    for(const [key,field] of [['input_tokens','inTok'],['output_tokens','outTok'],['cached_input_tokens','cacheTok']]) {const value=usage[key]; if(typeof value === 'number' && value>=0) {item[field]=(item[field] || 0)+value;item[{inTok:'inKnown',outTok:'outKnown',cacheTok:'cacheKnown'}[field]]++;known=true;} }
+    item.usageKnown+=Number(known);
+    if(typeof e.cost_usd === 'number' && e.cost_usd>=0) {item.cost=(item.cost || 0)+e.cost_usd;item.costKnown++;}
+    if(!exhausted.has(e.run_id)) exhausted.set(e.run_id,new Set());
+    const quota=exhausted.get(e.run_id);
+    if(provider === 'opencode' && !(quota.has('codex') && quota.has('claude')) && !violations.includes('opencode_without_primary_quota_exhaustion')) violations.push('opencode_without_primary_quota_exhaustion');
+    if(e.outcome === 'quota_exhausted' && ['codex','claude'].includes(provider)) quota.add(provider);
+  }
+  return {run_id:runId,parent_run_id:parentRunId,attempts,providers,status:attempts.length ? 'observed' : 'unverified',violations};
+}
+
+function readableActivityText(text) {
+  const line=String(text).split(/\r?\n/).map(s=>s.trim()).find(Boolean) || '活動更新';
+  const plain=line.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1').replace(/`+/g,'').replace(/^[#>*\-\s]+/,'').replace(/\*\*/g,'');
+  const sentence=plain.match(/^.*?[。！？](?:\s|$)/);
+  return (sentence?sentence[0]:plain).slice(0,120);
+}
+function activityHeadline(item) {
+  const text=String(item.text || item.label || item.kind || '活動');
+  if(item.kind==='command_execution')return '執行命令';
+  if(item.kind==='file_change') {try{const changes=JSON.parse(text);if(Array.isArray(changes))return '更新檔案：'+changes.map(c=>c.path).filter(Boolean).slice(0,3).join('、');}catch{}return '更新檔案';}
+  const labels={mcp_tool_call:'使用工具',tool_call:'使用工具',web_search:'搜尋資料',collab_tool_call:'調度代理'};
+  return labels[item.kind] ? labels[item.kind]+'：'+readableActivityText(text) : readableActivityText(text);
+}
+
+async function loadProjectHistory(root, currentRunId = null) {
+  const file=path.join(root,'log','events.jsonl'),limit=2*1024*1024;
+  let handle;
+  try {
+    const base=await fs.promises.realpath(root);
+    const confined=async(candidate)=>{const actual=await fs.promises.realpath(candidate),rel=path.relative(base,actual);if(rel==='..'||rel.startsWith('..'+path.sep)||path.isAbsolute(rel))throw Error('歷史檔案不在本專案內');return actual;};
+    handle=await fs.promises.open(await confined(file),'r');const stat=await handle.stat();
+    const offset=Math.max(0,stat.size-limit),buffer=Buffer.alloc(Math.min(stat.size,limit));
+    const {bytesRead}=await handle.read(buffer,0,buffer.length,offset);
+    let text=buffer.subarray(0,bytesRead).toString('utf8');if(offset)text=text.slice(text.indexOf('\n')+1);
+    const groups=new Map();let unscoped=0;
+    for(const line of text.split(/\r?\n/)) {
+      let e;try{e=JSON.parse(line);}catch{continue;}
+      if(!e || typeof e!=='object')continue;
+      const id=e.parent_run_id || e.run_id;if(!id){unscoped++;continue;}if(id===currentRunId)continue;
+      const entries=groups.get(id) || [];entries.push(e);groups.delete(id);groups.set(id,entries);
+    }
+    const runs=await Promise.all([...groups.entries()].slice(-20).reverse().map(async([id,events])=>{
+      const parent=events.some(e=>e.parent_run_id===id);
+      const stats=summarizeRoutingAttempts(events,parent?null:id,parent?id:null);
+      const last=events[events.length-1];let taskStatus='unknown';
+      if(/^[a-zA-Z0-9_-]{1,128}$/.test(id))try{const resultPath=await confined(path.join(root,'log','task-result-'+id+'.json'));const resultStat=await fs.promises.stat(resultPath);if(resultStat.size<=65536){const result=JSON.parse(await fs.promises.readFile(resultPath,'utf8'));if(result.run_id===id){const runStart=events.find(e=>e.event_type==='run_start' && Number.isFinite(Date.parse(e.ts || e.timestamp || '')));const baseline=runStart?Date.parse(runStart.ts || runStart.timestamp)/1000:result.started_at;const validated=validatedTaskResult(result,{run_id:id,started_at:baseline});taskStatus=validated?validated.status:'incomplete';}}}catch{}
+      const outcome={ok:'成功',failed:'失敗',quota_exhausted:'額度耗盡',started:'已開始'};
+      const latest=(last.type || last.event_type)==='model_attempt' ? '最後呼叫：'+(outcome[last.outcome] || '狀態未知') : '最後事件：'+String(last.event_type || last.type || '未知');
+      return {run_id:id,task_status:taskStatus,last_update:last.ts || last.timestamp || null,event_count:events.length,
+        latest,providers:stats.providers};
+    }));
+    return {source:'project_events',runs,partial:offset>0,unscoped,
+      notice:offset>0?'僅讀取本專案事件末端 2 MB；歷史用量可能不完整。':'僅讀取本專案事件；未回報的用量維持未知。'};
+  } catch(error) {
+    if(error.code==='ENOENT')return {source:'project_events',runs:[],partial:false,unscoped:0,notice:'本專案尚無事件日誌，無可載入的歷史。'};
+    throw error;
+  } finally {if(handle)await handle.close();}
+}
 
 function phaseNum(v) {
   if (v === null || v === undefined) return null;
@@ -282,6 +366,7 @@ const _codexCache = new Map(); // file -> { mtimeMs, size, cwd, ts, usage }
 
 function _parseRollout(file) {
   let cwd = null, usage = null;
+  const samples = [];
   let text;
   try { text = fs.readFileSync(file, "utf-8"); } catch { return { cwd, usage }; }
   for (const line of text.split(/\r?\n/)) {
@@ -292,10 +377,10 @@ function _parseRollout(file) {
     if (d.type === "session_meta") cwd = p.cwd || null;
     else if (d.type === "event_msg" && p.type === "token_count") {
       const u = (p.info || {}).total_token_usage;
-      if (u) usage = u; // 累計值，最後一筆為準
+      if (u) { usage = u; samples.push({ ts: Date.parse(d.timestamp), usage: u }); }
     }
   }
-  return { cwd, usage };
+  return { cwd, usage, samples };
 }
 
 // 彙總屬於此 workspace（cwd 相符）且 sinceMs 之後有活動的 codex sessions 用量。
@@ -319,15 +404,21 @@ function readCodexUsage(root, sinceMs) {
       let rec = _codexCache.get(full);
       if (!rec || rec.mtimeMs !== st.mtimeMs || rec.size !== st.size) {
         const parsed = _parseRollout(full);
-        rec = { mtimeMs: st.mtimeMs, size: st.size, cwd: parsed.cwd, usage: parsed.usage };
+        rec = { mtimeMs: st.mtimeMs, size: st.size, cwd: parsed.cwd, usage: parsed.usage, samples: parsed.samples };
         _codexCache.set(full, rec);
       }
       if (!rec.cwd || path.resolve(rec.cwd).toLowerCase() !== rootNorm) continue;
       if (!rec.usage) continue;
+      const samples = rec.samples || [];
+      const active = sinceMs ? samples.filter((sample) => Number.isFinite(sample.ts) && sample.ts >= sinceMs) : samples;
+      if (!active.length) continue;
+      const before = sinceMs ? samples.filter((sample) => sample.ts < sinceMs).pop() : null;
+      const baseUsage = before ? before.usage : {};
+      const current = active[active.length - 1].usage;
       out.sessions += 1;
-      out.inTok += rec.usage.input_tokens || 0;
-      out.outTok += (rec.usage.output_tokens || 0) + (rec.usage.reasoning_output_tokens || 0);
-      out.cacheTok += rec.usage.cached_input_tokens || 0;
+      out.inTok += Math.max(0, (current.input_tokens || 0) - (baseUsage.input_tokens || 0));
+      out.outTok += Math.max(0, (current.output_tokens || 0) - (baseUsage.output_tokens || 0));
+      out.cacheTok += Math.max(0, (current.cached_input_tokens || 0) - (baseUsage.cached_input_tokens || 0));
     }
   }
   return out;
@@ -392,6 +483,15 @@ function html(defaultReq) {
           border-radius:6px; padding:8px 10px; color:var(--vscode-inputValidation-warningForeground,var(--gold)); font-size:12px; margin-top:8px; display:none; }
   label { font-size:12px; color:var(--muted); }
   #status { min-height:16px; }
+  select,input[type=text] { background:var(--card); color:var(--fg); border:1px solid var(--line); padding:8px; border-radius:5px; }
+  .wiring { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:16px 0; }
+  .node { border:1px solid var(--gold); border-radius:8px; padding:12px; min-width:110px; }
+  .backup { border-style:dashed; border-color:var(--muted); }
+  pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; }
+  summary { cursor:pointer; padding:7px 0; } li { margin:9px 0; line-height:1.5; }
+  #usageSummary,#activityCurrent { line-height:1.6; } #artifactList>div { margin:8px 0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } th,td { text-align:left; padding:9px; border-bottom:1px solid var(--line); }
+  @media(max-width:600px) { .grid {grid-template-columns:1fr} .node {min-width:80px} }
 </style></head><body>
 <h1>CodexAutoAI 控制台</h1>
 <div class="sub">全程免終端機：輸入需求 → 按啟動 → 在這裡看進度與分工。</div>
@@ -404,7 +504,7 @@ function html(defaultReq) {
     <label><input type="checkbox" id="autopilot" checked> 非停模式（全程不問，建議非開發者保持勾選）</label>
   </div>
   <div class="row">
-    <label>本專案路由 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">多供應商（研究 Gemini／審查 Claude／實作 Codex）</option></select></label>
+    <label>套用預設方案 <select id="preset"><option value="codex-first">Codex 優先</option><option value="multi-provider">雙主線（研究／審查 Claude，實作 Codex）</option></select></label>
     <button class="ghost" id="btnPreset">套用模式</button>
   </div>
   <div class="muted">套用模式會取代本專案的路由設定並備份舊設定；各供應商須先安裝 CLI 並登入。</div>
@@ -412,24 +512,61 @@ function html(defaultReq) {
   <div class="muted" id="runState"></div>
 </div>
 
+<div class="card"><h2>場景接線設定</h2>
+  <div class="muted">按需求自動辨識場景；儲存後套用至後續模型呼叫。預覽不會發出模型請求。</div>
+  <div class="row"><label>場景 <select id="scenario"></select></label>
+  <label>主線 <select id="provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+  <label>模型 <input type="text" id="routeModel" placeholder="留空使用 CLI 預設"></label>
+  <label>OpenCode 備援模型 <input type="text" id="fallbackInput" placeholder="provider/model（選填）"></label>
+  <button class="primary" id="btnSaveRoute">儲存此場景</button></div>
+  <div class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span>額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span>兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
+  <div class="muted" id="routeNotice">接線為設定預覽，尚未儲存。</div>
+  <div class="muted">OpenCode 的 Gemini／DeepSeek 僅在 Codex 與 Claude 額度皆耗盡時解鎖；一般錯誤不啟動備援。</div>
+  <div class="row muted" id="routePreview">尚無本次需求的預定路由。</div>
+</div>
+<div class="card"><h2>本次任務實際調度與用量</h2>
+  <div id="evidenceStatus" class="muted">尚無實際呼叫證據，未驗證。</div>
+  <div class="muted" id="evidenceRun"></div>
+  <div class="muted" id="executedRequirement"></div>
+  <div class="muted" id="usageScopeNotice">用量為 CLI 回報的呼叫事件合計；未獨立回報的子代理用量與模型維持未知，不視為完整團隊總量。</div>
+  <div class="row" id="usageSummary"></div>
+  <details><summary>查看模型、Token 與原始呼叫明細</summary>
+  <table><thead><tr><th>實際供應商／模型</th><th>場景／結果</th><th>原因</th><th>Token in / out</th></tr></thead><tbody id="attemptRows"></tbody></table>
+  <div class="row muted" id="providerMetrics"></div>
+  </details>
+</div>
+
+<div class="card"><h2>目前活動</h2>
+  <div id="activityCurrent">等待任務活動回報</div><div class="muted" id="activityUpdated">最後更新：未知</div>
+  <ol id="activityTimeline"></ol><details id="activityMore"><summary>展開較早活動</summary><ol id="activityOlder"></ol></details>
+</div>
+<div class="card"><h2>產物與預覽</h2><button class="ghost" id="btnArtifacts">重新整理產物</button>
+  <div id="artifactNotice" class="muted">載入本專案產物清單。</div><div id="artifactList"></div>
+</div>
 <div class="card"><h2>七階段進度</h2>
   <div class="bar" id="bar">░░░░░░░░</div>
   <div class="muted" id="phaseText">尚未開始——按上方「🚀 啟動新任務」。</div>
+  <div class="warn" id="failureReason" role="alert"></div>
 </div>
 
-<div class="card"><h2>分工證據（確保 Claude 規劃、Codex 實作）</h2>
+<div class="card"><h2>本專案歷史任務</h2>
+  <button class="ghost" id="btnHistory">載入歷史任務</button>
+  <div class="muted" id="projectHistoryNotice">按需讀取本專案事件，最多最近 20 個其他任務；不掃描全帳號歷史。</div>
+  <div id="projectHistoryList"></div><div hidden>
+  <div class="muted" id="historyNotice">未載入；即時調度只讀取本專案事件。</div>
   <div class="grid">
-    <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">0</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
-    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">0</b> 次呼叫<div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
+    <div class="stat">Claude（規劃/調度）<br><b id="claudeCalls">—</b> 次呼叫<div class="muted" id="claudeTok">tokens —</div></div>
+    <div class="stat">Codex（寫碼實作）<br><b id="codexCalls">—</b> <span id="codexUnit">次工具觀測</span><div class="muted" id="codexTok">tokens —</div><div class="muted" id="codexP5">phase5 內 0 次</div></div>
   </div>
   <div class="muted" id="share" style="margin-top:8px;"></div>
   <div class="wait" id="divWait">⏳ 已派遣 builder 子代理，等待第一筆 Codex 呼叫紀錄……（builders 的 codex exec 會稍晚出現在子代理 transcript）</div>
   <div class="warn" id="divWarn">⚠ 已進入並行開發（phase5）但既沒派遣 builder 也偵測不到任何 Codex 呼叫——疑似只在 Claude 上花 token、未走 Codex 實作，請檢查。</div>
-  <div class="row muted"><span id="cost">累計成本 $0.0000</span><span id="iter"></span><span id="ts"></span></div>
+  <div class="row muted"><span id="cost">歷史成本未回報</span><span id="iter"></span><span id="ts"></span></div>
+  </div>
 </div>
 
 <div class="row">
-  <button class="ghost" id="btnPreview">🌐 即時預覽網頁 UI（內嵌）</button>
+  <button class="ghost" id="btnPreview">🌐 開啟成果預覽（3D／網頁）</button>
   <button class="ghost" id="btnLogs">開啟任務日誌</button>
   <button class="ghost" id="btnTerm">🖥 顯示背景終端機（除錯用）</button>
 </div>
@@ -443,25 +580,131 @@ function html(defaultReq) {
   $("btnLogs").onclick = () => { vscode.postMessage({ type:"logs" }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
   $("btnPreview").onclick = () => { vscode.postMessage({ type:"preview" }); };
+  $("btnHistory").onclick = () => { $("btnHistory").disabled=true; $("projectHistoryNotice").textContent="正在讀取本專案歷史…"; vscode.postMessage({type:"history"}); };
+  $("btnArtifacts").onclick = () => { $("artifactNotice").textContent="正在讀取產物…"; vscode.postMessage({type:"artifacts"}); };
+  let catalog = null; let artifactRunKey=null; let artifactActivityKey=null,artifactRequestedAt=0,displayedRunId=null;
+  const number = (value) => value === null || value === undefined ? "未知" : Number(value).toLocaleString('zh-TW');
+  const briefUsage = (p) => {const total=p.cliAttempts === undefined ? p.attempts : p.cliAttempts;return "輸入 " + number(p.inTok) + (p.inKnown<total && p.inTok!==null?"（已知部分）":"") + "／輸出 " + number(p.outTok) + (p.outKnown<total && p.outTok!==null?"（已知部分）":"") + " tokens";};
+  ${readableActivityText.toString()}
+  ${activityHeadline.toString()}
+  function showActivity(activity) {
+    activity=activity || {items:[]};const items=activity.items || [];
+    const last=items.length ? items[items.length-1] : null;
+    $("activityCurrent").textContent=activity.error || (last ? (["in_progress","running","started"].includes(last.status)?"正在進行：":"最近回報：")+activityHeadline(last) : "尚無工具活動回報；等待新的任務事件");
+    $("activityUpdated").textContent="來源最後更新："+(activity.last_update ? new Date(activity.last_update*1000).toLocaleString("zh-TW") : (last && (last.timestamp || last.ts)) || "來源未回報時間")+(activity.limited ? " · 只顯示有限範圍活動" : "");
+    $("activityTimeline").replaceChildren();$("activityOlder").replaceChildren();$("activityMore").style.display=items.length>5?"block":"none";
+    const states={in_progress:'進行中',running:'進行中',started:'已開始',completed:'已完成',failed:'失敗',observed:'已回報',historical:'歷史回報'};
+    let activityIndex=0;
+    for(const item of items.slice(-20).reverse()) {
+      const li=document.createElement('li'),text=String(item.text || item.label || item.kind || '活動');
+      li.textContent=(item.timestamp ? String(item.timestamp).slice(11,19)+' · ' : '')+(item.provider ? item.provider+' · ':'')+activityHeadline(item)+(item.status?' · '+(states[item.status] || item.status):'');
+      if(text!==activityHeadline(item)) {
+        const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='查看完整回報';pre.textContent=text;details.appendChild(summary);details.appendChild(pre);li.appendChild(details);
+      }
+      $(activityIndex++<5?"activityTimeline":"activityOlder").appendChild(li);
+    }
+  }
+  function showHistory(history) {
+    $("btnHistory").disabled=false;$("projectHistoryNotice").textContent=history.notice || history.error || "已載入本專案歷史。";$("projectHistoryList").replaceChildren();
+    if(!history.runs || !history.runs.length) {const p=document.createElement('p');p.textContent="沒有其他可歸屬的歷史任務；不將缺少紀錄視為零用量。";$("projectHistoryList").appendChild(p);return;}
+    const statusLabels={completed:'已完成',blocked:'受阻',incomplete:'未完成',failed:'失敗',stopped:'已停止',running:'進行中',unknown:'未知'};
+    for(const run of history.runs) {const p=document.createElement('p');const metrics=Object.entries(run.providers).map(([name,g])=>name+' CLI '+g.cliAttempts+' 次：'+briefUsage(g)+(g.nativeAgents?'；原生代理 '+g.nativeAgents+' 筆：'+briefUsage(g.nativeUsage):'')).join(' · ');const time=run.last_update?new Date(run.last_update).toLocaleString('zh-TW'):'更新時間未知';p.title=run.run_id;p.textContent=String(run.run_id).slice(0,8)+' · '+time+' · 任務狀態：'+(statusLabels[run.task_status] || '未知')+' · '+run.latest+' · '+(metrics || '用量未回報');$("projectHistoryList").appendChild(p);}
+  }
+  function showArtifacts(result) {
+    $("artifactList").replaceChildren();const entries=Array.isArray(result)?result:(result.artifacts || result.items || []);
+    $("artifactNotice").textContent=result.error || (entries.length ? '本專案產物；選擇項目預覽。'+(entries.length>100?'顯示前 100 項。':'') : '尚無可預覽的產物紀錄。');
+    for(const a of entries.slice(0,100)) {const row=document.createElement('div'),button=document.createElement('button');button.textContent=a.label || a.name || a.relative_path || a.path || a.id;button.onclick=()=>vscode.postMessage({type:'openArtifact',id:a.relative_path || a.path || a.id});row.appendChild(button);const note=document.createElement('span');note.textContent=' · '+(a.format || a.kind || a.type || '檔案')+(a.status?' · '+a.status:'');row.appendChild(note);$("artifactList").appendChild(row);}
+  }
+  function drawWiring() {
+    $("sourceNode").textContent = $("scenario").value || "場景";
+    $("primaryNode").textContent = $("provider").value + " / " + ($("routeModel").value || "CLI 預設");
+    $("secondaryNode").textContent = $("provider").value === "codex" ? "claude / CLI 預設" : "codex / CLI 預設";
+    $("fallbackModel").textContent = $("fallbackInput").value || "未設定，備援不可用";
+    $("routeNotice").textContent = "接線為設定預覽；修改後請儲存。";
+  }
+  $("scenario").onchange = () => {
+    const selected = catalog.scenarios.find((s) => s.name === $("scenario").value);
+    if (!selected) return;
+    $("provider").value = selected.provider; $("routeModel").value = selected.model || ""; drawWiring();
+    $("routeNotice").textContent = "目前已儲存的場景設定；不代表已實際執行。";
+  };
+  $("provider").onchange = () => { $("routeModel").value=""; drawWiring(); $("routeNotice").textContent="已切換供應商並清除舊模型；請重新選填模型後儲存。"; }; $("routeModel").oninput = drawWiring; $("fallbackInput").oninput = drawWiring;
+  $("btnSaveRoute").onclick = () => {
+    vscode.postMessage({type:"saveRoute", selection:{scenario:$("scenario").value,provider:$("provider").value,model:$("routeModel").value,fallbackModel:$("fallbackInput").value}});
+  };
+  const cell = (row, value) => { const td = document.createElement("td"); td.textContent = value; row.appendChild(td); };
+  function showEvidence(stats) {
+    stats = stats || {status:"unverified",attempts:[],providers:{},violations:[]};
+    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測執行紀錄；同一任務的 CLI 呼叫與原生代理分列。呼叫成功與 Token 用量不代表任務交付完成。" : "尚無實際完成呼叫證據，未驗證。";
+    $("evidenceStatus").className = stats.violations.length ? "bad" : "muted";
+    $("evidenceRun").textContent = (stats.parent_run_id || stats.run_id) ? "Run：" + (stats.parent_run_id || stats.run_id) : "尚無可歸屬的 run";
+    $("attemptRows").replaceChildren();
+    for (const a of stats.attempts) {
+      const row = document.createElement("tr");
+      cell(row, a.actual_provider + " / " + (a.actual_model || "未回報實際模型") + "；設定：" + (a.configured_model || "CLI 預設") + "；原請求：" + (a.requested_provider || "未知") + " / " + (a.requested_model || "CLI 預設"));
+      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
+      const scope = a.role === "native_worker" ? "；原生代理 rollout 回報" : a.native_agent_usage_verified === false ? (a.native_children_observed > 0 ? "；dispatcher CLI 回報，子代理用量另列／未觀測者未知" : "；dispatcher CLI 回報，子代理用量／模型未獨立驗證") : "；CLI 回報";
+      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知") + scope);
+      $("attemptRows").appendChild(row);
+    }
+    $("usageSummary").textContent = Object.entries(stats.providers).map(([name,p])=>name+"：CLI "+p.cliAttempts+" 次（"+briefUsage(p)+"）"+(p.nativeAgents?"；原生代理 "+p.nativeAgents+" 筆（"+briefUsage(p.nativeUsage)+"）":"")).join(" · ") || "尚無完成的呼叫用量；等待回報。";
+    const metric = (value,known,total) => value === null || value === undefined ? "未知（" + total + " 筆未回報）" : value + "（" + (known < total ? "已知部分，" : "") + known + "/" + total + " 筆已知）";
+    const usageText=(p,total)=>"in " + metric(p.inTok,p.inKnown,total) + " / out " + metric(p.outTok,p.outKnown,total) + " / cache " + metric(p.cacheTok,p.cacheKnown,total) + "，成本 USD " + metric(p.cost,p.costKnown,total);
+    $("providerMetrics").textContent = Object.entries(stats.providers).map(([name,p]) => name + ": CLI " + p.cliAttempts + " 次，" + usageText(p,p.cliAttempts) + (p.nativeAgents ? "；原生代理 " + p.nativeAgents + " 筆，" + usageText(p.nativeUsage,p.nativeAgents) + "（獨立列示，不與 CLI 相加）" : "")).join(" · ");
+  }
   window.addEventListener("message", (e) => {
     const m = e.data;
+    if (m.type === "activity") { if(m.activity && m.activity.run_id && displayedRunId && m.activity.run_id!==displayedRunId)return;showActivity(m.activity);const key=m.activity && m.activity.last_update;if(key && key!==artifactActivityKey && Date.now()-artifactRequestedAt>30000){artifactActivityKey=key;artifactRequestedAt=Date.now();vscode.postMessage({type:"artifacts"});}return; }
+    if (m.type === "history") { showHistory(m.history); return; }
+    if (m.type === "artifacts") { showArtifacts(m.result); return; }
     if (m.type === "status") { $("status").textContent = m.text; return; }
+    if (m.type === "catalog") {
+      catalog = m.catalog; const previous = $("scenario").value; $("scenario").replaceChildren();
+      for (const s of catalog.scenarios) { const option = document.createElement("option"); option.value=s.name; option.textContent=s.name; $("scenario").appendChild(option); }
+      if (catalog.scenarios.some((s) => s.name === previous)) $("scenario").value=previous;
+      $("fallbackModel").textContent = (catalog.fallback || {}).model || "未設定，備援不可用";
+      $("fallbackInput").value = (catalog.fallback || {}).model || "";
+      $("scenario").onchange(); return;
+    }
+    if (m.type === "routePreview") { const r=m.route; $("routePreview").textContent="預定路由（未執行）：" + r.scenario + " → " + r.provider + " / " + (r.model || "CLI 預設") + " · " + r.reason; return; }
     if (m.type !== "state") return;
-    $("runState").textContent = m.run ? "任務狀態：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
+    const nextRunId=m.run && m.run.run_id || null;
+    if(displayedRunId!==nextRunId)showActivity({items:[]});
+    displayedRunId=nextRunId;
+    showEvidence(m.routingStats);
+    $("runState").textContent = m.run ? "任務狀態（預定路由）：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
+    $("executedRequirement").textContent = m.run && m.run.prompt ? "本次執行原需求：" + String(m.run.prompt).slice(0, 500) + (String(m.run.prompt).length > 500 ? "…" : "") : "尚無本次執行的原需求紀錄。";
     const s = m.summary;
+
+    const nextKey=m.run ? m.run.run_id+':'+m.run.status : 'none';
+    if(nextKey!==artifactRunKey) {artifactRunKey=nextKey;vscode.postMessage({type:'artifacts'});}
+    $("failureReason").textContent = s.failureReason || "";
+    $("failureReason").style.display = s.failureReason ? "block" : "none";
     if (!m.exists) { $("phaseText").textContent = "尚未開始——按上方「🚀 啟動新任務」。"; return; }
     const marker = s.marker || 0;
     $("bar").textContent = Array.from({length:8}, (_,i) => i <= marker ? "▓" : "░").join("");
     const names = ${JSON.stringify(PHASES)};
     let state = s.failed ? "✗ 失敗/升級" : "● 進行中";
-    if (marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
+    if (!s.failed && marker === 7 && (s.completed.includes(7) || s.started.includes(7))) state = "✓ 交付階段";
+    if (s.runStatus === "completed") state = "✓ 任務已完成";
+    else if (s.runStatus === "blocked") state = "⚠ 任務受阻";
+    else if (s.runStatus === "incomplete") state = "⚠ 已停止，任務未完成";
+    else if (["stopped", "心跳逾期"].includes(s.runStatus)) state = s.runStatus === "stopped" ? "■ 任務已停止" : "⚠ 心跳逾期，狀態未知";
     $("phaseText").innerHTML = "Phase " + marker + "/7 " + names[marker] + "　<span class='" + (s.failed ? "bad" : "ok") + "'>" + state + "</span>";
+    if (s.historyLoaded === false) {
+      $("historyNotice").textContent="未載入；為保持即時更新，不掃描歷史 session。實際用量請看上方本次任務證據。";
+      for (const id of ["claudeCalls","codexCalls","claudeTok","codexTok","codexP5","cost"]) $(id).textContent="未載入";
+      $("codexUnit").textContent=""; $("share").textContent=""; $("iter").textContent=""; $("ts").textContent="";
+      $("divWarn").style.display="none"; $("divWait").style.display="none"; return;
+    }
+    $("historyNotice").textContent="已載入歷史觀測；不作為本次路由驗證。";
     $("claudeCalls").textContent = s.claude.calls;
     $("claudeTok").textContent = "tokens in " + s.claude.inTok + " / out " + s.claude.outTok
       + (s.claude.cacheTok ? "（cache " + s.claude.cacheTok + "）" : "");
     // 「次呼叫」以 codex sessions（~/.codex/sessions 的實際 codex 執行數）為權威——
     // 0.9.5 起走 codex_runner，transcript 的 codex exec 字樣抓不到、regex 計數會是 0。
     $("codexCalls").textContent = s.codex.sessions || s.codex.calls;
+    $("codexUnit").textContent = s.codex.sessions ? "sessions" : "次工具觀測";
     $("codexTok").textContent = s.codex.sessions
       ? "tokens in " + s.codex.inTok + " / out " + s.codex.outTok
         + (s.codex.cacheTok ? "（cache " + s.codex.cacheTok + "）" : "") + "・" + s.codex.sessions + " sessions"
@@ -470,21 +713,35 @@ function html(defaultReq) {
       + (s.builders ? "・builders " + s.builders + " 個" : "");
     $("share").textContent = s.codexShare === null ? "" :
       "實作產出佔比（output tokens）：Codex " + s.codexShare + "% vs Claude " + (100 - s.codexShare) + "%"
-      + (s.codexShare < 50 ? "　⚠ Codex 佔比偏低" : "　✓ 符合 Codex-first");
+      + "（歷史觀測，不證明本次接線合規）";
     $("divWarn").style.display = s.divisionWarning ? "block" : "none";
     $("divWait").style.display = s.divisionWaiting ? "block" : "none";
-    $("cost").textContent = "累計成本 $" + (s.cost || 0).toFixed(4);
+    $("cost").textContent = s.cost ? "歷史回報成本 $" + s.cost.toFixed(4) : "歷史成本未回報（零值不視為免費）";
     $("iter").textContent = s.iteration ? "第 " + s.iteration + " 輪迭代" : "";
     $("ts").textContent = s.lastTs ? "最後事件 " + s.lastTs.replace("T", " ").slice(0, 19) : "";
   });
+  vscode.postMessage({type:"catalog"});
+  vscode.postMessage({type:"artifacts"});
 </script></body></html>`;
 }
 
 // 一次性計算某 workspace 的當前狀態（供狀態列 poller 用；面板 push() 有自己的增量版）。
 // 純資料、不依賴 vscode——回傳 { exists, summary }（summary 同 combineSummaries）。
-function computeState(root) {
+function computeState(root, { includeHistory = true } = {}) {
   const { exists, lines } = readEventsFile(root);
-  const f = findTranscript(root);
+  let run = null;
+  try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
+    if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
+  } catch {}
+  let legacyRoutingLines = [];
+  try { legacyRoutingLines = fs.readFileSync(path.join(root, "log", "model-routing-events.jsonl"), "utf8").split(/\r?\n/); } catch {}
+  // The runner writes attempts to events.jsonl. Read legacy files only for compatibility;
+  // canonical updates win deduplication and the app run scopes all dispatcher/worker events.
+  const routingLines = [...legacyRoutingLines, ...lines];
+  const parentScoped = run && routingLines.some(line => { try { return JSON.parse(line).parent_run_id === run.run_id; } catch { return false; } });
+  const routingStats = parentScoped ? summarizeRoutingAttempts(routingLines, null, run.run_id)
+    : summarizeRoutingAttempts(routingLines, run && run.run_id);
+  const f = includeHistory ? findTranscript(root) : null;
   let trSum = null, sub = null;
   if (f) {
     let trLines = [];
@@ -492,10 +749,35 @@ function computeState(root) {
     trSum = summarizeTranscript(trLines);
     sub = readSubagentStats(f);
   }
-  const sinceMs = trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+  const runStart = run && Number.isFinite(run.started_at) ? run.started_at * 1000 : null;
+  const sinceMs = runStart !== null ? runStart : trSum && trSum.firstTs ? Date.parse(trSum.firstTs) - 60000 : 0;
+  // Current app progress requires timestamped evidence from this run. Untimestamped
+  // legacy phase7 must never turn a newly started task into an already completed one.
+  const progressLines = runStart === null ? filterEventsSince(lines, sinceMs) : lines.filter((line) => {
+    try { const event=JSON.parse(line); return routing.currentRunEvent(event, run); } catch { return false; }
+  });
   const summary = combineSummaries(
-    summarizeEvents(filterEventsSince(lines, sinceMs)), trSum, sub, readCodexUsage(root, sinceMs));
-  return { exists: exists || !!f, summary };
+    summarizeEvents(progressLines), trSum, sub, includeHistory ? readCodexUsage(root, sinceMs) : null);
+  summary.historyLoaded = includeHistory;
+
+  if (run && !["running", "心跳逾期"].includes(run.status)) {
+    const result = routing.taskResult(root, run);
+    // Repair old exit-zero records at read time; never rewrite their original logs.
+    if (run.status === "completed" || ["blocked", "incomplete"].includes(result.status) && result.run_id) {
+      run.status = result.status; run.reason = result.reason;
+    }
+  }
+  summary.runStatus = run && run.status;
+  summary.failureReason = null;
+  if (run && ["failed", "launch_failed", "blocked", "incomplete"].includes(run.status)) {
+    summary.failed = true;
+    const lastFailure = routingStats.attempts.filter((a) => ["failed", "quota_exhausted"].includes(a.outcome)).pop();
+    const detail = run.reason || (lastFailure && lastFailure.reason);
+    summary.failureReason = detail && /Not inside a trusted directory/.test(detail)
+      ? "啟動失敗：Codex 拒絕在未受信任的非 Git 目錄執行。原始錯誤：" + detail
+      : (run.status === "blocked" ? "任務受阻：" : run.status === "incomplete" ? "任務未完成：" : "任務已失敗：") + (detail || "模型呼叫尚未留下失敗原因；請開啟任務日誌或背景終端機查看退出資訊。");
+  }
+  return { exists: exists || !!f || !!run || routingStats.attempts.length > 0, summary, run, routingStats };
 }
 
 // 把一個 webview（面板或側欄 view 皆可）接上控制台：設 html、每 2s 推狀態、綁訊息。
@@ -503,22 +785,40 @@ function computeState(root) {
 function wireDashboard(webview, deps) {
   const { root } = deps;
   webview.html = html(deps.defaultReq);
+  let activityPending=false,activityNextAt=0;
   const push = () => {
-    const { exists, summary } = computeState(root);
-    let run = null;
-    try { run = JSON.parse(fs.readFileSync(path.join(root, "log", "app-run.json"), "utf8"));
-      if (run.status === "running" && Date.now() / 1000 - run.updated_at > 180) run.status = "心跳逾期";
-    } catch {}
-    webview.postMessage({ type: "state", exists, summary, run });
+    webview.postMessage({ type: "state", ...computeState(root, { includeHistory: false }) });
+    if(deps.onActivity && !activityPending && Date.now()>=activityNextAt) {
+      activityPending=true;activityNextAt=Date.now()+2500;
+      Promise.resolve().then(()=>deps.onActivity()).then(activity=>webview.postMessage({type:'activity',activity}))
+        .catch(error=>webview.postMessage({type:'activity',activity:{items:[],error:'活動讀取失敗：'+error.message}})).finally(()=>{activityPending=false;});
+    }
   };
   const timer = setInterval(push, 2000);
   push();
+  let historyPending=false,artifactsPending=false;
   const sub = webview.onDidReceiveMessage((m) => {
     const reply = (text) => webview.postMessage({ type: "status", text });
     if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
-    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply);
-    else if (m.type === "preset" && deps.onPreset) deps.onPreset(m.preset, reply);
+    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply, (route) => webview.postMessage({type:"routePreview", route}));
+    else if (m.type === "preset" && deps.onPreset) Promise.resolve(deps.onPreset(m.preset, reply)).then(() => deps.onCatalog && deps.onCatalog()).then((catalog) => {if(catalog) webview.postMessage({type:"catalog",catalog});}).catch((e) => reply(e.message));
+    else if (m.type === "catalog" && deps.onCatalog) Promise.resolve(deps.onCatalog()).then((catalog) => webview.postMessage({type:"catalog",catalog})).catch((e) => reply(e.message));
+    else if (m.type === "saveRoute" && deps.onSaveRoute) Promise.resolve(deps.onSaveRoute(m.selection)).then(() => deps.onCatalog()).then((catalog) => { webview.postMessage({type:"catalog",catalog}); reply("已儲存場景接線；套用至後續呼叫。"); }).catch((e) => reply(e.message));
+    else if (m.type === "history") {
+      if(historyPending)return;
+      historyPending=true;
+      fs.promises.readFile(path.join(root,'log','app-run.json'),'utf8').then(text=>JSON.parse(text).run_id).catch(()=>null)
+        .then(id=>loadProjectHistory(root,id)).then(history=>webview.postMessage({type:'history',history}))
+        .catch(error=>webview.postMessage({type:'history',history:{runs:[],error:'歷史載入失敗：'+error.message}})).finally(()=>{historyPending=false;});
+    }
+    else if (m.type === "artifacts") {
+      if(artifactsPending)return;artifactsPending=true;
+      Promise.resolve().then(()=>deps.onListArtifacts ? deps.onListArtifacts() : {artifacts:[],error:'產物清單服務尚未連線。'})
+        .then(result=>webview.postMessage({type:'artifacts',result}))
+        .catch(error=>webview.postMessage({type:'artifacts',result:{error:'產物載入失敗：'+error.message}})).finally(()=>{artifactsPending=false;});
+    }
+    else if (m.type === "openArtifact" && deps.onOpenArtifact) Promise.resolve(deps.onOpenArtifact(m.id,reply)).catch(error=>reply(error.message));
     else if (m.type === "logs" && deps.onOpenLogs) deps.onOpenLogs();
     else if (m.type === "showTerminal") deps.onShowTerminal();
     else if (m.type === "preview" && deps.onPreview) deps.onPreview(reply);
@@ -549,7 +849,7 @@ function makeDashboardViewProvider(makeDeps) {
 }
 
 module.exports = {
-  openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
+  html, wireDashboard, loadProjectHistory, readableActivityText, activityHeadline, summarizeRoutingAttempts, openDashboard, makeDashboardViewProvider, computeState, PHASES, summarizeEvents, readEventsFile, filterEventsSince,
   summarizeTranscript, combineSummaries, projectSlug, findTranscript, findProjectDir,
   makeTranscriptReader, readSubagentStats, readCodexUsage,
 };

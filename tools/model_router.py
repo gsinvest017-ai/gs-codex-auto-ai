@@ -12,7 +12,9 @@ import time
 import re
 from pathlib import Path
 
-PROVIDERS = ("codex", "claude", "gemini")
+PROVIDERS = ("codex", "claude", "gemini", "deepseek", "opencode")
+PRIMARY_PROVIDERS = ("codex", "claude")
+QUOTA_POLICY = "both-primary-exhausted"
 DEFAULT_RULES = {
     "3d_modeling": {"provider": "codex", "model": "gpt-6-astra", "keywords": [
         "3d", "blender", "mesh", "三維", "建模"]},
@@ -114,7 +116,20 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
         target = {"provider": provider, "model": target["model"] if provider == target["provider"] else None}
         reason = "explicit provider overrides routing"
     target = _target(target, "selected route")
-    return {"scenario": chosen, **target, "reason": reason}
+    requested = dict(target)
+    fallback = config.get("fallback", {"provider": "opencode", "model": None})
+    if not isinstance(fallback, dict) or fallback.get("provider", "opencode") != "opencode":
+        raise ValueError("fallback provider must be opencode")
+    fallback = _target({"provider": "opencode", "model": fallback.get("model")}, "fallback")
+    if target["provider"] not in PRIMARY_PROVIDERS:
+        target = {"provider": "codex", "model": None}
+        reason += "; secondary provider locked until both Codex and Claude quotas are exhausted"
+    alternate = "claude" if target["provider"] == "codex" else "codex"
+    return {"scenario": chosen, **target, "reason": reason,
+            "requested_provider": requested["provider"], "requested_model": requested["model"],
+            "quota_policy": QUOTA_POLICY,
+            "fallback_chain": [{"provider": alternate, "model": None, "condition": "primary-quota-exhausted"},
+                               {**fallback, "condition": QUOTA_POLICY}]}
 
 
 def apply_preset(root: Path | str, preset: str) -> dict:
@@ -125,16 +140,68 @@ def apply_preset(root: Path | str, preset: str) -> dict:
     for name, rule in DEFAULT_RULES.items():
         config["scenarios"][name] = {"provider": rule["provider"], "model": rule["model"]}
     if preset == "multi-provider":
-        for name, provider in (("research", "gemini"), ("review", "claude")):
+        for name, provider in (("research", "claude"), ("review", "claude")):
             config["scenarios"][name] = {"provider": provider, "model": None}
+    config["fallback"] = {"provider": "opencode", "model": None}
+    config["quota_policy"] = QUOTA_POLICY
     path = Path(root) / "log" / "model-routing.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
     if path.exists():
+        previous = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(previous, dict) and isinstance(previous.get("fallback"), dict):
+            config["fallback"] = previous["fallback"]
         backup = path.with_name(f"model-routing.{time.time_ns()}.bak.json")
         shutil.copy2(path, backup)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"preset": preset, "config_path": str(path), "backup_path": str(backup) if backup else None}
+
+
+def catalog(root: Path | str) -> dict:
+    path = Path(root) / "log" / "model-routing.json"
+    config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    custom = config.get("scenarios", {}) if isinstance(config, dict) else {}
+    names = list(dict.fromkeys(["default", *DEFAULT_RULES, *custom]))
+    routes = [resolve_route("", root, scenario=name) for name in names]
+    return {"scenarios": [{"name": route["scenario"], **route} for route in routes],
+            "policy": QUOTA_POLICY, "providers": list(PRIMARY_PROVIDERS),
+            "fallback": routes[0]["fallback_chain"][-1]}
+
+
+def valid_fallback_model(model: object) -> bool:
+    """An explicit provider/model ID; syntax validation is not capability discovery."""
+    return isinstance(model, str) and "/" in model and all(part and not any(char.isspace() for char in part) for part in model.split("/"))
+
+
+def save_route(root: Path | str, scenario: str | None, provider: str | None,
+               model: str | None, fallback_model: str | None = None) -> dict:
+    path = Path(root) / "log" / "model-routing.json"
+    config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    if not isinstance(config, dict):
+        raise ValueError("model-routing.json must contain an object")
+    if scenario:
+        if provider not in PRIMARY_PROVIDERS:
+            raise ValueError("primary route must use codex or claude")
+        target = _target({"provider": provider, "model": model}, scenario)
+        if scenario == "default":
+            config["default"] = target
+        else:
+            config.setdefault("scenarios", {})[scenario] = {
+                **config.get("scenarios", {}).get(scenario, {}), **target}
+    elif fallback_model is None:
+        raise ValueError("--save-route requires --scenario or --fallback-model")
+    if fallback_model is not None:
+        if fallback_model != "" and not valid_fallback_model(fallback_model):
+            raise ValueError("fallback model must be a provider/model ID, or empty to clear")
+        # Omitted None preserves configuration; explicit empty string clears it.
+        config["fallback"] = {"provider": "opencode", "model": fallback_model or None}
+    config["quota_policy"] = QUOTA_POLICY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic replacement prevents preview readers seeing partial JSON.
+    temporary = path.with_name(f".model-routing.{time.time_ns()}.tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return catalog(root)
 
 
 def main(argv=None) -> int:
@@ -146,6 +213,9 @@ def main(argv=None) -> int:
         pass
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt")
+    ap.add_argument("--catalog", action="store_true")
+    ap.add_argument("--save-route", action="store_true")
+    ap.add_argument("--fallback-model")
     ap.add_argument("--preset", choices=("multi-provider", "codex-first"))
     ap.add_argument("--root", default=".")
     ap.add_argument("--json", action="store_true")
@@ -154,6 +224,12 @@ def main(argv=None) -> int:
     ap.add_argument("--scenario")
     args = ap.parse_args(argv)
     try:
+        if args.save_route:
+            print(json.dumps(save_route(args.root, args.scenario, args.provider, args.model, args.fallback_model), ensure_ascii=False))
+            return 0
+        if args.catalog:
+            print(json.dumps(catalog(args.root), ensure_ascii=False))
+            return 0
         if args.preset:
             print(json.dumps(apply_preset(args.root, args.preset), ensure_ascii=False))
             return 0
