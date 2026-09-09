@@ -109,3 +109,48 @@ dispatcher 結束時寫入 `log/task-result-{appRunId}.json`，schema_version=1�
 新增 `tests/tools/test_dispatcher_completion.py`：13 passed（4.77 秒），包括 stale run/time/offset 排除、hash 變更、Phase failure、parent 衝突，以及兩項真正子行程 fake CLI → runner → task-result 測試（缺交付 incomplete；實際 run_phase 與檔案證據 completed）。這些 fake CLI 測試不使用付費模型，也不代表使用者的 3D 機器人任務已完成。
 
 0.14.2 最終整合驗證：Python 169 passed（64.79 秒），Node 12 passed。Windows 真實 shell smoke 1 attempt 成功，input 44,418／output 546／cache 21,760；實際 PowerShell、Git、Python 均可啟動，測試檔精確為 SHELL_WRITE_OK。主代理另以正式 webview bridge 讀取原使用者工作區並在瀏覽器核對：舊 completed 紀錄显示 incomplete／已停止，任務未完成，原 input 328,567／output 1,769／cache 293,504 原樣保留。驗證未改寫原任務日誌，亦未宣稱已重新完成使用者的 3D 任務。
+
+
+## 0.14.3：原生代理與 CLI 用量分組
+
+Codex dispatcher 的 CLI 回報與原生子代理 rollout 回報分開呈現。`role=native_worker` 是原生代理紀錄，不視為新增 CLI 呼叫；同一 parent_run_id 下依 run_id + attempt_id 去重。原生代理仍未完成、outcome=started 時，不列入完成紀錄或用量合計。
+
+provider 統計中，attempts 是所有完成紀錄筆數；cliAttempts 與 nativeAgents 分別記錄 CLI 與原生代理筆數。既有 inTok / outTok / cacheTok 只累計 CLI 回報，nativeUsage 保存原生代理用量；兩組在 UI 獨立顯示，不相加成完整團隊總量。每組保留各欄已知／未知筆數，未回報的模型或 token 仍為未知。dispatcher 的 native_agent_usage_verified=false 不代表子代理不存在，僅避免將父 CLI 數值誤稱為已獨立驗證的所有子代理用量。
+
+本次執行原需求摘要與啟動時的預定路由另行顯示，並保留使用者目前正在編輯的需求欄內容，避免把尚未送出的新需求誤認為正在執行的任務。
+
+聚焦驗證：40 個 Python / JavaScript parity 測試及 8 個 dashboard Node 測試通過；包含原生代理重播去重、尚未完成紀錄排除、CLI 與 native 用量不重加、未知 child 模型／用量，以及更新狀態不覆蓋需求編輯內容。這些 fixture 測試不代表真實原生代理 smoke 已完成；真實派工與 rollout 證據另由整合驗證記錄。
+
+
+### 0.14.3 真實原生代理 smoke 與資料重播
+
+真實 parent thread `01a08469-b5d5-7c22-a11e-21d1b3786581` 派出 child thread `01a08469-e115-79c1-9b34-4e3b4ab0bd5a`。從既有 parent CLI stdout 與 native_usage collector 找到的明確關聯 child rollout 讀取，而非從模型口述推算：
+
+| 來源 | 紀錄類別 | Input / output / cache | 模型證據 |
+|---|---|---|---|
+| Parent CLI stdout | 1 次 CLI 呼叫 | 89,105 / 512 / 65,920 | 未回報實際模型 |
+| Child 自身 rollout | 1 筆原生代理 | 51,783 / 154 / 25,600 | child 自身上下文回報 gpt-6-astra |
+
+另逐位元組重驗 native-worker.txt，內容精確為 `NATIVE_WORKER_OK`。用這兩份真實來源生成隔離 UI 投影事件，並明確標為「真實來源證據重播；不是重新執行」。隔離 replay-manifest 保留來源檔與 thread 關係；沒有寫入原使用者 sandbox，也沒有把新建投影事件冒充當時 runner 原始 model_attempt 歷史。
+
+該重播資料輸入 Python routing_stats 與 JavaScript summarizeRoutingAttempts，完整 JSON 相等斷言通過，並確認 CLI 與 native 各一筆、用量分組且不相加。這項驗證證明真實來源資料的解析與 UI 模型一致；完整多階段任務交付另由整合測試驗證。
+
+
+### 0.14.3 完整多階段 E2E 交付證據
+
+隔離 E2E 專案 `codexautoai-e2e-0143-reset` 的真實 task-result-e2e-0143-reset.json 回報 completed，原因為 verified_phase7_delivery；task run 為 `e2e-0143-reset`，runner invocation 為 `8e513e25813c4af2b1d2aca23cfac223`。Phase 7 成功證據列出 docs/delivery.md、src/greet.py 與 tests/test_greet.py；獨立重算三個當前檔案 SHA-256，均與交付證據一致。
+
+直接讀取這次 E2E 的原始 events.jsonl，沒有建立替代事件或修改工作區資料，Python routing_stats 與 JavaScript summarizeRoutingAttempts 的完整 JSON 相等斷言通過：
+
+| 真實來源 | 完成紀錄 | Input / output / cache |
+|---|---|---|
+| Dispatcher CLI | 1 次 CLI 呼叫 | 1,408,450 / 4,387 / 1,348,608 |
+| 原生代理自身 rollout | 3 筆原生代理 | 617,688 / 4,299 / 556,672 |
+
+三筆 child 用量分別為 163,123 / 1,109 / 128,512、237,942 / 1,580 / 228,224、216,623 / 1,610 / 199,936。各 child 的實際模型由自身 rollout 回報 gpt-6-astra；parent CLI 未回報實際模型。CLI 與 native 合計維持分組，不相加。成本沒有來源數值，保留未知。
+
+主代理另獨立執行 unittest，2 項測試通過；命令列的 Hello Ada 與 Hello world 行為均驗證成功。此完成結論來自交付事件、產物與測試，不只依據模型呼叫 exit 0 或 Token 回報。
+
+本次 E2E 使用啟動當時的 runtime 與 collector；原始 child 事件仍使用當時的 invocation run_id 與 native_agent_usage scope。最後版本對 native child run_id / scope 的正規化與 guard 修正，由回歸測試覆蓋；沒有改寫原始 E2E 事件，也不把一次先前 E2E 成功宣稱為最後所有增量皆再次完成了真實模型全程執行。
+
+0.14.3 最終回歸：Python 188 passed（67.23 秒）、Node 13 passed。VSIX 驗證包含 native_usage.py 且核心程式與測試來源相符，不包含 Python bytecode。瀏覽器以正式 webview bridge 顯示真實來源重播，CLI 與原生代理兩組數據、未知模型及本次原需求均與事件相符。

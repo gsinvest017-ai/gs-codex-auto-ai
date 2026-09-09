@@ -237,6 +237,10 @@ def routing_stats(events: list[dict], run_id: str | None = None,
                 "ok", "failed", "quota_exhausted"}:
             unique[(ev["run_id"], ev["attempt_id"])] = ev
     providers = {}
+    def empty_usage():
+        return {"attempts": 0, "inTok": None, "outTok": None, "cacheTok": None,
+                "cost": None, "usageKnown": 0, "inKnown": 0, "outKnown": 0,
+                "cacheKnown": 0, "costKnown": 0}
     attempts = []
     exhausted = {}
     violations = []
@@ -248,11 +252,17 @@ def routing_stats(events: list[dict], run_id: str | None = None,
         attempts.append({k: ev.get(k) for k in (
             "run_id", "parent_run_id", "role", "attempt_id", "actual_provider", "actual_model", "configured_model",
             "requested_provider", "requested_model", "scenario", "outcome",
-            "reason", "duration_ms", "usage_source") } | {"usage": usage})
-        item = providers.setdefault(provider, {"attempts": 0, "inTok": None,
-            "outTok": None, "cacheTok": None, "cost": None, "usageKnown": 0,
-            "inKnown": 0, "outKnown": 0, "cacheKnown": 0, "costKnown": 0})
-        item["attempts"] += 1
+            "reason", "duration_ms", "usage_source", "usage_scope",
+            "native_agent_usage_verified", "native_thread_id", "native_parent_thread_id",
+            "native_agent_path", "native_children_observed") } | {"usage": usage})
+        group = providers.setdefault(provider, {**empty_usage(), "cliAttempts": 0,
+            "nativeAgents": 0, "nativeUsage": empty_usage()})
+        group["attempts"] += 1
+        native = ev.get("role") == "native_worker"
+        group["nativeAgents" if native else "cliAttempts"] += 1
+        item = group["nativeUsage"] if native else group
+        if native:
+            item["attempts"] += 1
         known = False
         for key, field in (("input_tokens", "inTok"), ("output_tokens", "outTok"),
                            ("cached_input_tokens", "cacheTok")):

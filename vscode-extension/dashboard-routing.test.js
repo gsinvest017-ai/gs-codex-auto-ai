@@ -126,3 +126,32 @@ test('legacy exit-zero run is incomplete without delivery proof and keeps actual
   fs.writeFileSync(file,JSON.stringify({schema_version:1,ended_at:1003,run_id:run.run_id,status:'blocked',started_at:1001,reason:'CreateProcessAsUserW failed: 5'}));
   state=dashboard.computeState(root,{includeHistory:false}); assert.equal(state.run.status,'blocked'); assert.match(state.summary.failureReason,/CreateProcessAsUserW/);
 });
+
+
+test('native dispatcher usage scope and original run request never overwrite editable requirement', () => {
+  const elements=new Map(); let listener;
+  const elem=()=>({value:'',textContent:'',innerHTML:'',style:{},children:[],appendChild(e){this.children.push(e);},replaceChildren(){this.children=[];}});
+  const document={getElementById(id){if(!elements.has(id))elements.set(id,elem());return elements.get(id);},createElement:elem};
+  const page=dashboard.html('editable');
+  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1],{document,acquireVsCodeApi:()=>({postMessage(){}}),window:{addEventListener:(name,fn)=>listener=fn}});
+  document.getElementById('req').value='My unsent ledger request';
+  const stats=dashboard.summarizeRoutingAttempts([{type:'model_attempt',run_id:'r',attempt_id:'r:1',actual_provider:'codex',actual_model:null,role:'dispatcher',outcome:'ok',usage_scope:'dispatcher_cli_usage',native_agent_usage_verified:false,usage:{input_tokens:20,output_tokens:4}}]);
+  listener({data:{type:'state',exists:false,summary:{},run:{prompt:'Build a 3D model',status:'running',route:{scenario:'3d_modeling',provider:'codex',model:'configured-only'}},routingStats:stats}});
+  assert.equal(document.getElementById('req').value,'My unsent ledger request');
+  assert.match(document.getElementById('executedRequirement').textContent,/Build a 3D model/);
+  assert.match(document.getElementById('runState').textContent,/3d_modeling/);
+  assert.equal(document.getElementById('attemptRows').children.length,1);
+  const row=document.getElementById('attemptRows').children[0];
+  assert.match(row.children[0].textContent,/未回報實際模型/);
+  assert.match(row.children[3].textContent,/20 \/ 4/);
+  assert.match(row.children[3].textContent,/子代理用量／模型未獨立驗證/);
+  const child={type:'model_attempt',run_id:'r',attempt_id:'native:child',actual_provider:'codex',actual_model:null,role:'native_worker',outcome:'ok',usage_scope:'native_agent_rollout',usage_source:'codex_rollout',native_agent_usage_verified:false,usage:{input_tokens:null,output_tokens:9}};
+  listener({data:{type:'state',exists:false,summary:{},routingStats:dashboard.summarizeRoutingAttempts([child])}});
+  const nativeRow=document.getElementById('attemptRows').children[0];
+  assert.match(nativeRow.children[1].textContent,/原生代理紀錄/);
+  assert.match(nativeRow.children[3].textContent,/未知 \/ 9；原生代理 rollout/);
+  assert.doesNotMatch(nativeRow.children[3].textContent,/dispatcher/);
+  assert.match(document.getElementById('providerMetrics').textContent,/CLI 0 次/);
+  assert.match(document.getElementById('providerMetrics').textContent,/原生代理 1 筆/);
+  assert.match(document.getElementById('providerMetrics').textContent,/不與 CLI 相加/);
+});

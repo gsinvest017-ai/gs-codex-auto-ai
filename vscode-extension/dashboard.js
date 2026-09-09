@@ -20,12 +20,15 @@ function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
   const unique=new Map();
   for(const e of records) if((parentRunId ? e.parent_run_id === parentRunId : e.run_id === runId) && ['ok','failed','quota_exhausted'].includes(e.outcome)) unique.set(JSON.stringify([e.run_id,e.attempt_id]),e);
   const providers={}, attempts=[], exhausted=new Map(), violations=[];
+  const emptyUsage=()=>({attempts:0,inTok:null,outTok:null,cacheTok:null,cost:null,usageKnown:0,inKnown:0,outKnown:0,cacheKnown:0,costKnown:0});
   for(const e of unique.values()) {
     const provider=e.actual_provider; if(!provider) continue;
     const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
-    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source']) attempt[key]=e[key] ?? null;
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed']) attempt[key]=e[key] ?? null;
     attempt.usage=usage; attempts.push(attempt);
-    const item=providers[provider] ||= {attempts:0,inTok:null,outTok:null,cacheTok:null,cost:null,usageKnown:0,inKnown:0,outKnown:0,cacheKnown:0,costKnown:0}; item.attempts++;
+    const group=providers[provider] ||= {...emptyUsage(),cliAttempts:0,nativeAgents:0,nativeUsage:emptyUsage()}; group.attempts++;
+    const native=e.role === "native_worker"; group[native ? "nativeAgents" : "cliAttempts"]++;
+    const item=native ? group.nativeUsage : group; if(native)item.attempts++;
     let known=false;
     for(const [key,field] of [['input_tokens','inTok'],['output_tokens','outTok'],['cached_input_tokens','cacheTok']]) {const value=usage[key]; if(typeof value === 'number' && value>=0) {item[field]=(item[field] || 0)+value;item[{inTok:'inKnown',outTok:'outKnown',cacheTok:'cacheKnown'}[field]]++;known=true;} }
     item.usageKnown+=Number(known);
@@ -471,6 +474,8 @@ function html(defaultReq) {
 <div class="card"><h2>本次任務實際調度與用量</h2>
   <div id="evidenceStatus" class="muted">尚無實際呼叫證據，未驗證。</div>
   <div class="muted" id="evidenceRun"></div>
+  <div class="muted" id="executedRequirement"></div>
+  <div class="muted" id="usageScopeNotice">用量為 CLI 回報的呼叫事件合計；未獨立回報的子代理用量與模型維持未知，不視為完整團隊總量。</div>
   <table><thead><tr><th>實際供應商／模型</th><th>場景／結果</th><th>原因</th><th>Token in / out</th></tr></thead><tbody id="attemptRows"></tbody></table>
   <div class="row muted" id="providerMetrics"></div>
 </div>
@@ -530,19 +535,21 @@ function html(defaultReq) {
   const cell = (row, value) => { const td = document.createElement("td"); td.textContent = value; row.appendChild(td); };
   function showEvidence(stats) {
     stats = stats || {status:"unverified",attempts:[],providers:{},violations:[]};
-    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測實際呼叫；以下數據來自同一 run 的呼叫事件。呼叫成功與 Token 用量不代表任務交付完成。" : "尚無實際完成呼叫證據，未驗證。";
+    $("evidenceStatus").textContent = stats.violations.length ? "發現調度政策不一致：" + stats.violations.join("、") : stats.status === "observed" ? "已觀測執行紀錄；同一任務的 CLI 呼叫與原生代理分列。呼叫成功與 Token 用量不代表任務交付完成。" : "尚無實際完成呼叫證據，未驗證。";
     $("evidenceStatus").className = stats.violations.length ? "bad" : "muted";
     $("evidenceRun").textContent = (stats.parent_run_id || stats.run_id) ? "Run：" + (stats.parent_run_id || stats.run_id) : "尚無可歸屬的 run";
     $("attemptRows").replaceChildren();
     for (const a of stats.attempts) {
       const row = document.createElement("tr");
       cell(row, a.actual_provider + " / " + (a.actual_model || "未回報實際模型") + "；設定：" + (a.configured_model || "CLI 預設") + "；原請求：" + (a.requested_provider || "未知") + " / " + (a.requested_model || "CLI 預設"));
-      cell(row, (a.scenario || "—") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
-      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知"));
+      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
+      const scope = a.role === "native_worker" ? "；原生代理 rollout 回報" : a.native_agent_usage_verified === false ? (a.native_children_observed > 0 ? "；dispatcher CLI 回報，子代理用量另列／未觀測者未知" : "；dispatcher CLI 回報，子代理用量／模型未獨立驗證") : "；CLI 回報";
+      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知") + scope);
       $("attemptRows").appendChild(row);
     }
     const metric = (value,known,total) => value === null || value === undefined ? "未知（" + total + " 筆未回報）" : value + "（" + (known < total ? "已知部分，" : "") + known + "/" + total + " 筆已知）";
-    $("providerMetrics").textContent = Object.entries(stats.providers).map(([name,p]) => name + ": " + p.attempts + " 次，in " + metric(p.inTok,p.inKnown,p.attempts) + " / out " + metric(p.outTok,p.outKnown,p.attempts) + " / cache " + metric(p.cacheTok,p.cacheKnown,p.attempts) + "，成本 USD " + metric(p.cost,p.costKnown,p.attempts)).join(" · ");
+    const usageText=(p,total)=>"in " + metric(p.inTok,p.inKnown,total) + " / out " + metric(p.outTok,p.outKnown,total) + " / cache " + metric(p.cacheTok,p.cacheKnown,total) + "，成本 USD " + metric(p.cost,p.costKnown,total);
+    $("providerMetrics").textContent = Object.entries(stats.providers).map(([name,p]) => name + ": CLI " + p.cliAttempts + " 次，" + usageText(p,p.cliAttempts) + (p.nativeAgents ? "；原生代理 " + p.nativeAgents + " 筆，" + usageText(p.nativeUsage,p.nativeAgents) + "（獨立列示，不與 CLI 相加）" : "")).join(" · ");
   }
   window.addEventListener("message", (e) => {
     const m = e.data;
@@ -559,6 +566,7 @@ function html(defaultReq) {
     if (m.type !== "state") return;
     showEvidence(m.routingStats);
     $("runState").textContent = m.run ? "任務狀態（預定路由）：" + m.run.status + (m.run.route ? "・" + m.run.route.scenario + " → " + m.run.route.provider + " / " + (m.run.route.model || "CLI 預設") : "") : "";
+    $("executedRequirement").textContent = m.run && m.run.prompt ? "本次執行原需求：" + String(m.run.prompt).slice(0, 500) + (String(m.run.prompt).length > 500 ? "…" : "") : "尚無本次執行的原需求紀錄。";
     const s = m.summary;
     $("failureReason").textContent = s.failureReason || "";
     $("failureReason").style.display = s.failureReason ? "block" : "none";

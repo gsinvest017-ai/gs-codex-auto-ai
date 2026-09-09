@@ -216,6 +216,21 @@ def _attempt(provider="codex", outcome="ok", attempt_id="r:1", **extra):
 
 
 ROUTING_SCENARIOS = {
+    "native_dispatcher_usage_is_not_worker_verification": [
+        _attempt(role="dispatcher", usage_scope="dispatcher_cli_usage",
+            native_agent_usage_verified=False, usage={"input_tokens": 20, "output_tokens": 4})],
+    "native_usage_is_separate_from_cli": [
+        _attempt(parent_run_id="app", role="dispatcher", usage_scope="dispatcher_cli_usage",
+            native_agent_usage_verified=False, native_children_observed=2,
+            usage={"input_tokens": 20, "output_tokens": 4}),
+        _attempt(parent_run_id="app", run_id="child", attempt_id="native:child",
+            role="native_worker", usage_scope="native_agent_rollout", usage_source="codex_rollout",
+            actual_model="reported-child-model", usage={"input_tokens": 30, "output_tokens": 9}),
+        _attempt(parent_run_id="app", run_id="child", attempt_id="native:child",
+            role="native_worker", usage_scope="native_agent_rollout", usage_source="codex_rollout",
+            actual_model="reported-child-model", usage={"input_tokens": 30, "output_tokens": 9}),
+        _attempt(parent_run_id="app", run_id="pending", attempt_id="native:pending",
+            role="native_worker", outcome="started")],
     "planned_is_not_executed": [{"type": "route_preview", "run_id": "r",
                                   "actual_provider": "codex"}],
     "started_is_not_completed": [_attempt(outcome="started")],
@@ -321,3 +336,23 @@ def test_partial_totals_include_per_field_coverage():
     assert provider["outTok"] == 7 and provider["outKnown"] == 2
     assert provider["cacheTok"] is None and provider["cacheKnown"] == 0
     assert provider["cost"] is None and provider["costKnown"] == 0
+
+
+def test_native_dispatcher_never_fabricates_worker_usage_or_models():
+    result = em.routing_stats(ROUTING_SCENARIOS["native_dispatcher_usage_is_not_worker_verification"])
+    assert len(result["attempts"]) == 1
+    attempt = result["attempts"][0]
+    assert attempt["usage_scope"] == "dispatcher_cli_usage"
+    assert attempt["native_agent_usage_verified"] is False
+    assert attempt["actual_model"] is None
+    assert result["providers"]["codex"]["attempts"] == 1
+
+
+def test_native_agent_records_do_not_inflate_cli_calls_or_tokens():
+    result = em.routing_stats(ROUTING_SCENARIOS["native_usage_is_separate_from_cli"])
+    group = result["providers"]["codex"]
+    assert group["attempts"] == 2 and group["cliAttempts"] == 1 and group["nativeAgents"] == 1
+    assert group["inTok"] == 20 and group["outTok"] == 4
+    assert group["nativeUsage"]["inTok"] == 30 and group["nativeUsage"]["outTok"] == 9
+    assert group["nativeUsage"]["cacheTok"] is None
+    assert result["attempts"][1]["actual_model"] == "reported-child-model"

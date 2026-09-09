@@ -60,3 +60,11 @@ Windows 上的 Codex runner 現在只調整該次子行程的環境副本：從 
 - 證據：`log/shell-selftest-20260909/log/model-routing-results/codex_8_kqmnru.log`。此為 shell 啟動與讀寫驗證，並不代表原機器人任務已完成七階段交付。
 
 `tests/tools/test_runner_shell.py` 覆蓋 Windows 別名排除、大小寫與斜線、保留實體工具 PATH、不修改原始環境與 `os.environ`、非 Windows 不變，以及保留 sandbox 的 CLI 參數。
+
+## Codex 原生派工（0.14.3）
+
+0.14.2 的 shell 修復並不能讓沙箱中的第二層 Codex CLI 初始化使用者目錄中的 app-server。Codex 擔任 dispatcher 時，現在透過單次 CLI 的 `developer_instructions` 與 `features.multi_agent` 設定，把階段技能中的第二層 CLI 派工轉成原生 subagent；Phase 1 改驗證同一 runtime 的 shell、Python、檔案讀寫及原生 worker 寫入。子 worker 直接完成指定內容，父 dispatcher 驗證產物與測試，不再以第二次 CLI hello 判斷可用性。
+
+這項轉譯不改 `AGENTS.md`、全域設定、ACL 或認證檔，也不擴張 sandbox 權限。設定了模型時，子 agent 預設使用同一模型，且禁止改用自訂 agent profile。原生工具不可用或實際驗證失敗時仍回報阻塞；Phase 7 的 run-scoped 產物驗證仍是完成門檻。Claude dispatcher 的外層 runner 派工方式保留，OpenCode 仍須兩個主要供應商皆有明確額度耗盡證據。
+
+原生 worker 並不是另一筆 runner CLI attempt，不能用子 agent 數量推算 tokens，也不能把 dispatcher 的 CLI usage 宣稱成整個 pipeline 完整用量。設定與權限繼承依據：[OpenAI 設定參考](https://learn.chatgpt.com/docs/config-file/config-reference)、[原生 subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)。

@@ -52,6 +52,15 @@ except ImportError:
     _router_spec.loader.exec_module(_router_module)
     resolve_route = _router_module.resolve_route
 
+try:
+    from .native_usage import collect_native_children
+except ImportError:
+    import importlib.util
+    _native_spec = importlib.util.spec_from_file_location("native_usage", Path(__file__).with_name("native_usage.py"))
+    _native_module = importlib.util.module_from_spec(_native_spec)
+    _native_spec.loader.exec_module(_native_module)
+    collect_native_children = _native_module.collect_native_children
+
 IS_WIN = os.name == "nt"
 
 
@@ -372,6 +381,7 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
         else:
             env.pop("CODEXAUTOAI_ROUTED_WORKER", None)
         env["CODEXAUTOAI_ROUTED_ROLE"] = role
+        env["CODEXAUTOAI_ROUTED_PROVIDER"] = provider
         if attempt_id:
             env["CODEXAUTOAI_ROUTED_ATTEMPT"] = attempt_id
             env.setdefault("CODEXAUTOAI_PARENT_RUN_ID", attempt_id.rsplit(":", 1)[0])
@@ -458,6 +468,34 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
         time.sleep(poll)
 
 
+CODEX_DISPATCHER_RUNTIME = (
+    "CodexAutoAI provider runtime: you are already inside the authenticated Codex runtime. "
+    "Preserve the project's seven-phase workflow, dispatcher/content-worker separation, "
+    "artifact verification and safety rules. For THIS Codex session, translate legacy phase "
+    "skills/AGENTS instructions that launch codex exec, codex_runner.py or another provider CLI "
+    "into native Codex subagent delegation. Do not launch any model CLI recursively, even for "
+    "the Phase 1 hello/environment probe. Nested CLIs cannot initialize their app-server in "
+    "the parent's restricted Windows sandbox. Never relax sandbox/ACLs, copy authentication "
+    "data or create an external privileged launcher to work around this. "
+    "Phase 1: verify shell execution, Python availability and workspace file write/read using "
+    "the current runtime's tools, then delegate a bounded write/read verification to one native "
+    "subagent and inspect its artifact. A genuine failure must be recorded as a blocked phase. "
+    "For Phase 3-7 content work, use native subagents with the same selected Codex model and "
+    "inherited permission policy; do not select a custom agent profile or switch models. "
+    "Send each worker the exact scope, output paths and this instruction: complete your bounded "
+    "task directly, do not launch a model CLI, start the phase pipeline or delegate recursively. "
+    "If you are such a native child worker, the project's dispatcher-only prohibition on "
+    "writing implementation does not apply to your worker role: directly implement and test "
+    "only your assigned files, then return evidence to the parent; do not drive phase gates. "
+    "Wait for workers and verify their files/tests yourself before advancing. If native agent "
+    "tools are unavailable, report blocked rather than silently doing their implementation. "
+    "Ordinary project scripts including run_phase.py and test commands remain allowed. "
+    "Claude slash-command hooks do not run here: explicitly drive the phases through the "
+    "runtime delivery contract. Never invent model_attempt events, token totals or delivery "
+    "evidence for native agents. Provider fallback remains the outer runner's responsibility."
+)
+
+
 def provider_command(route: dict, prompt: str) -> list[str]:
     """Build real CLI argv without a shell or implicit provider fallback."""
     provider, model = route["provider"], route["model"]
@@ -472,6 +510,13 @@ def provider_command(route: dict, prompt: str) -> list[str]:
         cmd += ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json"]
         if IS_WIN:
             cmd += ["-c", "allow_login_shell=false"]
+        if role == "dispatcher":
+            # Process-local configuration; neither AGENTS nor user config is rewritten.
+            # JSON string escaping is valid TOML basic-string escaping (ASCII text).
+            cmd += ["-c", "features.multi_agent=true", "-c", "agents.enabled=true",
+                    "-c", "developer_instructions=" + json.dumps(CODEX_DISPATCHER_RUNTIME)]
+            if model:
+                cmd += ["-c", "agents.default_subagent_model=" + json.dumps(model)]
         if model:
             cmd += ["-m", model]
         return cmd + [prompt]
@@ -560,8 +605,11 @@ def execute_with_fallback(route: dict, prompt: str, cwd: Path, args,
             counter[0] += 1
             metadata = {}
             started = time.monotonic()
+            started_at = time.time()
             event = {"run_id": run_id, "attempt_id": f"{run_id}:{counter[0]}", "attempt": counter[0],
                      "scenario": route["scenario"], "role": actual["role"],
+                     "usage_scope": "dispatcher_cli_usage" if provider == "codex" and actual["role"] == "dispatcher" else "cli_reported_usage",
+                     "native_agent_usage_verified": False if provider == "codex" and actual["role"] == "dispatcher" else None,
                      "parent_run_id": os.environ.get("CODEXAUTOAI_PARENT_RUN_ID") or (run_id if actual["role"] == "dispatcher" else None),
                      "requested_provider": route.get("requested_provider", route["provider"]),
                      "requested_model": route.get("requested_model", route.get("model")),
@@ -578,6 +626,27 @@ def execute_with_fallback(route: dict, prompt: str, cwd: Path, args,
                                       role=actual["role"], attempt_id=event["attempt_id"])
             except OSError as exc:
                 ok, reason = False, f"fatal:provider_launch {exc}"
+            if provider == "codex" and actual["role"] == "dispatcher" and metadata.get("result_path"):
+                try:
+                    children = collect_native_children(metadata["result_path"], _sessions_dir(), started_at, time.time())
+                except (OSError, ValueError, TypeError):
+                    # Telemetry must not turn a completed task into a failed retry.
+                    children = []
+                metadata["native_children_observed"] = len(children)
+                for child in children:
+                    status = child.get("status", "unknown")
+                    record_attempt(cwd, {
+                        **event, "run_id": child["thread_id"], "attempt_id": "native:" + child["thread_id"],
+                        "role": "native_worker", "attempt": None,
+                        "actual_model": child.get("actual_model"), "usage": child["usage"],
+                        "usage_source": child["usage_source"], "usage_scope": "native_agent_rollout",
+                        "native_agent_usage_verified": all(value is not None for value in child["usage"].values()),
+                        "native_thread_id": child["thread_id"], "native_parent_thread_id": child["parent_thread_id"],
+                        "parent_thread_id": child["parent_thread_id"],
+                        "native_agent_path": child.get("agent_path"), "source_path": child["source_path"],
+                        "outcome": status if status in ("ok", "failed") else "started",
+                        "reason": "native_agent_" + status, "duration_ms": None,
+                    })
             is_quota = not ok and reason.startswith("quota_exhausted:")
             if is_quota and provider in ("codex", "claude"):
                 exhausted.add(provider)
@@ -698,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if os.environ.get("CODEXAUTOAI_ROUTED_WORKER"):
             raise ValueError("routed workers cannot recursively dispatch another runner")
+        if (os.environ.get("CODEXAUTOAI_ROUTED_PROVIDER") == "codex"
+                and os.environ.get("CODEXAUTOAI_ROUTED_ROLE") == "dispatcher"):
+            raise ValueError("nested Codex dispatcher CLI is unavailable inside its sandbox; use native Codex subagents for worker tasks and current runtime tools for environment checks")
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("--timeout must be positive")
         context = os.environ.get("CODEXAUTOAI_TASK_PROMPT", "")
