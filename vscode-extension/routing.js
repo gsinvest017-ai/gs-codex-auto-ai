@@ -41,7 +41,7 @@ async function saveRoute(root, selection, execute = execFile) {
   if (typeof selection.scenario !== 'string' || !selection.scenario) throw new Error('請選擇場景');
   const args = ['--save-route', '--scenario', selection.scenario, '--provider', selection.provider];
   if (String(selection.model || '').trim()) args.push('--model', String(selection.model).trim());
-  if (selection.fallbackModel) args.push('--fallback-model', String(selection.fallbackModel));
+  if (Object.prototype.hasOwnProperty.call(selection, 'fallbackModel')) args.push('--fallback-model', String(selection.fallbackModel || '').trim());
   return runRouter(root, args, execute);
 }
 

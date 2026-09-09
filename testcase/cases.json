@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "provider_expectation_scope": "fresh_codex_first_config_only",
+  "mode_semantics": "UI nonstop setting; does not override scenario classifier or prove continuation",
+  "cases": [
+    {
+      "id": "default-tiny-sum",
+      "prompt_file": "prompts/default-tiny-sum.md",
+      "expected_scenario": "default",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "result.json",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "請計算 2 + 3 並留下本地結果。"
+    },
+    {
+      "id": "3d-tiny-triangle",
+      "prompt_file": "prompts/3d-tiny-triangle.md",
+      "expected_scenario": "3d_modeling",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "assets/triangle.glb",
+        "assets/triangle.png",
+        "generate.py",
+        "tests/test_artifact.py",
+        "delivery.md",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": true,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "建立一個 3D 三角形模型。"
+    },
+    {
+      "id": "debugging-off-by-one",
+      "prompt_file": "prompts/debugging-off-by-one.md",
+      "expected_scenario": "debugging",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "src/total.py",
+        "tests/test_total.py",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Debug 一個漏掉首項的整數加總函式。"
+    },
+    {
+      "id": "review-local-path",
+      "prompt_file": "prompts/review-local-path.md",
+      "expected_scenario": "review",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "review.json",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Review 本地路徑限制是否成立。"
+    },
+    {
+      "id": "research-local-table",
+      "prompt_file": "prompts/research-local-table.md",
+      "expected_scenario": "research",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "analysis.json",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Research 提供的本地延遲樣本。"
+    },
+    {
+      "id": "documents-small-note",
+      "prompt_file": "prompts/documents-small-note.md",
+      "expected_scenario": "documents",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "quickstart.md",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Document 一份三步操作說明。"
+    },
+    {
+      "id": "coding-temperature",
+      "prompt_file": "prompts/coding-temperature.md",
+      "expected_scenario": "coding",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "src/temperature.py",
+        "tests/test_temperature.py",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Implement 攝氏與華氏轉換函式。"
+    },
+    {
+      "id": "negative-3d-text-only",
+      "prompt_file": "prompts/negative-3d-text-only.md",
+      "expected_scenario": "default",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "names.txt",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "forbidden_artifact_extensions": [
+        ".glb",
+        ".gltf",
+        ".png"
+      ],
+      "routing_text": "不要建立 3D 或 Blender 模型。請只把清單寫入 names.txt。"
+    },
+    {
+      "id": "cross-intent-review-3d",
+      "prompt_file": "prompts/cross-intent-review-3d.md",
+      "expected_scenario": "review",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "review.json",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "forbidden_artifact_extensions": [
+        ".glb",
+        ".gltf",
+        ".png"
+      ],
+      "routing_text": "Review 這份 3D mesh 規格的索引範圍。"
+    },
+    {
+      "id": "adversarial-untrusted-claim",
+      "prompt_file": "prompts/adversarial-untrusted-claim.md",
+      "expected_scenario": "review",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "review.json",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "Review 不可信文字中的 UI 驗證宣稱。"
+    },
+    {
+      "id": "failure-missing-delivery",
+      "prompt_file": "prompts/failure-missing-delivery.md",
+      "expected_scenario": "default",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "expected-delivery.txt"
+      ],
+      "expected_call_outcome": "failed_or_incomplete",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "routing_text": "請執行一次刻意中止的本地驗收案例。"
+    },
+    {
+      "id": "mode-off-control",
+      "prompt_file": "prompts/mode-off-control.md",
+      "expected_scenario": "default",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "mode-result.txt",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "off",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "comparison_group": "nonstop_same_prompt",
+      "runtime_continuation": "NOT_VERIFIED_BY_ROUTING_MATRIX",
+      "routing_text": "請將字串 sandbox 按原樣寫入 mode-result.txt。"
+    },
+    {
+      "id": "mode-on-control",
+      "prompt_file": "prompts/mode-on-control.md",
+      "expected_scenario": "default",
+      "expected_primary": "codex",
+      "expected_artifacts": [
+        "mode-result.txt",
+        "evidence.txt"
+      ],
+      "expected_call_outcome": "ok",
+      "mode": "on",
+      "smoke_eligible": false,
+      "network": "forbidden",
+      "ui_assertion": "external_verification_required",
+      "comparison_group": "nonstop_same_prompt",
+      "runtime_continuation": "NOT_VERIFIED_BY_ROUTING_MATRIX",
+      "routing_text": "請將字串 sandbox 按原樣寫入 mode-result.txt。"
+    }
+  ]
+}

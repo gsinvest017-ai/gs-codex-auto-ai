@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-09T06:13:44.712462+00:00",
+  "revision": "94450cadb27e1846d62556e000daed957fa55e93",
+  "source_sha256": {
+    "testcase/matrix.py": "2bd4b3329b97cf527ea319bfda2bfdd1384bd247f5d3ab6ec664bfb9afaac355",
+    "testcase/cases.json": "0463fe181f740c58d1ef51dca2fcd40c9038f31d28fad84d855cb0ceaece7e93",
+    "tools/model_router.py": "1dac2ca699da6a89af26e24d70583378438ad5c1272fe471a2b3e84d522a4c9a",
+    "tools/codex_runner.py": "a898501fff84e13ace3be1b9c2076976d38961b302c1d069b18541eb895be0de",
+    "tools/events_model.py": "c75d1f22edfdb26e10c0849070bccc0bd0b7a7db1a430cbb8a67545d42842a45"
+  },
+  "scope": {
+    "parameters": "Finite equivalence-class Cartesian product, not every arbitrary string.",
+    "model_validation": "Synthetic IDs; mismatch is controlled fatal runtime rejection, not a discovered capability.",
+    "invalid_primary_model": "Whitespace is rejected by direct save_route API. UI trims whitespace to blank/null; UI normalization is separately audited.",
+    "routing_metrics": "All 1120 parameter and 4480 outcome combinations use production core with controlled providers.",
+    "prompts": "Canonical full prompts are inferred for valid configurations; all 13 short/full prompt fixtures are separately classified under both presets.",
+    "activity_artifacts_phase_history": "Representative evidence audits and separate single live smoke only; not 4480 real generations.",
+    "mode": "Routing invariance plus separate UI command-prefix audit; runtime continuation NOT_VERIFIED."
+  },
+  "source": "controlled-provider-matrix",
+  "dimensions": {
+    "nonstop": [
+      false,
+      true
+    ],
+    "preset": [
+      "codex-first",
+      "multi-provider"
+    ],
+    "scenario": [
+      "default",
+      "3d_modeling",
+      "debugging",
+      "review",
+      "research",
+      "documents",
+      "coding"
+    ],
+    "primary": [
+      "codex",
+      "claude"
+    ],
+    "model_class": [
+      "blank",
+      "explicit_valid",
+      "mismatch",
+      "invalid"
+    ],
+    "fallback_class": [
+      "blank",
+      "Gemini",
+      "DeepSeek",
+      "other",
+      "invalid"
+    ]
+  },
+  "quota_outcomes": [
+    "primaryok",
+    "onequota",
+    "bothquota",
+    "genericerror"
+  ],
+  "coverage": {
+    "parameter_combinations": 1120,
+    "execution_combinations": 4480,
+    "checks": {
+      "passed": 63840
+    },
+    "paid_calls": 0,
+    "runtime_continuation": "NOT_VERIFIED",
+    "model_availability": "NOT_VERIFIED"
+  }
+}

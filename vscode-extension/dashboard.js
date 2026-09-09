@@ -630,7 +630,6 @@ function html(defaultReq) {
   };
   $("provider").onchange = () => { $("routeModel").value=""; drawWiring(); $("routeNotice").textContent="已切換供應商並清除舊模型；請重新選填模型後儲存。"; }; $("routeModel").oninput = drawWiring; $("fallbackInput").oninput = drawWiring;
   $("btnSaveRoute").onclick = () => {
-    if (catalog && catalog.fallback && catalog.fallback.model && !$("fallbackInput").value.trim()) { $("status").textContent="已設定的備援模型不能留空清除；請填入完整 provider/model ID。本次未儲存。"; return; }
     vscode.postMessage({type:"saveRoute", selection:{scenario:$("scenario").value,provider:$("provider").value,model:$("routeModel").value,fallbackModel:$("fallbackInput").value}});
   };
   const cell = (row, value) => { const td = document.createElement("td"); td.textContent = value; row.appendChild(td); };
@@ -738,7 +737,10 @@ function computeState(root, { includeHistory = true } = {}) {
   try { legacyRoutingLines = fs.readFileSync(path.join(root, "log", "model-routing-events.jsonl"), "utf8").split(/\r?\n/); } catch {}
   // The runner writes attempts to events.jsonl. Read legacy files only for compatibility;
   // canonical updates win deduplication and the app run scopes all dispatcher/worker events.
-  const routingStats = summarizeRoutingAttempts([...legacyRoutingLines, ...lines], null, run && run.run_id);
+  const routingLines = [...legacyRoutingLines, ...lines];
+  const parentScoped = run && routingLines.some(line => { try { return JSON.parse(line).parent_run_id === run.run_id; } catch { return false; } });
+  const routingStats = parentScoped ? summarizeRoutingAttempts(routingLines, null, run.run_id)
+    : summarizeRoutingAttempts(routingLines, run && run.run_id);
   const f = includeHistory ? findTranscript(root) : null;
   let trSum = null, sub = null;
   if (f) {

@@ -593,7 +593,7 @@ def provider_command(route: dict, prompt: str) -> list[str]:
             cmd += ["-m", model]
         return cmd + [prompt]
     if provider == "opencode":
-        if not model or "/" not in model:
+        if not isinstance(model, str) or "/" not in model or not all(part and not any(char.isspace() for char in part) for part in model.split("/")):
             raise ValueError("OpenCode fallback requires an explicit provider/model ID in routing settings")
         return cmd + ["run", "--format", "json", "--model", model, prompt]
     if provider not in ("claude", "gemini"):

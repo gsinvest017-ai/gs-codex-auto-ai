@@ -44,7 +44,7 @@ test('webview interactions reflect scenario edits, save payloads, preview and re
   assert.match($('primaryNode').textContent,/claude/); assert.match($('secondaryNode').textContent,/codex/);
   $('provider').value='codex'; $('provider').onchange(); assert.equal($('routeModel').value,''); $('btnSaveRoute').onclick();
   assert.equal(sent.at(-1).selection.provider,'codex'); assert.equal(sent.at(-1).selection.fallbackModel,'deepseek/test');
-  const beforeClear=sent.length; $('fallbackInput').value=''; $('btnSaveRoute').onclick(); assert.equal(sent.length,beforeClear); assert.match($('status').textContent,/未儲存/);
+  const beforeClear=sent.length; $('fallbackInput').value=''; $('btnSaveRoute').onclick(); assert.equal(sent.length,beforeClear+1); assert.equal(sent.at(-1).selection.fallbackModel,'');
   listener({data:{type:'routePreview',route:{scenario:'review',provider:'codex',model:null,reason:'test'}}});
   assert.match($('routePreview').textContent,/未執行/);
   listener({data:{type:'state',exists:false,summary:{},routingStats:dashboard.summarizeRoutingAttempts([])}});
@@ -154,4 +154,33 @@ test('native dispatcher usage scope and original run request never overwrite edi
   assert.match(document.getElementById('providerMetrics').textContent,/CLI 0 次/);
   assert.match(document.getElementById('providerMetrics').textContent,/原生代理 1 筆/);
   assert.match(document.getElementById('providerMetrics').textContent,/不與 CLI 相加/);
+});
+
+test('real UI save clears fallback, omitted fallback preserves, and whitespace model means CLI default', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-ui-clear-'));
+  await routing.saveRoute(root,{scenario:'review',provider:'claude',model:'sonnet',fallbackModel:'deepseek/test'});
+  let catalog=await routing.getCatalog(root);assert.equal(catalog.fallback.model,'deepseek/test');
+  await routing.saveRoute(root,{scenario:'review',provider:'claude',model:'   '});
+  catalog=await routing.getCatalog(root);assert.equal(catalog.fallback.model,'deepseek/test');assert.equal(catalog.scenarios.find(s=>s.name==='review').model,null);
+  await routing.saveRoute(root,{scenario:'review',provider:'claude',model:'',fallbackModel:''});
+  catalog=await routing.getCatalog(root);assert.equal(catalog.fallback.model,null);
+});
+
+
+test('real webview clear click passes through host bridge to Python and disables fallback', {timeout:5000}, async()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-webview-clear-'));
+ await routing.saveRoute(root,{scenario:'review',provider:'claude',model:'',fallbackModel:'deepseek/test'});
+ let browserListener,hostListener,resolveSaved,rejectSaved;const saved=new Promise((resolve,reject)=>{resolveSaved=resolve;rejectSaved=reject;});
+ const elements=new Map();const element=()=>({value:'',textContent:'',innerHTML:'',className:'',style:{},children:[],appendChild(e){this.children.push(e);},replaceChildren(){this.children=[];}});
+ const document={getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);},createElement:element};
+ const webview={html:'',postMessage:data=>browserListener?.({data}),onDidReceiveMessage:fn=>{hostListener=fn;return {dispose(){}};}};
+ const dispose=dashboard.wireDashboard(webview,{root,onCatalog:()=>routing.getCatalog(root),onSaveRoute:async selection=>{try{const result=await routing.saveRoute(root,selection);resolveSaved(selection);return result;}catch(e){rejectSaved(e);throw e;}}});
+ try{
+   vm.runInNewContext(webview.html.match(/<script>([\s\S]*?)<\/script>/)[1],{document,acquireVsCodeApi:()=>({postMessage:m=>hostListener(m)}),window:{addEventListener:(name,fn)=>browserListener=fn}});
+   browserListener({data:{type:'catalog',catalog:await routing.getCatalog(root)}});
+   const $=id=>document.getElementById(id);$('scenario').value='review';$('scenario').onchange();
+   assert.equal($('fallbackInput').value,'deepseek/test');$('fallbackInput').value='';$('fallbackInput').oninput();$('btnSaveRoute').onclick();
+   const selection=await saved;assert.equal(selection.fallbackModel,'');
+   const catalog=await routing.getCatalog(root);assert.equal(catalog.fallback.model,null);
+ }finally{dispose();}
 });

@@ -168,6 +168,11 @@ def catalog(root: Path | str) -> dict:
             "fallback": routes[0]["fallback_chain"][-1]}
 
 
+def valid_fallback_model(model: object) -> bool:
+    """An explicit provider/model ID; syntax validation is not capability discovery."""
+    return isinstance(model, str) and "/" in model and all(part and not any(char.isspace() for char in part) for part in model.split("/"))
+
+
 def save_route(root: Path | str, scenario: str | None, provider: str | None,
                model: str | None, fallback_model: str | None = None) -> dict:
     path = Path(root) / "log" / "model-routing.json"
@@ -186,9 +191,10 @@ def save_route(root: Path | str, scenario: str | None, provider: str | None,
     elif fallback_model is None:
         raise ValueError("--save-route requires --scenario or --fallback-model")
     if fallback_model is not None:
-        if not fallback_model.strip() or "/" not in fallback_model:
-            raise ValueError("fallback model must be a provider/model ID")
-        config["fallback"] = {"provider": "opencode", "model": fallback_model}
+        if fallback_model != "" and not valid_fallback_model(fallback_model):
+            raise ValueError("fallback model must be a provider/model ID, or empty to clear")
+        # Omitted None preserves configuration; explicit empty string clears it.
+        config["fallback"] = {"provider": "opencode", "model": fallback_model or None}
     config["quota_policy"] = QUOTA_POLICY
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic replacement prevents preview readers seeing partial JSON.
