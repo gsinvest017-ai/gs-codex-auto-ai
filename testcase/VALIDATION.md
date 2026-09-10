@@ -31,3 +31,15 @@ Phase 0–7 事件齊全，但 Phase 7 完成緊貼 300 秒期限；runner 尚�
 重跑方式與案例見 README.md；受控報告摘要及來源 SHA256 見 reports/matrix/summary.json 與 ui-summary.json。大型逐筆報告保留本機，由腳本重產，不提交 git。
 
 Node 回歸合計 35 passed；真實失敗案例的 UI/Workbench 一致性稽核 21 passed、0 failed、2 unknown（非停模式證據）。UI 清空備援按鈕也已透過 host bridge 到真 Python 回歸驗證。
+
+## 2026-09-10：新增明確主線方案的受控矩陣
+
+本節為新增覆蓋；上方 1,120／4,480 組與 live timeout 紀錄保留為歷史，不能解讀為本次重新執行或已轉為 live 通過。
+
+- 4,200 組參數：非停 2 × 方案 5 × 場景 7 × 主線 3 × 模型類別 4 × 備援類別 5；每組 4 種結果，共 16,800 個受控執行情境。新增 `claude-first`、`opencode-first`、`review-codex-build-claude`，包含不合法設定應拒絕的組合。
+- 明確 OpenCode 主線需保存有效 `provider/model`；它的額度錯誤不應偷偷切往其他主線。預設額度備援仍需兩家主線額度耗盡。
+- 完整矩陣 Python 回歸 4 passed（31.23 秒）；本次 Node 回歸 47 passed。JS 稽核對來源 `passed` 標記另核對 expected／actual，並逐一比對 Python 與正式 JavaScript metrics、真啟動命令的非停前綴。
+- 矩陣本身 255,640 項檢查通過。報告的來源 SHA256 已逐一比對本機 `matrix.py`、案例清單、router、runner 與 events_model；本次 report SHA256 為 `082cd142b68db239f06cc03d82305878c093e619c9eabd3653f22216270f3328`，亦記錄於 `reports/matrix/ui-summary.json`。
+- 本次正式 JS 矩陣稽核為 33,601 passed、0 failed、1 unknown：16,800 項 metrics、16,800 項命令前綴與 1 項來源檢查。未知項目仍是實際非停續跑；這些不是額外的真實模型任務。
+
+本輪未呼叫付費模型，未重新執行上述 live 案例，也不宣稱 Gemini／DeepSeek 或任意測試模型 ID 已實際連通。新版逐筆報告由矩陣工具重產，應與本次 dimensions／coverage 一起核對。

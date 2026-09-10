@@ -37,7 +37,7 @@
 
 非停 off/on 案例使用完全相同的需求文字。切換的是 UI checkbox，**不是 prompt 中的字眼**。矩陣能確認路由與啟動命令前綴不被錯接，不能證明長任務實際續跑；若沒有真實 continuation 事件，結果必須標 `NOT_VERIFIED`。
 
-備援欄位清空代表明確停用 OpenCode 模型；程式呼叫省略 fallbackModel 欄位才表示保留既有值。模型欄位空白或純空格表示使用 CLI 預設。不要把 Gemini／DeepSeek 選成正常主線；只有兩個主線額度皆耗盡的證據才允許 OpenCode。
+備援欄位清空代表明確停用 OpenCode 模型；程式呼叫省略 fallbackModel 欄位才表示保留既有值。Codex／Claude 模型欄位空白或純空格表示使用 CLI 預設；OpenCode 主線沒有此預設，必須明確填入有效 `provider/model`，空白應拒絕儲存或執行。預設額度備援政策下，只有 Codex 與 Claude 額度皆耗盡的證據才允許 OpenCode；不預設使用其 Gemini／DeepSeek 後端。使用者明確保存 `opencode-first` 並指定有效 `provider/model`，或保存已 opt-in 的 OpenCode 接線節點時，可以直接使用該主線，事件需記錄明確政策與設定摘要，不應被誤標為額度違規。`claude-first` 與 `review-codex-build-claude` 亦以本次已保存的設定為準。
 
 ## 不呼叫付費模型的矩陣
 
@@ -48,6 +48,8 @@ node testcase/evidence_audit.js --matrix testcase/reports/report.json
 ```
 
 矩陣涵蓋場景、主線、代表性模型、備援設定與非停選擇，再搭配受控 provider 成功／quota 結果。模型 ID 是測試資料，僅驗證儲存與 argv 傳遞，**不代表該模型真實可用**。mock 用量只驗證資料彙總一致性，不代表帳戶真實用量。報告需分列 passed／failed／unknown；缺少 evidence 不應自動算通過。
+
+先前的 1120 組參數／4480 次受控執行是舊版矩陣的歷史數字，未涵蓋新增的明確主線方案。新版覆蓋數以當次報告的 `dimensions`、`quota_outcomes` 與 `coverage` 為準，JS 稽核會核對完整組合、來源檢查與 Python／JS 用量資料，不以舊數字固定判定通過。矩陣通過不代表 live 模型連通、任務交付或實際非停續跑已驗證。
 
 ## 單一真實 3D smoke（明確 opt-in）
 
