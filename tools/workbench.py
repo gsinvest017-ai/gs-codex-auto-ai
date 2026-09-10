@@ -266,6 +266,8 @@ class Workbench:
                 for index, entry in enumerate(_activity_entries(event)):
                     items.append({"id": f"{attempt['attempt_id']}:{at}:{index}",
                                   "attempt_id": attempt["attempt_id"], "provider": attempt.get("actual_provider"),
+                                  **{key: attempt.get(key) for key in ("graph_id", "graph_node_id", "graph_node_label", "configured_model", "binding_scenario", "graph_definition_scenario")},
+                                  "actual_model": attempt.get("actual_model") or usage[attempt["attempt_id"]].get("actual_model"),
                                   "event_type": event.get("type"), "historical": attempt.get("outcome") != "started",
                                   "item_id": (event.get("item", {}).get("id") if isinstance(event.get("item"), dict) else None),
                                   "source_path": str(path), "source_line": line_number,

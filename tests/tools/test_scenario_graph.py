@@ -151,3 +151,112 @@ def test_claude_dispatcher_receives_selected_policy_and_no_forced_codex():
     assert 'do not hardcode --provider codex' in instruction
     assert 'takes precedence for this invocation' in instruction
     assert 'Preserve all sandbox' in instruction
+
+def test_binding_custom_catalog_preview_and_cross_scenario(tmp_path):
+    item = graph(); item['scenario'] = 'custom-scene'
+    scenario_graph.save(tmp_path, item)
+    assert 'custom-scene' in [route['name'] for route in model_router.catalog(tmp_path)['scenarios']]
+    model_router.bind_graph(tmp_path, '3d_modeling', 'example')
+    route = model_router.resolve_route('Create a 3d mesh', tmp_path)
+    assert route['execution_mode'] == 'graph'
+    assert route['graph_id'] == 'example'
+    assert route['scenario'] == '3d_modeling'
+    assert route['graph_scenario'] == 'custom-scene'
+    assert route['graph_digest'] == scenario_graph.digest(item)
+    assert route['graph_execution_order'] == ['review', 'build']
+    assert [node['provider'] for node in route['graph_nodes']] == ['codex', 'claude']
+    model_router.bind_graph(tmp_path, 'custom-scene', 'example', ['ornament'])
+    assert model_router.resolve_route('ornament', tmp_path)['scenario'] == 'custom-scene'
+    model_router.apply_preset(tmp_path, 'claude-first')
+    assert model_router.resolve_route('ornament', tmp_path)['execution_mode'] == 'graph'
+
+
+def test_binding_delete_and_missing_graph_fail_closed(tmp_path):
+    scenario_graph.save(tmp_path, graph())
+    model_router.bind_graph(tmp_path, 'coding', 'example')
+    before = (tmp_path / 'log/scenario-graphs.json').read_bytes()
+    with pytest.raises(ValueError, match='unbind'):
+        scenario_graph.delete(tmp_path, 'example')
+    assert (tmp_path / 'log/scenario-graphs.json').read_bytes() == before
+    with pytest.raises(ValueError, match='cannot be overridden'):
+        model_router.resolve_route('coding', tmp_path, model='other')
+    # Simulate external file loss; never silently resolve the default provider.
+    (tmp_path / 'log/scenario-graphs.json').write_text('{"version":1,"graphs":[]}', encoding='utf-8')
+    with pytest.raises(ValueError, match='bound graph missing'):
+        model_router.resolve_route('coding', tmp_path)
+    model_router.bind_graph(tmp_path, 'coding', None)
+    assert model_router.resolve_route('coding', tmp_path)['execution_mode'] == 'route'
+
+
+def test_binding_rejects_invalid_input_atomically(tmp_path):
+    scenario_graph.save(tmp_path, graph())
+    model_router.apply_preset(tmp_path, 'codex-first')
+    config = tmp_path / 'log/model-routing.json'
+    before = config.read_bytes()
+    for scenario, graph_id, keywords in [('coding', 'missing', None), ('../bad', 'example', None), ('coding', 'example', [''])]:
+        with pytest.raises(ValueError):
+            model_router.bind_graph(tmp_path, scenario, graph_id, keywords)
+        assert config.read_bytes() == before
+
+
+def test_normal_dispatcher_uses_bound_graph_executor(tmp_path, capsys):
+    import json
+    scenario_graph.save(tmp_path, graph())
+    model_router.bind_graph(tmp_path, '3d_modeling', 'example')
+    calls = []
+    def execute(graph, prompt, cwd, args, run_id, counter, executor, recorder):
+        calls.append((graph['id'], args.graph_digest, args.dispatcher, args.binding_scenario))
+        return True, 'graph completed', {'graph_digest': scenario_graph.digest(graph), 'graph_states': {'review': 'ok', 'build': 'ok'}, 'activated_edges': ['handoff']}, {'provider': 'claude'}
+    with patch.object(scenario_graph, 'execute', execute), patch.object(codex_runner, 'provider_command', side_effect=AssertionError('must not launch default dispatcher')):
+        assert codex_runner.main(['--cwd', str(tmp_path), '--prompt', 'Create 3d mesh', '--dispatcher']) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [('example', scenario_graph.digest(graph()), False, '3d_modeling')]
+    envelope = json.loads(Path(result['graph_result_path']).read_text(encoding='utf-8'))
+    assert envelope['binding_scenario'] == '3d_modeling'
+    assert envelope['graph_definition_scenario'] == 'coding'
+    assert not list((tmp_path / 'log').glob('task-result-*.json'))
+
+def test_bound_default_keeps_regular_scenario_fallback_catalog(tmp_path):
+    scenario_graph.save(tmp_path, graph())
+    model_router.apply_preset(tmp_path, 'codex-first')
+    model_router.save_route(tmp_path, None, None, None, 'vendor/model')
+    model_router.bind_graph(tmp_path, 'default', 'example')
+    catalog = model_router.catalog(tmp_path)
+    assert catalog['fallback'] == {'provider': 'opencode', 'model': 'vendor/model', 'condition': 'both-primary-exhausted'}
+    route = model_router.resolve_route('coding', tmp_path)
+    assert route['execution_mode'] == 'route'
+    assert route['fallback_chain'][-1]['model'] == 'vendor/model'
+
+
+def test_activity_exposes_graph_node_and_model_provenance(tmp_path):
+    import json
+    from tools.workbench import Workbench
+    log = tmp_path / 'log'; log.mkdir()
+    output = log / 'controlled.jsonl'
+    output.write_text(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Findings', 'id': 'item'}}) + '\n', encoding='utf-8')
+    event = {'type': 'model_attempt', 'run_id': 'run', 'attempt_id': 'run:1', 'outcome': 'ok', 'actual_provider': 'codex', 'actual_model': None, 'configured_model': 'configured-test-model', 'graph_id': 'custom', 'graph_node_id': 'review', 'graph_node_label': 'Review requirements', 'binding_scenario': '3d_modeling', 'graph_definition_scenario': 'custom-scene', 'result_path': str(output)}
+    (log / 'events.jsonl').write_text(json.dumps(event) + '\n', encoding='utf-8')
+    activity = Workbench(tmp_path).activity()
+    item = activity['items'][0]
+    assert item['graph_node_label'] == 'Review requirements'
+    assert item['configured_model'] == 'configured-test-model'
+    assert item['actual_model'] is None
+    assert item['binding_scenario'] == '3d_modeling'
+
+def test_binding_preview_node_order_matches_execution_not_storage(tmp_path):
+    item = graph(); item['nodes'].reverse()
+    scenario_graph.save(tmp_path, item)
+    model_router.bind_graph(tmp_path, 'coding', 'example')
+    route = model_router.resolve_route('coding', tmp_path)
+    assert [node['id'] for node in route['graph_nodes']] == route['graph_execution_order'] == ['review', 'build']
+
+
+def test_binding_preview_and_catalog_include_exact_conditional_edges(tmp_path):
+    item = graph()
+    item['edges'][0].update(condition='quota_exhausted', label='Only explicit quota exhaustion')
+    scenario_graph.save(tmp_path, item)
+    model_router.bind_graph(tmp_path, 'coding', 'example')
+    route = model_router.resolve_route('coding', tmp_path)
+    assert route['graph_edges'] == item['edges']
+    catalog_route = next(route for route in model_router.catalog(tmp_path)['scenarios'] if route['name'] == 'coding')
+    assert catalog_route['graph_edges'] == item['edges']

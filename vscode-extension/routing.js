@@ -23,10 +23,18 @@ async function runRouter(root, args, execute = execFile) {
   throw new Error(`無法取得模型路由：${last.message}`);
 }
 
-async function previewRoute(root, prompt, execute = execFile) {
-  const route = await runRouter(root, ['--prompt', prompt], execute);
+async function previewRoute(root, prompt, execute = execFile, scenario = null) {
+  const route = await runRouter(root, ['--prompt', prompt, ...(scenario?['--scenario',scenario]:[])], execute);
   if (!route.scenario || !route.provider || typeof route.reason !== 'string') throw new Error('Invalid routing response');
   return route;
+}
+async function unbindGraph(root,scenario,execute=execFile){return runRouter(root,['--unbind-graph','--scenario',scenario],execute);}
+async function bindGraph(root, graphId, scenario, execute = execFile) {return runRouter(root,['--bind-graph',graphId,'--scenario',scenario],execute);}
+async function startSelected(root, requirement, autopilot, scenario, handlers) {
+ const route=await previewRoute(root,requirement,undefined,scenario);
+ if(route.execution_mode==='graph' || route.graph_id)return handlers.graph(route.graph_id,requirement,route);
+ if(scenario)throw new Error('選擇的場景已沒有綁定接線；請重新選擇或改用自動辨識。');
+ return handlers.legacy(requirement,autopilot);
 }
 async function applyPreset(root, preset, execute = execFile, options = {}) {
   if (!['multi-provider', 'codex-first','claude-first','opencode-first','review-codex-build-claude'].includes(preset)) throw new Error('未知路由模式');
@@ -85,4 +93,4 @@ function taskResult(root, run, exitCode = null) {
     reason: exitCode !== null && exitCode !== 0 ? `執行程序退出碼 ${exitCode}；請查看任務日誌。`
       : '模型呼叫已結束，但未取得本次任務的 Phase 7 完成交付證據。'};
 }
-module.exports = { previewRoute, applyPreset, getCatalog, saveRoute, createRun, currentRunEvent, taskResult };
+module.exports = { unbindGraph, bindGraph, startSelected, previewRoute, applyPreset, getCatalog, saveRoute, createRun, currentRunEvent, taskResult };

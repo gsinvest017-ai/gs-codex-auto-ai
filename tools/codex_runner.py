@@ -723,7 +723,7 @@ def execute_with_fallback(route: dict, prompt: str, cwd: Path, args,
             started_at = time.time()
             event = {"run_id": run_id, "attempt_id": f"{run_id}:{counter[0]}", "attempt": counter[0],
                      "scenario": route["scenario"], "role": actual["role"],
-                     **{key: route.get(key) for key in ("routing_policy", "config_digest", "graph_id", "graph_node_id", "graph_digest", "graph_incoming_edges")},
+                     **{key: route.get(key) for key in ("routing_policy", "config_digest", "graph_id", "graph_node_id", "graph_node_label", "graph_digest", "graph_incoming_edges", "binding_scenario", "graph_definition_scenario")},
                      "usage_scope": "dispatcher_cli_usage" if provider == "codex" and actual["role"] == "dispatcher" else "cli_reported_usage",
                      "native_agent_usage_verified": False if provider == "codex" and actual["role"] == "dispatcher" else None,
                      "parent_run_id": os.environ.get("CODEXAUTOAI_PARENT_RUN_ID") or (run_id if actual["role"] == "dispatcher" or route.get("explicit_primary") else None),
@@ -899,6 +899,11 @@ def main(argv: list[str] | None = None) -> int:
             if route["scenario"] == "default" or parent_route["scenario"] == "3d_modeling":
                 route = parent_route
                 route["reason"] = "task context fallback: " + route["reason"]
+        if route.get("execution_mode") == "graph" and not args.graph_id:
+            args.graph_id = route["graph_id"]
+            args.graph_digest = route["graph_digest"]
+            args.dispatcher = False  # Bound graph has its own completion envelope.
+        args.binding_scenario = route["scenario"] if route.get("execution_mode") == "graph" and route.get("graph_id") == args.graph_id else None
         if args.graph_id:
             cmd = []  # Graph nodes validate their own provider commands.
         elif args.codex_cmd:
@@ -934,6 +939,7 @@ def main(argv: list[str] | None = None) -> int:
             envelope = {"schema_version": 1, "run_id": parent_id, "invocation_run_id": run_id,
                         "started_at": t0, "ended_at": time.time(), "status": result_metadata["graph_execution_status"],
                         "graph_id": graph["id"], "graph_digest": result_metadata["graph_digest"],
+                        "binding_scenario": args.binding_scenario, "graph_definition_scenario": graph["scenario"],
                         "graph_states": result_metadata["graph_states"], "activated_edges": result_metadata["activated_edges"],
                         "reason": reason, "task_delivery_verified": False}
             safe_graph_run = re.sub(r"[^A-Za-z0-9_-]", "_", parent_id)

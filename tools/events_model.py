@@ -255,7 +255,7 @@ def routing_stats(events: list[dict], run_id: str | None = None,
             "reason", "duration_ms", "usage_source", "usage_scope",
             "native_agent_usage_verified", "native_thread_id", "native_parent_thread_id",
             "native_agent_path", "native_children_observed", "routing_policy", "config_digest",
-            "graph_id", "graph_node_id", "graph_digest") } | {"usage": usage})
+            "graph_id", "graph_node_id", "graph_node_label", "graph_digest", "binding_scenario", "graph_definition_scenario") } | {"usage": usage})
         group = providers.setdefault(provider, {**empty_usage(), "cliAttempts": 0,
             "nativeAgents": 0, "nativeUsage": empty_usage()})
         group["attempts"] += 1

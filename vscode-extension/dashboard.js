@@ -26,7 +26,7 @@ function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
   for(const e of unique.values()) {
     const provider=e.actual_provider; if(!provider) continue;
     const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
-    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed','routing_policy','config_digest','graph_id','graph_node_id','graph_digest']) attempt[key]=e[key] ?? null;
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed','routing_policy','config_digest','graph_id','graph_node_id','graph_node_label','graph_digest','binding_scenario','graph_definition_scenario']) attempt[key]=e[key] ?? null;
     attempt.usage=usage; attempts.push(attempt);
     const group=providers[provider] ||= {...emptyUsage(),cliAttempts:0,nativeAgents:0,nativeUsage:emptyUsage()}; group.attempts++;
     const native=e.role === "native_worker"; group[native ? "nativeAgents" : "cliAttempts"]++;
@@ -512,7 +512,7 @@ ${wiringEditor.styles}
 <div class="card"><h2>你想做什麼？</h2>
   <textarea id="req">${esc(defaultReq || "")}</textarea>
   <div class="row">
-    <button class="primary" id="btnStart">🚀 啟動新任務（先產規格）</button>
+    <label>本次任務場景 <select id="runScenario"><option value="">自動辨識（既有流程）</option></select></label><button id="runUnbind" class="ghost" disabled>解除此場景綁定，使用一般路由</button><div id="runScenarioPlan" class="muted">場景設定區只編輯規則；本欄決定本次任務。</div><button class="primary" id="btnStart">🚀 啟動新任務（先產規格）</button>
     <button class="ghost" id="btnRoute">預覽模型路由</button>
     <label><input type="checkbox" id="autopilot" checked> 非停模式（全程不問，建議非開發者保持勾選）</label>
   </div>
@@ -532,9 +532,9 @@ ${wiringEditor.styles}
   <label>模型 <input type="text" id="routeModel" placeholder="留空使用 CLI 預設"></label>
   <label>OpenCode 備援模型 <input type="text" id="fallbackInput" placeholder="provider/model（選填）"></label>
   <button class="primary" id="btnSaveRoute">儲存此場景</button></div>
-  <div class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span id="secondaryArrow">額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span id="fallbackArrow">兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
+  <div id="boundGraphRoute" class="wiring" style="display:none"></div><div id="legacyRouteWiring" class="wiring"><div class="node" id="sourceNode">場景</div><span>→</span><div class="node" id="primaryNode">Codex</div><span id="secondaryArrow">額度耗盡 →</span><div class="node" id="secondaryNode">Claude</div><span id="fallbackArrow">兩者皆耗盡 →</span><div class="node backup">OpenCode<div class="muted" id="fallbackModel">備援模型</div></div></div>
   <div class="muted" id="routeNotice">接線為設定預覽，尚未儲存。</div>
-  <div class="muted">預設 OpenCode 僅在兩主線額度皆耗盡時解鎖；明確選擇 OpenCode 優先方案或圖節點可覆寫此預設。一般錯誤不啟動備援。</div>
+  <div id="legacyRoutePolicy" class="muted">預設 OpenCode 僅在兩主線額度皆耗盡時解鎖；明確選擇 OpenCode 優先方案或圖節點可覆寫此預設。一般錯誤不啟動備援。</div>
   <div class="row muted" id="routePreview">尚無本次需求的預定路由。</div>
 </div>
 ${wiringEditor.markup}
@@ -591,8 +591,8 @@ ${wiringEditor.markup}
   ${wiringEditor.clientScript()}
   const scenarioExamples = ${JSON.stringify(wiringEditor.examples()).replace(/</g,"\\u003c")};
   ${wiringEditor.placeholder.toString()}
-  $("btnStart").onclick = () => { vscode.postMessage({ type:"start", requirement:$("req").value, autopilot:$("autopilot").checked }); };
-  $("btnRoute").onclick = () => { vscode.postMessage({ type:"route", requirement:$("req").value }); };
+  $("btnStart").onclick = () => { vscode.postMessage({ type:"start", requirement:$("req").value, autopilot:$("autopilot").checked, scenario:$("runScenario").value || null }); };
+  $("btnRoute").onclick = () => { vscode.postMessage({ type:"route", requirement:$("req").value, scenario:$("runScenario").value || null }); };
   $("btnPreset").onclick = () => { vscode.postMessage({ type:"preset", preset:$("preset").value, model:$("preset").value === "opencode-first" ? $("presetModel").value : undefined }); };
   $("btnLogs").onclick = () => { vscode.postMessage({ type:"logs" }); };
   $("btnTerm").onclick  = () => { vscode.postMessage({ type:"showTerminal" }); };
@@ -614,7 +614,7 @@ ${wiringEditor.markup}
     let activityIndex=0;
     for(const item of items.slice(-20).reverse()) {
       const li=document.createElement('li'),text=String(item.text || item.label || item.kind || '活動');
-      li.textContent=(item.timestamp ? String(item.timestamp).slice(11,19)+' · ' : '')+(item.provider ? item.provider+' · ':'')+activityHeadline(item)+(item.status?' · '+(states[item.status] || item.status):'');
+      li.textContent=(item.timestamp ? String(item.timestamp).slice(11,19)+' · ' : '')+(item.graph_node_id ? '節點 '+(item.graph_node_label || item.graph_node_id)+' · ':'')+(item.provider ? item.provider+' · ':'')+(item.configured_model ? '設定 '+item.configured_model+'／實際 '+(item.actual_model || '未知')+' · ':'')+activityHeadline(item)+(item.status?' · '+(states[item.status] || item.status):'');
       if(text!==activityHeadline(item)) {
         const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='查看完整回報';pre.textContent=text;details.appendChild(summary);details.appendChild(pre);li.appendChild(details);
       }
@@ -632,7 +632,15 @@ ${wiringEditor.markup}
     $("artifactNotice").textContent=result.error || (entries.length ? '本專案產物；選擇項目預覽。'+(entries.length>100?'顯示前 100 項。':'') : '尚無可預覽的產物紀錄。');
     for(const a of entries.slice(0,100)) {const row=document.createElement('div'),button=document.createElement('button');button.textContent=a.label || a.name || a.relative_path || a.path || a.id;button.onclick=()=>vscode.postMessage({type:'openArtifact',id:a.relative_path || a.path || a.id});row.appendChild(button);const note=document.createElement('span');note.textContent=' · '+(a.format || a.kind || a.type || '檔案')+(a.status?' · '+a.status:'');row.appendChild(note);$("artifactList").appendChild(row);}
   }
-  function drawWiring() {
+  function graphRouteText(route){const nodes=route.graph_nodes || [];const ordered=(route.graph_execution_order || nodes.map(n=>n.id)).map(id=>nodes.find(n=>n.id===id)).filter(Boolean);const name=id=>{const node=nodes.find(n=>n.id===id);return node?(node.label || node.id)+' ['+node.id+']':id;};return '接線 '+(route.graph_label || route.graph_id)+' · '+ordered.map(n=>name(n.id)+'：'+n.provider+' / '+(n.model || 'CLI 預設')).join(' → ')+'；'+(Array.isArray(route.graph_edges)?route.graph_edges.map(e=>name(e.source)+' ─'+(e.condition==='quota_exhausted'?'額度耗盡':'成功')+'→ '+name(e.target)).join('；'):'連線條件請見工作室')+'。這是設定順序與條件，不代表已執行或七階段交付。';}
+  function showRunScenario(){const choice=(catalog?.scenarios || []).find(s=>s.name===$("runScenario").value);const graph=choice?.execution_mode==='graph';$("runUnbind").disabled=!graph;$("btnStart").textContent=graph?'🚀 啟動新任務（使用選定接線）':'🚀 啟動新任務（先產規格）';$("runScenarioPlan").textContent=graph?'本次使用：'+graphRouteText(choice):'自動辨識需求；若辨識場景有綁定接線，將使用該接線，否則走原先規格流程。';}
+  $("runScenario").onchange=showRunScenario;$("runUnbind").onclick=()=>{if($("runScenario").value)vscode.postMessage({type:"unbindGraph",scenario:$("runScenario").value});};
+  function drawWiring(route) {
+    route=route?.execution_mode?route:(catalog?.scenarios || []).find(s=>s.name===$("scenario").value);
+    const graph=route?.execution_mode==='graph';$("legacyRouteWiring").style.display=graph?'none':'flex';$("legacyRoutePolicy").style.display=graph?'none':'block';$("boundGraphRoute").style.display=graph?'flex':'none';$("boundGraphRoute").textContent=graph?graphRouteText(route):'';
+    for(const id of ['provider','routeModel','fallbackInput','btnSaveRoute'])$(id).disabled=graph;
+    if(graph){$("routeNotice").textContent='此場景已綁定接線；請至工作室修改節點，或解除綁定後編輯一般路由。';return;}
+
     $("req").placeholder=placeholder(scenarioExamples,$("scenario").value,$("provider").value,$("routeModel").value)+"\\n非停："+$("autopilot").checked+" · 方案："+$("preset").value+" · 備援："+($("fallbackInput").value || "未設定");
     $("sourceNode").textContent = $("scenario").value || "場景";
     $("primaryNode").textContent = $("provider").value + " / " + ($("routeModel").value || "CLI 預設");
@@ -645,8 +653,8 @@ ${wiringEditor.markup}
   $("scenario").onchange = () => {
     const selected = catalog.scenarios.find((s) => s.name === $("scenario").value);
     if (!selected) return;
-    $("provider").value = selected.provider; $("routeModel").value = selected.model || ""; drawWiring();
-    $("routeNotice").textContent = "目前已儲存的場景設定；不代表已實際執行。";
+    $("provider").value = selected.provider; $("routeModel").value = selected.model || ""; drawWiring(selected);
+    if(selected.execution_mode!=="graph")$("routeNotice").textContent = "目前已儲存的場景設定；不代表已實際執行。";
   };
   $("provider").onchange = () => { $("routeModel").value=""; drawWiring(); $("routeNotice").textContent="已切換供應商並清除舊模型；請重新選填模型後儲存。"; }; $("routeModel").oninput = drawWiring; $("fallbackInput").oninput = drawWiring;
   $("btnSaveRoute").onclick = () => {
@@ -662,7 +670,7 @@ ${wiringEditor.markup}
     for (const a of stats.attempts) {
       const row = document.createElement("tr");
       cell(row, a.actual_provider + " / " + (a.actual_model || "未回報實際模型") + "；設定：" + (a.configured_model || "CLI 預設") + "；原請求：" + (a.requested_provider || "未知") + " / " + (a.requested_model || "CLI 預設"));
-      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
+      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + (a.graph_node_id ? " / 節點：" + (a.graph_node_label ? a.graph_node_label + " [" + a.graph_node_id + "]" : a.graph_node_id) : "") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
       const scope = a.role === "native_worker" ? "；原生代理 rollout 回報" : a.native_agent_usage_verified === false ? (a.native_children_observed > 0 ? "；dispatcher CLI 回報，子代理用量另列／未觀測者未知" : "；dispatcher CLI 回報，子代理用量／模型未獨立驗證") : "；CLI 回報";
       const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知") + scope);
       $("attemptRows").appendChild(row);
@@ -680,14 +688,14 @@ ${wiringEditor.markup}
     if (m.type === "status") { $("status").textContent = m.text; return; }
     graphEditor.message(m);
     if (m.type === "catalog") {
-      catalog = m.catalog; const previous = $("scenario").value; $("scenario").replaceChildren();
+      catalog = m.catalog;const chosen=m.selectedScenario || $("runScenario").value;$("runScenario").replaceChildren();const automatic=document.createElement('option');automatic.value='';automatic.textContent='自動辨識（既有流程）';$("runScenario").appendChild(automatic);for(const item of catalog.scenarios.filter(s=>s.execution_mode==='graph')){const option=document.createElement('option');option.value=item.name;option.textContent=(item.graph_label || item.name)+' · '+item.name+'（接線）';$("runScenario").appendChild(option);}$("runScenario").value=catalog.scenarios.some(s=>s.name===chosen&&s.execution_mode==='graph')?chosen:'';showRunScenario(); const previous = $("scenario").value; $("scenario").replaceChildren();
       for (const s of catalog.scenarios) { const option = document.createElement("option"); option.value=s.name; option.textContent=s.name; $("scenario").appendChild(option); }
       if (catalog.scenarios.some((s) => s.name === previous)) $("scenario").value=previous;
       $("fallbackModel").textContent = (catalog.fallback || {}).model || "未設定，備援不可用";
       $("fallbackInput").value = (catalog.fallback || {}).model || "";
       $("scenario").onchange(); return;
     }
-    if (m.type === "routePreview") { const r=m.route; $("routePreview").textContent="預定路由（未執行）：" + r.scenario + " → " + r.provider + " / " + (r.model || "CLI 預設") + " · " + r.reason; return; }
+    if (m.type === "routePreview") { const r=m.route; $("routePreview").textContent=r.execution_mode==="graph"?"預定路由（未執行）："+r.scenario+" · "+graphRouteText(r):"預定路由（未執行）：" + r.scenario + " → " + r.provider + " / " + (r.model || "CLI 預設") + " · " + r.reason; return; }
     if (m.type !== "state") return;
     const nextRunId=m.run && m.run.run_id || null;
     if(displayedRunId!==nextRunId)showActivity({items:[]});
@@ -834,12 +842,13 @@ function wireDashboard(webview, deps) {
     const reply = (text) => webview.postMessage({ type: "status", text });
     if (m.type.startsWith("graph") && deps.onGraphApi && m.type !== "graphRun") {
       const action={graphList:'list',graphGet:'get',graphSave:'save',graphDelete:'delete'}[m.type];
-      if(action) Promise.resolve().then(()=>deps.onGraphApi(action,{graphId:m.graphId,graph:m.graph})).then(result=>webview.postMessage({type:({graphList:'graphList',graphGet:'graphLoaded',graphSave:'graphSaved',graphDelete:'graphList'})[m.type],result})).catch(e=>webview.postMessage({type:'graphError',message:e.message}));
+      if(action) Promise.resolve().then(()=>deps.onGraphApi(action,{graphId:m.graphId,graph:m.graph})).then(async result=>{if(m.bind && deps.onBindGraph){await deps.onBindGraph(result.id,result.scenario);const catalog=await deps.onCatalog();webview.postMessage({type:"catalog",catalog,selectedScenario:result.scenario});}return result;}).then(result=>webview.postMessage({type:({graphList:'graphList',graphGet:'graphLoaded',graphSave:'graphSaved',graphDelete:'graphList'})[m.type],result})).catch(e=>webview.postMessage({type:'graphError',message:e.message}));
     }
     else if(m.type === 'graphRun' && deps.onGraphRun) Promise.resolve().then(()=>deps.onGraphRun(m.graphId,m.requirement,reply)).catch(e=>webview.postMessage({type:'graphError',message:e.message}));
-    else if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply);
+    else if(m.type === "unbindGraph" && deps.onUnbindGraph) Promise.resolve().then(()=>deps.onUnbindGraph(m.scenario)).then(()=>deps.onCatalog()).then(catalog=>{webview.postMessage({type:"catalog",catalog});reply("已解除場景綁定；接線圖仍保留。");}).catch(e=>reply(e.message));
+    else if (m.type === "start") deps.onStart(m.requirement, m.autopilot, reply, m.scenario);
     else if (m.type === "seed") deps.onSeed(m.intent, m.autopilot, reply);
-    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply, (route) => webview.postMessage({type:"routePreview", route}));
+    else if (m.type === "route" && deps.onPreviewRoute) deps.onPreviewRoute(m.requirement, reply, (route) => webview.postMessage({type:"routePreview", route}), m.scenario);
     else if (m.type === "preset" && deps.onPreset) Promise.resolve(deps.onPreset(m.preset, reply, {model:m.model})).then(() => deps.onCatalog && deps.onCatalog()).then((catalog) => {if(catalog) webview.postMessage({type:"catalog",catalog}); if(deps.onGraphApi) Promise.resolve(deps.onGraphApi("list",{})).then(result=>webview.postMessage({type:"graphList",result}));}).catch((e) => reply(e.message));
     else if (m.type === "catalog" && deps.onCatalog) Promise.resolve(deps.onCatalog()).then((catalog) => webview.postMessage({type:"catalog",catalog})).catch((e) => reply(e.message));
     else if (m.type === "saveRoute" && deps.onSaveRoute) Promise.resolve(deps.onSaveRoute(m.selection)).then(() => deps.onCatalog()).then((catalog) => { webview.postMessage({type:"catalog",catalog}); reply("已儲存場景接線；套用至後續呼叫。"); }).catch((e) => reply(e.message));

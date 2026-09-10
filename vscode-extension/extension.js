@@ -146,6 +146,13 @@ function runClaudeInTerminal(root, inner, { hidden = false, prompt = "", route =
 }
 
 // 需求 → claude 啟動指令（與 start 命令同語意；autopilot=true 走非停模式）。
+function graphLaunchPlan(graph, requirement, expectedRoute) {
+  if(expectedRoute?.graph_digest && expectedRoute.graph_digest!==graph.digest)throw new Error('接線在啟動期間變更，請重新預覽後啟動。');
+  const entry=graph.nodes.find(n=>n.id===graph.entry_node);
+  const route={mode:'graph',execution_mode:'graph',provider:entry.provider,model:entry.model,graph_id:graph.id,scenario:expectedRoute?.scenario || graph.scenario,binding_scenario:expectedRoute?.binding_scenario || expectedRoute?.scenario || null,graph_definition_scenario:graph.scenario,graph_snapshot:graph,graph_digest:graph.digest};
+  return {route,inner:`python tools/codex_runner.py --graph-id "${safePrompt(graph.id)}" --graph-digest "${graph.digest}" ${expectedRoute?.scenario ? `--scenario "${safePrompt(expectedRoute.scenario)}" ` : ""}--prompt "${safePrompt(requirement)}" --cwd .`};
+}
+
 function buildInner(requirement, autopilot) {
   // sendText 是直接餵給活的 shell，只換掉 `"` 擋不住 $(...) / `...` / &。
   // safePrompt 會把 shell 語法字元刪掉或轉全形，規則與 launcher._safe_prompt 一致。
@@ -542,8 +549,8 @@ function activate(context) {
     return {
       vscode, root,
       defaultReq: cfg.get("defaultRequirement", ""),
-      onStart: (requirement, autopilot, reply) => {
-        return buildDashboardDeps().onSeed(requirement, autopilot, reply);
+      onStart: async (requirement, autopilot, reply, scenario) => {
+        try{return await routing.startSelected(root,requirement,autopilot,scenario,{graph:(id,text,route)=>buildDashboardDeps().onGraphRun(id,text,reply,route),legacy:(text,mode)=>buildDashboardDeps().onSeed(text,mode,reply)});}catch(e){reply('啟動失敗：'+e.message);}
       },
       onActivity: () => workbenchCall(root,"activity"),
       onListArtifacts: () => workbenchCall(root,"artifacts"),
@@ -555,22 +562,24 @@ function activate(context) {
           else reply("此格式尚無預覽入口。");
         }catch(e){reply("產物預覽失敗："+e.message);}
       },
-      onPreviewRoute: async (requirement, reply, publish) => {
-        try { const r = await routing.previewRoute(root, requirement); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
+      onPreviewRoute: async (requirement, reply, publish, scenario) => {
+        try { const r = await routing.previewRoute(root, requirement, undefined, scenario); reply(`${r.scenario} → ${r.provider} / ${r.model || "CLI 預設模型"}：${r.reason}`); if (publish) publish(r); }
         catch (e) { reply(e.message); }
       },
       onGraphApi: (action, options) => {if(['save','delete'].includes(action) && [...activeRuns.values()].some(x=>x.root===root && x.run.record.route?.mode==='graph'))throw new Error('接線執行中，請完成或停止後再修改。');return wiringEditor.graphApi(root,action,options);},
-      onGraphRun: async (graphId, requirement, reply) => {
+      onGraphRun: async (graphId, requirement, reply, expectedRoute) => {
         if(!String(requirement || '').trim())throw new Error('請輸入本次需求');
         const release=reserveLaunch(root);
         try {
           if(!refreshFrameworkCore(extPath,root))throw new Error('無法準備框架');
           const graph=await wiringEditor.graphApi(root,'preview',{graphId});
-          const route={mode:'graph',graph_id:graph.id,scenario:graph.scenario,graph_snapshot:graph,graph_digest:graph.digest};
-          runClaudeInTerminal(root,`python tools/codex_runner.py --graph-id "${safePrompt(graph.id)}" --graph-digest "${graph.digest}" --prompt "${safePrompt(requirement)}" --cwd .`,{hidden:true,prompt:requirement,route});
+          const launch=graphLaunchPlan(graph,requirement,expectedRoute);
+          runClaudeInTerminal(root,launch.inner,{hidden:true,prompt:requirement,route:launch.route});
           reply('已啟動儲存接線；這次驗證圖節點，不代表七階段交付。');
         }finally{release();}
       },
+      onUnbindGraph: (scenario) => routing.unbindGraph(root,scenario),
+      onBindGraph: (id,scenario) => routing.bindGraph(root,id,scenario),
       onCatalog: () => routing.getCatalog(root),
       onSaveRoute: (selection) => routing.saveRoute(root, selection),
       onPreset: async (preset, reply, options) => {
@@ -782,4 +791,4 @@ function deactivate() {
   try { preview.killAllServers(); } catch { /* 預覽 server 清理失敗不擋關閉 */ }
 }
 
-module.exports = { registerWorkbenchMcp, workbenchCall, openPreferredPreview, buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };
+module.exports = { graphLaunchPlan, registerWorkbenchMcp, workbenchCall, openPreferredPreview, buildInner, activate, deactivate, runClaudeInTerminal, finishTerminalRun, refreshFrameworkCore, reserveLaunch };

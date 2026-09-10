@@ -60,6 +60,25 @@ def _target(value: object, label: str) -> dict:
     return {"provider": value["provider"], "model": model}
 
 
+def graph_module():
+    try:
+        from . import scenario_graph
+    except ImportError:
+        import scenario_graph
+    return scenario_graph
+
+
+def graph_bindings(config):
+    bindings = config.get("graph_bindings", {})
+    if not isinstance(bindings, dict) or any(not isinstance(key, str) or not isinstance(value, str) or not value for key, value in bindings.items()):
+        raise ValueError("graph_bindings must map scenario names to graph IDs")
+    return bindings
+
+
+def registered_graphs(root):
+    return graph_module().load(root)["graphs"] if (Path(root) / "log/scenario-graphs.json").exists() else []
+
+
 def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = None,
                   provider: str | None = None, scenario: str | None = None) -> dict:
     """Resolve policy only; never invokes a provider or probes credentials."""
@@ -81,6 +100,10 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
             raise ValueError(f"{name}: scenario must be an object")
         if name not in rules:
             rules[name] = rule
+    bindings = graph_bindings(config)
+    for name in [*bindings, *(graph["scenario"] for graph in registered_graphs(root))]:
+        if name != "default" and name not in rules:
+            rules[name] = {**default, "keywords": []}
     for name, rule in rules.items():
         _target(rule, name)
         priority = rule.get("priority", 0)
@@ -108,6 +131,23 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
             if hit:
                 chosen, target, reason = name, _target(rule, name), f"matched keyword: {hit}"
                 break
+    if chosen in bindings:
+        if model is not None or provider is not None:
+            raise ValueError("bound graph scenario cannot be overridden by provider/model; edit the graph or unbind it")
+        graph = graph_module().get(root, graph_id=bindings[chosen])
+        if graph is None:
+            raise ValueError("bound graph missing: " + bindings[chosen] + "; restore it or explicitly unbind the scenario")
+        entry = next(node for node in graph["nodes"] if node["id"] == graph["entry_node"])
+        return {"scenario": chosen, "provider": entry["provider"], "model": entry.get("model"),
+                "requested_provider": entry["provider"], "requested_model": entry.get("model"),
+                "reason": reason + "; explicitly bound scenario graph", "execution_mode": "graph",
+                "graph_id": graph["id"], "graph_digest": graph_module().digest(graph),
+                "graph_label": graph.get("label") or graph["id"], "graph_scenario": graph["scenario"],
+                "graph_nodes": [{key: node.get(key) for key in ("id", "label", "kind", "provider", "model")} for node_id in graph["execution_order"] for node in graph["nodes"] if node["id"] == node_id],
+                "graph_edges": [{key: edge.get(key) for key in ("id", "source", "target", "condition", "label")} for edge in graph["edges"]],
+                "graph_execution_order": graph["execution_order"], "routing_policy": "explicit-graph",
+                "explicit_primary": True, "quota_policy": QUOTA_POLICY, "config_digest": policy_digest(root),
+                "fallback_chain": []}
     saved_target = dict(target)
     # --model historically meant Codex. Preserve that contract unless provider
     # is explicitly supplied; never send an explicit Codex model to Claude.
@@ -132,7 +172,7 @@ def resolve_route(prompt: str, root: Path | str = ".", *, model: str | None = No
         target = {"provider": "codex", "model": None}
         reason += "; secondary provider locked until both Codex and Claude quotas are exhausted"
     alternate = "claude" if target["provider"] == "codex" else "codex"
-    return {"scenario": chosen, **target, "reason": reason,
+    return {"scenario": chosen, **target, "reason": reason, "execution_mode": "route",
             "requested_provider": requested["provider"], "requested_model": requested["model"],
             "quota_policy": QUOTA_POLICY, "explicit_primary": explicit_primary,
             "routing_policy": "explicit-primary" if explicit_primary else QUOTA_POLICY,
@@ -170,6 +210,11 @@ def apply_preset(root: Path | str, preset: str, model: str | None = None) -> dic
     backup = None
     if path.exists():
         previous = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(previous, dict) and graph_bindings(previous):
+            config["graph_bindings"] = dict(graph_bindings(previous))
+            for name, rule in previous.get("scenarios", {}).items():
+                if name not in DEFAULT_RULES:
+                    config["scenarios"][name] = rule
         if isinstance(previous, dict) and isinstance(previous.get("fallback"), dict):
             config["fallback"] = previous["fallback"]
         backup = path.with_name(f"model-routing.{time.time_ns()}.bak.json")
@@ -198,11 +243,44 @@ def catalog(root: Path | str) -> dict:
     path = Path(root) / "log" / "model-routing.json"
     config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     custom = config.get("scenarios", {}) if isinstance(config, dict) else {}
-    names = list(dict.fromkeys(["default", *DEFAULT_RULES, *custom]))
+    names = list(dict.fromkeys(["default", *DEFAULT_RULES, *custom, *graph_bindings(config), *(graph["scenario"] for graph in registered_graphs(root))]))
     routes = [resolve_route("", root, scenario=name) for name in names]
+    fallback = {"provider": "opencode", "model": None, **config.get("fallback", {}), "condition": QUOTA_POLICY}
+    if routes[0]["execution_mode"] == "route" and routes[0]["provider"] == "opencode":
+        fallback = {"provider": "opencode", "model": None, "condition": "disabled-for-explicit-primary"}
     return {"scenarios": [{"name": route["scenario"], **route} for route in routes],
-            "policy": QUOTA_POLICY, "providers": list(PRIMARY_PROVIDERS),
-            "fallback": routes[0]["fallback_chain"][-1] if routes[0]["fallback_chain"] else {"provider": "opencode", "model": None, "condition": "disabled-for-explicit-primary"}}
+            "policy": QUOTA_POLICY, "providers": list(PRIMARY_PROVIDERS), "graph_bindings": graph_bindings(config),
+            "fallback": fallback}
+
+
+def bind_graph(root, scenario, graph_id, keywords=None):
+    """None explicitly unbinds; binding can target any saved graph by stable ID."""
+    if not isinstance(scenario, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", scenario):
+        raise ValueError("binding requires a valid scenario")
+    if keywords is not None and (not isinstance(keywords, list) or any(not isinstance(word, str) or not word.strip() for word in keywords)):
+        raise ValueError("keywords must be a list of nonempty strings")
+    path = Path(root) / "log/model-routing.json"
+    config = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    if not isinstance(config, dict):
+        raise ValueError("model-routing.json must contain an object")
+    bindings = dict(graph_bindings(config))
+    if graph_id is None:
+        bindings.pop(scenario, None)
+    else:
+        graph = graph_module().get(root, graph_id=graph_id)
+        if graph is None:
+            raise ValueError("cannot bind missing graph: " + str(graph_id))
+        bindings[scenario] = graph_id
+    config["graph_bindings"] = bindings
+    if scenario != "default" and (keywords is not None or scenario not in DEFAULT_RULES):
+        rule = config.setdefault("scenarios", {}).setdefault(scenario, {"provider": "codex", "model": None})
+        if keywords is not None:
+            rule["keywords"] = keywords
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".model-routing.{time.time_ns()}.tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return catalog(root)
 
 
 def valid_fallback_model(model: object) -> bool:
@@ -254,6 +332,10 @@ def main(argv=None) -> int:
     ap.add_argument("--prompt")
     ap.add_argument("--catalog", action="store_true")
     ap.add_argument("--save-route", action="store_true")
+    binding = ap.add_mutually_exclusive_group()
+    binding.add_argument("--bind-graph")
+    binding.add_argument("--unbind-graph", action="store_true")
+    ap.add_argument("--keywords-json")
     ap.add_argument("--fallback-model")
     ap.add_argument("--preset", choices=("multi-provider", "codex-first", "claude-first", "opencode-first", "review-codex-build-claude"))
     ap.add_argument("--root", default=".")
@@ -263,6 +345,9 @@ def main(argv=None) -> int:
     ap.add_argument("--scenario")
     args = ap.parse_args(argv)
     try:
+        if args.bind_graph is not None or args.unbind_graph:
+            print(json.dumps(bind_graph(args.root, args.scenario, args.bind_graph, json.loads(args.keywords_json) if args.keywords_json is not None else None), ensure_ascii=False))
+            return 0
         if args.save_route:
             print(json.dumps(save_route(args.root, args.scenario, args.provider, args.model, args.fallback_model), ensure_ascii=False))
             return 0
