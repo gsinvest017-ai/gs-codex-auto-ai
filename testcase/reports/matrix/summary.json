@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-09T06:13:44.712462+00:00",
-  "revision": "94450cadb27e1846d62556e000daed957fa55e93",
+  "generated_at": "2026-09-10T05:35:21.963550+00:00",
+  "revision": "ea3502b30b30e96fe149dc46e04e8c523d1c9cca",
   "source_sha256": {
-    "testcase/matrix.py": "2bd4b3329b97cf527ea319bfda2bfdd1384bd247f5d3ab6ec664bfb9afaac355",
+    "testcase/matrix.py": "84f0ec21e536bdd4cb6f150847b7de88753ffe15fdbcb8e70ebd4cd2497dd3de",
     "testcase/cases.json": "0463fe181f740c58d1ef51dca2fcd40c9038f31d28fad84d855cb0ceaece7e93",
-    "tools/model_router.py": "1dac2ca699da6a89af26e24d70583378438ad5c1272fe471a2b3e84d522a4c9a",
-    "tools/codex_runner.py": "a898501fff84e13ace3be1b9c2076976d38961b302c1d069b18541eb895be0de",
-    "tools/events_model.py": "c75d1f22edfdb26e10c0849070bccc0bd0b7a7db1a430cbb8a67545d42842a45"
+    "tools/model_router.py": "97cc14a02b20604ada4474ba00995581965fdac9cba200100635a7b82030d58b",
+    "tools/codex_runner.py": "9f3a60b62543f916b5193b3a31536a11cc9b53d3f888c4bc780093d0299ee09e",
+    "tools/events_model.py": "79eccf4a556659ab73d6809f1cc7ff2d1e86d4bad564e296f8b4a87806453954"
   },
   "scope": {
-    "parameters": "Finite equivalence-class Cartesian product, not every arbitrary string.",
+    "parameters": "Finite equivalence-class Cartesian product, not every arbitrary string. OpenCode-first preset is initialized with a synthetic explicit provider/model; primary override blank model cases verify missing-model rejection. OpenCode primary quota cases never silently switch providers.",
     "model_validation": "Synthetic IDs; mismatch is controlled fatal runtime rejection, not a discovered capability.",
     "invalid_primary_model": "Whitespace is rejected by direct save_route API. UI trims whitespace to blank/null; UI normalization is separately audited.",
-    "routing_metrics": "All 1120 parameter and 4480 outcome combinations use production core with controlled providers.",
-    "prompts": "Canonical full prompts are inferred for valid configurations; all 13 short/full prompt fixtures are separately classified under both presets.",
-    "activity_artifacts_phase_history": "Representative evidence audits and separate single live smoke only; not 4480 real generations.",
+    "routing_metrics": "All 4200 parameter and 16800 outcome combinations use production core with controlled providers. Illegal provider/model configurations are rejected before calls.",
+    "prompts": "Canonical full prompts are inferred for valid configurations; all 13 short/full prompt fixtures are separately classified under all 5 presets.",
+    "activity_artifacts_phase_history": "Representative evidence audits and separate live smoke only; matrix provider outcomes are controlled, not real generations. review-codex-build-claude preset routing is covered here; its multi-node execution is verified separately by scenario_graph tests.",
     "mode": "Routing invariance plus separate UI command-prefix audit; runtime continuation NOT_VERIFIED."
   },
   "source": "controlled-provider-matrix",
@@ -26,7 +26,10 @@
     ],
     "preset": [
       "codex-first",
-      "multi-provider"
+      "multi-provider",
+      "claude-first",
+      "opencode-first",
+      "review-codex-build-claude"
     ],
     "scenario": [
       "default",
@@ -39,7 +42,8 @@
     ],
     "primary": [
       "codex",
-      "claude"
+      "claude",
+      "opencode"
     ],
     "model_class": [
       "blank",
@@ -62,10 +66,10 @@
     "genericerror"
   ],
   "coverage": {
-    "parameter_combinations": 1120,
-    "execution_combinations": 4480,
+    "parameter_combinations": 4200,
+    "execution_combinations": 16800,
     "checks": {
-      "passed": 63840
+      "passed": 255640
     },
     "paid_calls": 0,
     "runtime_continuation": "NOT_VERIFIED",

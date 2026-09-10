@@ -9,6 +9,10 @@ $ext = $PSScriptRoot
 $root = Split-Path -Parent $ext
 Set-Location $ext
 
+# Generate placeholders from the canonical repository testcase files.
+& node (Join-Path $ext "bundle-examples.js")
+if ($LASTEXITCODE -ne 0) { throw "Testcase bundle failed" }
+
 # 1. 複製框架快照
 $fw = Join-Path $ext "framework"
 if (Test-Path $fw) { Remove-Item $fw -Recurse -Force }

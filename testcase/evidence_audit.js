@@ -79,7 +79,7 @@ function auditMatrix(report){
  for(const values of Object.values(dimensions)){if(!Array.isArray(values)||!values.length||new Set(values.map(JSON.stringify)).size!==values.length)throw Error('Invalid matrix dimension');expectedCount*=values.length;}
  if(report.cases.length!==expectedCount || report.coverage?.parameter_combinations!==expectedCount || report.coverage?.execution_combinations!==expectedCount*outcomes.length)throw Error('Matrix manifest count mismatch');
  const ids=new Set(),parameters=new Set(),runs=new Set();
- const validateChecks=items=>{if(!Array.isArray(items)||!items.length||items.some(c=>!['passed','failed'].includes(c.status)))throw Error('Missing or unknown required checks');};
+ const validateChecks=items=>{if(!Array.isArray(items)||!items.length||items.some(c=>!['passed','failed'].includes(c.status)))throw Error('Missing or unknown required checks');for(const c of items)if(c.status==='passed' && Object.hasOwn(c,'expected') && Object.hasOwn(c,'actual') && !isDeepStrictEqual(c.expected,c.actual))throw Error('Passed source check contradicts expected/actual evidence');};
  const requiredChecks=[];
  for(const c of report.cases){
   if(typeof c.id!=='string'||!c.id||ids.has(c.id))throw Error('Duplicate or missing case id');ids.add(c.id);

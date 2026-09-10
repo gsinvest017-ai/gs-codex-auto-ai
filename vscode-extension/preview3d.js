@@ -51,6 +51,7 @@ function html(webview, extensionPath, uriFile = (file) => require('vscode').Uri.
   const nonce=crypto.randomBytes(18).toString('base64'); const source=webview.cspSource;
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${source}; style-src 'unsafe-inline'; img-src data: blob:; connect-src data: blob:; worker-src 'none';"><style>body{margin:0;background:#111720;color:#e8eef7;font:13px system-ui}header{padding:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#1b2532}button{color:#e8eef7;background:#344358;border:1px solid #66788d;border-radius:5px;padding:7px 12px;cursor:pointer}#viewport{height:calc(100vh - 88px);min-height:200px}canvas{display:block;width:100%;height:100%}#status{padding:9px;color:#bbccdf;white-space:pre-wrap}#name{flex:1;overflow-wrap:anywhere}</style><script type="importmap" nonce="${nonce}">${JSON.stringify({imports:{three:resource('three/build/three.module.js')}})}</script></head><body><header><b id="name">3D 模型預覽</b><button id="fit">適合視窗</button><button id="reload">重新載入</button><span>拖曳旋轉 · 滾輪縮放 · 右鍵平移</span></header><div id="viewport"></div><div id="status" role="status">等待模型…</div><script nonce="${nonce}" type="module" src="${resource('viewer3d.js')}"></script></body></html>`;
 }
+function openImage(vscode,root,file){const target=inside(root,path.resolve(root,file));if(!/\.(gif|png|jpg|jpeg|webp)$/i.test(target))throw Error('不支援的圖片格式');return vscode.commands.executeCommand('vscode.open',vscode.Uri.file(target),{viewColumn:vscode.ViewColumn.Beside,preserveFocus:true});}
 function createController(vscode,extensionPath,{onArtifact=()=>{}}={}) {
   const panels=new Map(),opened=new Set(),pending=new Map(),watchers=new Map();
   const keyOf=(root,file)=>inside(root,path.resolve(root,file));
@@ -71,16 +72,16 @@ function createController(vscode,extensionPath,{onArtifact=()=>{}}={}) {
     const trigger=path.resolve(root,file);if(pending.has(trigger))clearTimeout(pending.get(trigger));let previous=null,tries=0;
     const settle=()=>{let signature;try{const st=fs.statSync(trigger);signature=st.size+':'+st.mtimeMs;}catch{pending.delete(trigger);return;}
       if(previous!==signature && tries++<12){previous=signature;pending.set(trigger,setTimeout(settle,600));return;}
-      pending.delete(trigger);try{if(MODEL.test(trigger))open(root,path.relative(root,trigger),{automatic:true});else for(const entry of panels.values())if(entry.root===root)entry.load();}catch{if(tries++<12)pending.set(trigger,setTimeout(settle,600));}};
+      pending.delete(trigger);try{if(MODEL.test(trigger))open(root,path.relative(root,trigger),{automatic:true});else if(/\.gif$/i.test(trigger)){if(![...opened].some(key=>autoEligible(root,key))){opened.add(keyOf(root,trigger));Promise.resolve(openImage(vscode,root,trigger)).catch(()=>opened.delete(keyOf(root,trigger)));}}else for(const entry of panels.values())if(entry.root===root)entry.load();}catch{if(tries++<12)pending.set(trigger,setTimeout(settle,600));}};
     pending.set(trigger,setTimeout(settle,600));
   }
   function watch(root) {
     if(watchers.has(root))return watchers.get(root);
-    const watcher=vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root,'**/*.{glb,gltf,bin,png,jpg,jpeg,webp}'));
+    const watcher=vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root,'**/*.{glb,gltf,bin,png,jpg,jpeg,webp,gif}'));
     watcher.onDidCreate(uri=>changed(root,uri.fsPath));watcher.onDidChange(uri=>changed(root,uri.fsPath));watchers.set(root,watcher);return watcher;
   }
   function unwatch(root){watchers.get(root)?.dispose();watchers.delete(root);for(const [file,timer] of pending)if(autoEligible(root,file)){clearTimeout(timer);pending.delete(file);}}
   function openExisting(root){const hits=discover(root).filter(hit=>autoEligible(root,hit.path));if(hits.length)return open(root,hits[0].path,{automatic:true});return null;}
   return {open,watch,unwatch,openExisting,changed,dispose(){for(const t of pending.values())clearTimeout(t);for(const w of watchers.values())w.dispose();for(const p of panels.values())p.panel.dispose();pending.clear();panels.clear();}};
 }
-module.exports={inside,autoEligible,discover,readModel,html,createController};
+module.exports={openImage,inside,autoEligible,discover,readModel,html,createController};

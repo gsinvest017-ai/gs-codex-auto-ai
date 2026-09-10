@@ -82,7 +82,8 @@ def test_actual_adapter_argv(monkeypatch, provider, is_windows):
         assert command[1:] == ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json"] + shell_config + ["-m", "chosen", "hello\nworld"]
     else:
         assert command[command.index("--model") + 1] == "chosen"
-        assert command[command.index("--output-format") + 1] == "json"
+        assert command[command.index("--output-format") + 1] == ("stream-json" if provider == "claude" else "json")
+        assert ("--verbose" in command) is (provider == "claude")
         assert command[command.index("-p") + 1].endswith("hello\nworld")
         if provider == "claude":
             assert command[command.index("--tools") + 1] == "Read,Glob,Grep,WebSearch,WebFetch"

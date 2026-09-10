@@ -8,3 +8,6 @@ release-vsix.ps1
 node_modules/**
 
 **/*.test.js
+
+**/__pycache__/**
+**/*.pyc

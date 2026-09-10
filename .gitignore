@@ -69,3 +69,5 @@ vscode-extension/node_modules/
 
 # 執行 App 時 gs-spec-forge 快照會在專案根建這個庫，是執行期產物不該入庫。
 data/specforge.db
+
+vscode-extension/resources/testcase/

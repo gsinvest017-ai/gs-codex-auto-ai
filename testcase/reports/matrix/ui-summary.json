@@ -1,10 +1,15 @@
 {
   "schema_version": 1,
   "source": "controlled_matrix_production_js_python_metrics_parity",
+  "scope": "Prompt cases cover routing classification only; expected artifacts and complete task execution are not verified by this matrix.",
   "summary": {
-    "passed": 8961,
+    "passed": 33601,
     "failed": 0,
     "unknown": 1
   },
-  "matrix_report_sha256": "31b09b620c39ea9470c807c93c42abf5fb0ee2c8f91dffb5efa4c61452e9fb97"
+  "matrix_report_sha256": "082cd142b68db239f06cc03d82305878c093e619c9eabd3653f22216270f3328",
+  "source_sha256": {
+    "testcase/evidence_audit.js": "c7c03372391be9ca7fc0a6f08b71c5824299191d0d94603d68f693fb94c4d073",
+    "vscode-extension/dashboard.js": "e41f3f4ffb709aceb649e1572b2479258e73e9ab401c5ac83c95682ec7f908a3"
+  }
 }

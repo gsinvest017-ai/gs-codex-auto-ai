@@ -252,9 +252,10 @@ def routing_stats(events: list[dict], run_id: str | None = None,
         attempts.append({k: ev.get(k) for k in (
             "run_id", "parent_run_id", "role", "attempt_id", "actual_provider", "actual_model", "configured_model",
             "requested_provider", "requested_model", "scenario", "outcome",
-            "reason", "duration_ms", "usage_source", "usage_scope",
+            "reason", "duration_ms", "usage_source", "usage_scope", "usage_partial", "cache_creation_input_tokens",
             "native_agent_usage_verified", "native_thread_id", "native_parent_thread_id",
-            "native_agent_path", "native_children_observed") } | {"usage": usage})
+            "native_agent_path", "native_children_observed", "routing_policy", "config_digest",
+            "graph_id", "graph_node_id", "graph_node_label", "graph_digest", "binding_scenario", "graph_definition_scenario") } | {"usage": usage})
         group = providers.setdefault(provider, {**empty_usage(), "cliAttempts": 0,
             "nativeAgents": 0, "nativeUsage": empty_usage()})
         group["attempts"] += 1
@@ -277,7 +278,11 @@ def routing_stats(events: list[dict], run_id: str | None = None,
             item["cost"] = (item["cost"] or 0) + price
             item["costKnown"] += 1
         quota_for_run = exhausted.setdefault(ev["run_id"], set())
-        if provider == "opencode" and not {"codex", "claude"}.issubset(quota_for_run):
+        policy = ev.get('routing_policy')
+        explicit = ((policy == 'explicit-primary' and isinstance(ev.get('config_digest'), str) and re.fullmatch(r'[a-fA-F0-9]{64}', ev['config_digest']))
+                    or (policy == 'explicit-graph' and ev.get('graph_id') and ev.get('graph_node_id')
+                        and isinstance(ev.get('graph_digest'), str) and re.fullmatch(r'[a-fA-F0-9]{64}', ev['graph_digest'])))
+        if provider == "opencode" and not explicit and not {"codex", "claude"}.issubset(quota_for_run):
             if "opencode_without_primary_quota_exhaustion" not in violations:
                 violations.append("opencode_without_primary_quota_exhaustion")
         if ev.get("outcome") == "quota_exhausted" and provider in {"codex", "claude"}:

@@ -25,11 +25,38 @@ except ImportError:
     import events_model
     from codex_runner import output_metadata
 
-FORMATS = {".glb", ".gltf", ".obj", ".png"}
+FORMATS = {".glb", ".gltf", ".obj", ".png", ".gif"}
 MAX_LOG_BYTES = 4 * 1024 * 1024
 IGNORED_DIRS = {".git", ".venv", "venv", "vendor", ".claude", ".codex", "node_modules", "__pycache__", "log"}
 MAX_SCAN_FILES = 20000
 MAX_SCAN_DIRS = 2000
+
+
+def _validated_graph_result(graph, run, exit_code=None):
+    """Parity contract with task-evidence.validatedGraphResult; no artifact rehash."""
+    def finite(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    try:
+        route = run['route']
+        nodes, edges = route['graph_snapshot']['nodes'], route['graph_snapshot']['edges']
+        states, activated = graph['graph_states'], graph['activated_edges']
+        return bool(exit_code in (None, 0) and finite(run['started_at'])
+                    and type(graph['schema_version']) is int and graph['schema_version'] == 1
+                    and graph['run_id'] == run['run_id'] and graph['graph_id'] == route['graph_id']
+                    and graph['graph_digest'] == route['graph_digest']
+                    and re.fullmatch(r'[a-f0-9]{64}', graph['graph_digest'])
+                    and finite(graph['started_at']) and finite(graph['ended_at'])
+                    and graph['started_at'] >= run['started_at'] and graph['ended_at'] >= graph['started_at']
+                    and graph['status'] in ('completed', 'blocked') and graph['task_delivery_verified'] is False
+                    and isinstance(states, dict) and isinstance(nodes, list) and len(states) == len(nodes)
+                    and all(states.get(n['id']) in ('ok', 'skipped', 'failed', 'quota_exhausted') for n in nodes)
+                    and isinstance(activated, list) and all(any(e['id'] == key for e in edges) for key in activated)
+                    and (graph['status'] != 'completed' or ('ok' in states.values() and all(
+                        states[n['id']] not in ('failed', 'quota_exhausted') or any(
+                            e['source'] == n['id'] and e['id'] in activated and e['condition'] == 'quota_exhausted'
+                            and states[n['id']] == 'quota_exhausted' for e in edges) for n in nodes))))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
 
 
 class Workbench:
@@ -127,6 +154,35 @@ class Workbench:
                         candidate = value
             except (OSError, ValueError):
                 pass
+        if not app:
+            try:
+                session_path = self.confined('log/vscode-sessions.jsonl')
+                with session_path.open('rb') as handle:
+                    handle.seek(max(0, session_path.stat().st_size - MAX_LOG_BYTES))
+                    for line in handle.read(MAX_LOG_BYTES).splitlines():
+                        try:
+                            record = json.loads(line)
+                            if isinstance(record, dict) and record.get('run_id') == scope:
+                                app = record
+                        except ValueError:
+                            pass
+            except (OSError, ValueError):
+                pass
+        if isinstance(app.get('route'), dict) and app['route'].get('mode') == 'graph':
+            exit_code = None
+            try:
+                if app.get('exit_file'):
+                    exit_code = int(self.confined(app['exit_file']).read_text(encoding='utf-8-sig').strip())
+            except (OSError, ValueError):
+                pass
+            try:
+                graph = json.loads(self.confined(f'log/graph-result-{safe_id}.json').read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError):
+                graph = None
+            valid = _validated_graph_result(graph, app, exit_code)
+            return {'run_id': scope, 'status': ('failed' if exit_code not in (None, 0) else graph['status'] if valid else app.get('status') if exit_code is None and app.get('status') in ('running','failed','blocked','stopped') else 'incomplete'),
+                    'source': 'graph_result', 'execution_mode': 'graph', 'task_delivery_verified': False,
+                    'reason': '接線執行結果；未驗證七階段交付。', 'graph': graph if valid else None}
         def finite(value):
             return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         started, ended = candidate.get("started_at"), candidate.get("ended_at")
@@ -210,6 +266,8 @@ class Workbench:
                 for index, entry in enumerate(_activity_entries(event)):
                     items.append({"id": f"{attempt['attempt_id']}:{at}:{index}",
                                   "attempt_id": attempt["attempt_id"], "provider": attempt.get("actual_provider"),
+                                  **{key: attempt.get(key) for key in ("graph_id", "graph_node_id", "graph_node_label", "configured_model", "binding_scenario", "graph_definition_scenario")},
+                                  "actual_model": attempt.get("actual_model") or usage[attempt["attempt_id"]].get("actual_model"),
                                   "event_type": event.get("type"), "historical": attempt.get("outcome") != "started",
                                   "item_id": (event.get("item", {}).get("id") if isinstance(event.get("item"), dict) else None),
                                   "source_path": str(path), "source_line": line_number,
@@ -300,7 +358,7 @@ class Workbench:
                           label: str | None = None) -> dict:
         file = self.confined(path)
         if not file.is_file() or file.suffix.lower() not in FORMATS:
-            raise ValueError("artifact must be a local GLB, glTF, OBJ or PNG file")
+            raise ValueError("artifact must be a local GLB, glTF, OBJ, PNG or GIF file")
         if label is not None and (not isinstance(label, str) or len(label) > 400):
             raise ValueError("label must be text up to 400 characters")
         digest = hashlib.sha256()

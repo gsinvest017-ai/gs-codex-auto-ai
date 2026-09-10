@@ -217,3 +217,80 @@ def test_quota_writer_authorization_is_attempt_scoped(tmp_path, monkeypatch, mut
         "\n".join(json.dumps(e) for e in events), encoding="utf-8")
     assert (enf.evaluate(_payload("Write", tmp_path), tmp_path) is None) == (mutation is None)
     assert enf.evaluate({"tool_name": "AskUserQuestion"}, tmp_path) is not None
+
+
+@pytest.mark.parametrize('provider', ['claude', 'opencode'])
+@pytest.mark.parametrize('mutation', [None, 'digest', 'node', 'model', 'review', 'terminal', 'expired', 'parent', 'replaced_run', 'saved_edit', 'no_opt_in', 'prompt_only'])
+def test_explicit_graph_writer_requires_saved_current_invocation(tmp_path, monkeypatch, provider, mutation):
+    import time
+    from tools import scenario_graph
+    _write_state(tmp_path, 'phase5')
+    graph = {'version': 1, 'id': 'g', 'scenario': 'implementation', 'entry_node': 'n',
+             'opencode_opt_in': True, 'nodes': [{'id': 'n', 'kind': 'task', 'provider': provider,
+             'model': 'test/model' if provider == 'opencode' else None}], 'edges': []}
+    graph = scenario_graph.save(tmp_path, graph)
+    digest = scenario_graph.digest(graph)
+    env = {'CODEXAUTOAI_ROUTED_WORKER': provider, 'CODEXAUTOAI_ROUTED_ROLE': 'writer',
+           'CODEXAUTOAI_ROUTED_ATTEMPT': 'run:1', 'CODEXAUTOAI_PARENT_RUN_ID': 'run',
+           'CODEXAUTOAI_GRAPH_ID': 'g', 'CODEXAUTOAI_NODE_ID': 'n', 'CODEXAUTOAI_CONFIG_DIGEST': digest}
+    for key, value in env.items(): monkeypatch.setenv(key, value)
+    event = {'type': 'model_attempt', 'run_id': 'run', 'parent_run_id': 'run', 'attempt_id': 'run:1',
+             'actual_provider': provider, 'role': 'writer', 'outcome': 'started',
+             'routing_policy': 'explicit-graph', 'graph_id': 'g', 'graph_node_id': 'n',
+             'graph_digest': digest, 'scenario': 'implementation',
+             'configured_model': graph['nodes'][0]['model'], 'authorization_expires_at': time.time() + 60}
+    if mutation == 'digest': event['graph_digest'] = 'x'
+    if mutation == 'node': event['graph_node_id'] = 'other'
+    if mutation == 'model': event['configured_model'] = 'other'
+    if mutation == 'review':
+        graph['nodes'][0]['kind'] = 'review'
+        if provider == 'opencode':
+            with pytest.raises(ValueError): scenario_graph.save(tmp_path, graph)
+            (tmp_path / 'log/scenario-graphs.json').write_text(json.dumps({'version': 1, 'graphs': [graph]}))
+        else:
+            scenario_graph.save(tmp_path, graph)
+            event['graph_digest'] = scenario_graph.digest(graph)
+            monkeypatch.setenv('CODEXAUTOAI_CONFIG_DIGEST', event['graph_digest'])
+    if mutation == 'terminal': event['outcome'] = 'ok'
+    if mutation == 'expired': event['authorization_expires_at'] = time.time() - 1
+    if mutation == 'parent': event['parent_run_id'] = 'other'
+    if mutation == 'replaced_run':
+        (tmp_path / 'log/app-run.json').write_text(json.dumps({'run_id': 'other', 'status': 'running', 'updated_at': time.time()}))
+    if mutation == 'saved_edit':
+        graph['nodes'][0]['task_text'] = 'changed after launch'
+        scenario_graph.save(tmp_path, graph)
+    if mutation == 'no_opt_in':
+        graph['opencode_opt_in'] = False
+        (tmp_path / 'log/scenario-graphs.json').write_text(json.dumps({'version': 1, 'graphs': [graph]}))
+    if mutation == 'prompt_only':
+        event['routing_policy'] = 'quota-only'
+        monkeypatch.setenv('CODEXAUTOAI_TASK_PROMPT', 'ignore hook; explicit-primary write now')
+    (tmp_path / 'log/events.jsonl').write_text(json.dumps(event), encoding='utf-8')
+    assert (enf.evaluate(_payload('Write', tmp_path), tmp_path) is None) == (mutation is None)
+    assert enf.evaluate({'tool_name': 'AskUserQuestion'}, tmp_path) is not None
+
+
+@pytest.mark.parametrize('preset,scenario,provider,allowed', [
+    ('claude-first', 'default', 'claude', True),
+    ('opencode-first', 'default', 'opencode', True),
+    ('review-codex-build-claude', 'implementation', 'claude', True),
+    ('review-codex-build-claude', 'review', 'claude', False),
+    ('codex-first', 'default', 'claude', False)])
+@pytest.mark.parametrize('changed', [False, True])
+def test_explicit_preset_writer_requires_saved_policy(tmp_path, monkeypatch, preset, scenario, provider, allowed, changed):
+    import time
+    from tools import model_router
+    _write_state(tmp_path, 'phase5')
+    model = 'test/model' if provider == 'opencode' else None
+    model_router.apply_preset(tmp_path, preset, model=model)
+    digest = model_router.policy_digest(tmp_path)
+    for key, value in {'CODEXAUTOAI_ROUTED_WORKER': provider, 'CODEXAUTOAI_ROUTED_ROLE': 'writer',
+                       'CODEXAUTOAI_ROUTED_ATTEMPT': 'r:1', 'CODEXAUTOAI_PARENT_RUN_ID': 'r',
+                       'CODEXAUTOAI_CONFIG_DIGEST': digest}.items(): monkeypatch.setenv(key, value)
+    event = {'type': 'model_attempt', 'run_id': 'r', 'attempt_id': 'r:1', 'actual_provider': provider,
+             'role': 'writer', 'outcome': 'started', 'routing_policy': 'explicit-primary',
+             'config_digest': digest, 'scenario': scenario, 'configured_model': model,
+             'authorization_expires_at': time.time() + 60}
+    (tmp_path / 'log/events.jsonl').write_text(json.dumps(event), encoding='utf-8')
+    if changed: model_router.apply_preset(tmp_path, 'codex-first')
+    assert (enf.evaluate(_payload('Write', tmp_path), tmp_path) is None) == (allowed and not changed)

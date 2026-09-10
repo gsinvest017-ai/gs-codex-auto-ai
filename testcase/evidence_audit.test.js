@@ -50,6 +50,24 @@ test('matrix rejects truncated, duplicate, unknown evidence and propagates sourc
  for(const mutate of [r=>r.cases[0].executions=[],r=>r.cases[1].id=r.cases[0].id,r=>r.cases[1].parameters=r.cases[0].parameters,r=>r.coverage.execution_combinations=99,r=>r.cases[0].checks[0].status='unknown',r=>delete r.cases[0].executions[0].canonical_metrics,r=>r.cases[1].executions[0].run_id='run0']){const r=validMatrix();mutate(r);assert.throws(()=>auditMatrix(r));}
  const r=validMatrix();assert.equal(auditMatrix(r).summary.failed,0);r.cases[0].checks[0].status='failed';assert.equal(auditMatrix(r).summary.failed,1);
 });
+
+test('matrix refuses a passed label that contradicts expected versus actual',()=>{
+ for(const target of ['case','execution']){const report=validMatrix();const checks=target==='case'?report.cases[0].checks:report.cases[0].executions[0].checks;checks.push({status:'passed',expected:{provider:'opencode'},actual:{provider:'codex'}});assert.throws(()=>auditMatrix(report),/contradicts/);}
+});
+
+test('new explicit presets accept actual Python metrics including OpenCode primary without a false quota warning',()=>{
+ const presets=['claude-first','opencode-first','review-codex-build-claude'];
+ const report={schema_version:1,dimensions:{nonstop:[false],preset:presets},quota_outcomes:['primaryok'],coverage:{parameter_combinations:3,execution_combinations:3},cases:presets.map((preset,i)=>{
+  const run_id='explicit-'+i,provider=preset==='opencode-first'?'opencode':'claude';
+  const events=[{type:'model_attempt',run_id,attempt_id:run_id+':1',actual_provider:provider,configured_model:provider==='opencode'?'vendor/model':null,actual_model:null,routing_policy:'explicit-primary',config_digest:'a'.repeat(64),outcome:'ok',usage:{input_tokens:11,output_tokens:3}}];
+  const python='import json,sys;from tools.events_model import routing_stats;e=json.load(sys.stdin);print(json.dumps(routing_stats(e,run_id=e[0]["run_id"])))';
+  const canonical_metrics=JSON.parse(require('child_process').execFileSync('python',['-c',python],{cwd:path.resolve(__dirname,'..'),input:JSON.stringify(events),encoding:'utf8',env:{...process.env,PYTHONUTF8:'1'}}));
+  assert.deepEqual(canonical_metrics.violations,[]);
+  return {id:preset,parameters:{nonstop:false,preset},representatives:{prompt:'Controlled request'},checks:[{status:'passed',expected:provider,actual:provider}],executions:[{run_id,outcome:'primaryok',events,canonical_metrics,checks:[{status:'passed',expected:11,actual:11}]}]};})};
+ const result=auditMatrix(report);assert.equal(result.summary.failed,0);assert.equal(result.summary.passed,7);assert.equal(result.summary.unknown,1);
+ report.cases[1].executions[0].events[0].routing_policy='quota-only';
+ assert.equal(auditMatrix(report).summary.failed,1);
+});
 test('stage audit observes rendered DOM and detects corrupt number, bar and completion label',()=>{
  const dashboard=require('../vscode-extension/dashboard'),state=dashboard.computeState(fixture(),{includeHistory:false});
  const ui=render(state,{items:[]},{items:[]},{runs:[]});

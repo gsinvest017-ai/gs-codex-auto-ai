@@ -268,3 +268,22 @@ def test_metrics_preserve_original_terminal_event_order(tmp_path):
     result=Workbench(tmp_path).status('scope')
     assert [a['run_id'] for a in result['metrics']['attempts']]==['child','parent']
     assert result['metrics']==module.events_model.routing_stats(events,parent_run_id='scope')
+
+
+def test_gif_artifact_is_discovered_and_registered(tmp_path):
+    (tmp_path / 'walk.gif').write_bytes(b'GIF89a' + b'\0' * 20)
+    bench = Workbench(tmp_path)
+    assert any(item['relative_path'] == 'walk.gif' for item in bench.artifacts()['items'])
+    bench.register_artifact('walk.gif')
+    assert any(item['relative_path'] == 'walk.gif' for item in bench.artifacts()['registrations'])
+
+
+def test_running_graph_without_terminal_result_stays_running_until_scoped_exit(tmp_path):
+    (tmp_path / 'log').mkdir()
+    exit_file = tmp_path / 'log' / 'run.exit'
+    app = {'run_id':'active', 'status':'running', 'started_at':100, 'route':{'mode':'graph'}, 'exit_file':str(exit_file)}
+    (tmp_path / 'log' / 'app-run.json').write_text(json.dumps(app), encoding='utf8')
+    bench = Workbench(tmp_path)
+    assert bench._task_result('active')['status'] == 'running'
+    exit_file.write_text('1')
+    assert bench._task_result('active')['status'] == 'failed'
