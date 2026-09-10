@@ -82,8 +82,8 @@ function taskResult(root, run, exitCode = null) {
     if(exitCode===null && run.exit_file)try{const file=fs.realpathSync(path.resolve(root,run.exit_file)),rel=path.relative(fs.realpathSync(root),file);if(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel)){const raw=fs.readFileSync(file,'utf8').trim();if(/^-?\d+$/.test(raw))exitCode=Number(raw);}}catch{}
     let graph;try{graph=JSON.parse(fs.readFileSync(path.join(root,'log',`graph-result-${run.run_id}.json`),'utf8'));}catch{}
     if(validatedGraphResult(graph,run,exitCode))
-      return {status:exitCode!==null && exitCode!==0?'failed':graph.status==='completed'?'completed':'blocked',reason:'接線執行'+(graph.status==='completed'?'完成':'受阻')+'；未驗證七階段交付。'+(graph.reason || ''),graph};
-    return {status:exitCode!==null && exitCode!==0?'failed':'incomplete',reason:'未取得本次接線執行結果；未驗證七階段交付。'};
+      return {status:exitCode!==null && exitCode!==0?'failed':graph.status==='completed'?'completed':'blocked',terminalEvidence:true,reason:'接線執行'+(graph.status==='completed'?'完成':'受阻')+'；未驗證七階段交付。'+(graph.reason || ''),graph};
+    return {status:exitCode!==null && exitCode!==0?'failed':'incomplete',terminalEvidence:Number.isInteger(exitCode),reason:exitCode!==null?'接線程序已結束（退出碼 '+exitCode+'），但沒有可驗證的完整接線結果；未驗證七階段交付。':'未取得本次接線執行結果；未驗證七階段交付。'};
   }
   let result;
   try { result = JSON.parse(fs.readFileSync(path.join(root, 'log', `task-result-${run.run_id}.json`), 'utf8')); } catch {}

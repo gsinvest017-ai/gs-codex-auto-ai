@@ -25,7 +25,7 @@ except ImportError:
     import events_model
     from codex_runner import output_metadata
 
-FORMATS = {".glb", ".gltf", ".obj", ".png"}
+FORMATS = {".glb", ".gltf", ".obj", ".png", ".gif"}
 MAX_LOG_BYTES = 4 * 1024 * 1024
 IGNORED_DIRS = {".git", ".venv", "venv", "vendor", ".claude", ".codex", "node_modules", "__pycache__", "log"}
 MAX_SCAN_FILES = 20000
@@ -180,7 +180,7 @@ class Workbench:
             except (OSError, ValueError):
                 graph = None
             valid = _validated_graph_result(graph, app, exit_code)
-            return {'run_id': scope, 'status': ('failed' if exit_code not in (None, 0) else graph['status'] if valid else 'incomplete'),
+            return {'run_id': scope, 'status': ('failed' if exit_code not in (None, 0) else graph['status'] if valid else app.get('status') if exit_code is None and app.get('status') in ('running','failed','blocked','stopped') else 'incomplete'),
                     'source': 'graph_result', 'execution_mode': 'graph', 'task_delivery_verified': False,
                     'reason': '接線執行結果；未驗證七階段交付。', 'graph': graph if valid else None}
         def finite(value):
@@ -358,7 +358,7 @@ class Workbench:
                           label: str | None = None) -> dict:
         file = self.confined(path)
         if not file.is_file() or file.suffix.lower() not in FORMATS:
-            raise ValueError("artifact must be a local GLB, glTF, OBJ or PNG file")
+            raise ValueError("artifact must be a local GLB, glTF, OBJ, PNG or GIF file")
         if label is not None and (not isinstance(label, str) or len(label) > 400):
             raise ValueError("label must be text up to 400 characters")
         digest = hashlib.sha256()

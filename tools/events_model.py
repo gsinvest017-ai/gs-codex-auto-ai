@@ -252,7 +252,7 @@ def routing_stats(events: list[dict], run_id: str | None = None,
         attempts.append({k: ev.get(k) for k in (
             "run_id", "parent_run_id", "role", "attempt_id", "actual_provider", "actual_model", "configured_model",
             "requested_provider", "requested_model", "scenario", "outcome",
-            "reason", "duration_ms", "usage_source", "usage_scope",
+            "reason", "duration_ms", "usage_source", "usage_scope", "usage_partial", "cache_creation_input_tokens",
             "native_agent_usage_verified", "native_thread_id", "native_parent_thread_id",
             "native_agent_path", "native_children_observed", "routing_policy", "config_digest",
             "graph_id", "graph_node_id", "graph_node_label", "graph_digest", "binding_scenario", "graph_definition_scenario") } | {"usage": usage})

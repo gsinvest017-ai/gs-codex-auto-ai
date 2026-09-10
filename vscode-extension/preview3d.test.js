@@ -47,3 +47,11 @@ test('stable changed revision sends new model content without creating another p
    assert.equal(mock.creates.length,1);assert.equal(mock.messages.at(-1).json.nodes[0].name,'after-new-revision');
  }finally{c.dispose();global.setTimeout=originalSet;global.clearTimeout=originalClear;}
 });
+test('GIF preview invokes vscode.open beside; automatic stable GIF opens once and respects an already opened GLB',async()=>{
+ const root=workspace(),gif=path.join(root,'walk.gif');fs.writeFileSync(gif,'GIF89a');const mock=mockApi(),calls=[];mock.api.commands={executeCommand:async(...args)=>{calls.push(args);}};
+ await model.openImage(mock.api,root,'walk.gif');assert.equal(calls[0][0],'vscode.open');assert.equal(calls[0][1].fsPath || calls[0][1],gif);assert.equal(calls[0][2].preserveFocus,true);assert.equal(calls[0][2].viewColumn,mock.api.ViewColumn.Beside);calls.length=0;
+ const c=model.createController(mock.api,__dirname),timers=new Map();let seq=0;const oldSet=global.setTimeout,oldClear=global.clearTimeout;global.setTimeout=fn=>{timers.set(++seq,fn);return seq;};global.clearTimeout=id=>timers.delete(id);
+ function settle(file){c.changed(root,file);for(let i=0;i<2;i++){const fn=[...timers.values()][0];timers.clear();fn();}}
+ try{settle('walk.gif');assert.equal(calls.length,1);settle('walk.gif');assert.equal(calls.length,1);}finally{c.dispose();global.setTimeout=oldSet;global.clearTimeout=oldClear;}
+ const d=model.createController(mock.api,__dirname);fs.writeFileSync(path.join(root,'a.glb'),glb());d.open(root,'a.glb',{automatic:true});global.setTimeout=fn=>{timers.set(++seq,fn);return seq;};global.clearTimeout=id=>timers.delete(id);try{d.changed(root,'walk.gif');for(let i=0;i<2;i++){const fn=[...timers.values()][0];timers.clear();fn();}assert.equal(calls.length,1);}finally{d.dispose();global.setTimeout=oldSet;global.clearTimeout=oldClear;}
+});

@@ -558,7 +558,8 @@ function activate(context) {
         try {
           const file=preview3d.inside(root,path.resolve(root,relativePath));
           if(/\.(glb|gltf)$/i.test(file)){modelViewer.open(root,relativePath);reply("已開啟 3D 模型預覽。");}
-          else if(/\.(png|jpg|jpeg|webp|obj)$/i.test(file))return vscode.commands.executeCommand("vscode.open",vscode.Uri.file(file),{viewColumn:vscode.ViewColumn.Beside,preserveFocus:true}).then(()=>reply(/\.obj$/i.test(file)?"已開啟 OBJ 原始檔；互動 3D 預覽請使用 GLB / glTF。":"已開啟圖片預覽。"));
+          else if(/\.(png|jpg|jpeg|webp|gif)$/i.test(file))return preview3d.openImage(vscode,root,file).then(()=>reply('已開啟圖片預覽。'));
+          else if(/\.obj$/i.test(file))return vscode.commands.executeCommand("vscode.open",vscode.Uri.file(file),{viewColumn:vscode.ViewColumn.Beside,preserveFocus:true}).then(()=>reply(/\.obj$/i.test(file)?"已開啟 OBJ 原始檔；互動 3D 預覽請使用 GLB / glTF。":"已開啟圖片預覽。"));
           else reply("此格式尚無預覽入口。");
         }catch(e){reply("產物預覽失敗："+e.message);}
       },

@@ -356,3 +356,24 @@ def test_native_agent_records_do_not_inflate_cli_calls_or_tokens():
     assert group["nativeUsage"]["inTok"] == 30 and group["nativeUsage"]["outTok"] == 9
     assert group["nativeUsage"]["cacheTok"] is None
     assert result["attempts"][1]["actual_model"] == "reported-child-model"
+
+
+@pytest.mark.parametrize('final', [False, True])
+def test_partial_usage_metadata_survives_without_double_counting_cache_creation(final):
+    event={'type':'model_attempt','run_id':'r','attempt_id':'r:1','actual_provider':'claude','outcome':'failed',
+           'usage_source':'claude_stream_partial','usage_partial':True,'cache_creation_input_tokens':17,
+           'usage':{'input_tokens':None,'output_tokens':7,'cached_input_tokens':5}}
+    events=[event]
+    if final: events.append({**event,'outcome':'ok','usage_source':'cli_output','usage_partial':False,
+                            'cache_creation_input_tokens':19,'usage':{'input_tokens':3,'output_tokens':11,'cached_input_tokens':8}})
+    result=em.routing_stats(events,run_id='r')
+    assert len(result['attempts'])==1
+    assert result['attempts'][0]['usage_partial'] is (not final)
+    assert result['attempts'][0]['cache_creation_input_tokens']==(19 if final else 17)
+    provider=result['providers']['claude']
+    assert provider['inTok']==(3 if final else None)
+    assert provider['outTok']==(11 if final else 7)
+    assert provider['cacheTok']==(8 if final else 5)
+    driver='const d=require(process.argv[1]);console.log(JSON.stringify(d.summarizeRoutingAttempts(JSON.parse(process.argv[2]),"r")))'
+    proc=subprocess.run([shutil.which('node'),'-e',driver,str(DASHBOARD),json.dumps(events)],capture_output=True,text=True,encoding='utf-8',check=True)
+    assert json.loads(proc.stdout)==result

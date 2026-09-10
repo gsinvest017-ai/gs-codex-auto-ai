@@ -26,7 +26,7 @@ function summarizeRoutingAttempts(lines, runId = null, parentRunId = null) {
   for(const e of unique.values()) {
     const provider=e.actual_provider; if(!provider) continue;
     const usage=e.usage && typeof e.usage === 'object' && !Array.isArray(e.usage) ? e.usage : {};
-    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed','routing_policy','config_digest','graph_id','graph_node_id','graph_node_label','graph_digest','binding_scenario','graph_definition_scenario']) attempt[key]=e[key] ?? null;
+    const attempt={}; for(const key of ['run_id','parent_run_id','role','attempt_id','actual_provider','actual_model','configured_model','requested_provider','requested_model','scenario','outcome','reason','duration_ms','usage_source','usage_partial','cache_creation_input_tokens','usage_scope','native_agent_usage_verified','native_thread_id','native_parent_thread_id','native_agent_path','native_children_observed','routing_policy','config_digest','graph_id','graph_node_id','graph_node_label','graph_digest','binding_scenario','graph_definition_scenario']) attempt[key]=e[key] ?? null;
     attempt.usage=usage; attempts.push(attempt);
     const group=providers[provider] ||= {...emptyUsage(),cliAttempts:0,nativeAgents:0,nativeUsage:emptyUsage()}; group.attempts++;
     const native=e.role === "native_worker"; group[native ? "nativeAgents" : "cliAttempts"]++;
@@ -551,7 +551,7 @@ ${wiringEditor.markup}
 </div>
 
 <div class="card"><h2>目前活動</h2>
-  <div id="activityCurrent">等待任務活動回報</div><div class="muted" id="activityUpdated">最後更新：未知</div>
+  <div id="activityCurrent">等待任務活動回報</div><div id="activityPartialUsage" class="muted"></div><div class="muted" id="activityUpdated">最後更新：未知</div>
   <ol id="activityTimeline"></ol><details id="activityMore"><summary>展開較早活動</summary><ol id="activityOlder"></ol></details>
 </div>
 <div class="card"><h2>產物與預覽</h2><button class="ghost" id="btnArtifacts">重新整理產物</button>
@@ -606,6 +606,8 @@ ${wiringEditor.markup}
   ${activityHeadline.toString()}
   function showActivity(activity) {
     activity=activity || {items:[]};const items=activity.items || [];
+    const partial=Object.entries(activity.usage_by_attempt || {}).filter(([id,value])=>value.usage_partial===true || value.usage_source==='claude_stream_partial');
+    $("activityPartialUsage").textContent=partial.map(([id,value])=>{const usage=value.usage || {};return '呼叫 '+id+'：執行中／中斷前已回報部分用量，非最終總量；輸入 '+number(usage.input_tokens)+'／輸出 '+number(usage.output_tokens)+'，快取讀取 '+number(usage.cached_input_tokens)+'，快取建立 '+number(value.cache_creation_input_tokens)+' tokens（獨立欄位，不併入快取讀取）。';}).join(' · ');
     const last=items.length ? items[items.length-1] : null;
     $("activityCurrent").textContent=activity.error || (last ? (["in_progress","running","started"].includes(last.status)?"正在進行：":"最近回報：")+activityHeadline(last) : "尚無工具活動回報；等待新的任務事件");
     $("activityUpdated").textContent="來源最後更新："+(activity.last_update ? new Date(activity.last_update*1000).toLocaleString("zh-TW") : (last && (last.timestamp || last.ts)) || "來源未回報時間")+(activity.limited ? " · 只顯示有限範圍活動" : "");
@@ -670,12 +672,13 @@ ${wiringEditor.markup}
     for (const a of stats.attempts) {
       const row = document.createElement("tr");
       cell(row, a.actual_provider + " / " + (a.actual_model || "未回報實際模型") + "；設定：" + (a.configured_model || "CLI 預設") + "；原請求：" + (a.requested_provider || "未知") + " / " + (a.requested_model || "CLI 預設"));
-      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + (a.graph_node_id ? " / 節點：" + (a.graph_node_label ? a.graph_node_label + " [" + a.graph_node_id + "]" : a.graph_node_id) : "") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,a.reason || "—");
+      cell(row, (a.role === "native_worker" ? "原生代理紀錄" : "CLI 呼叫") + " / " + (a.scenario || "—") + (a.graph_node_id ? " / 節點：" + (a.graph_node_label ? a.graph_node_label + " [" + a.graph_node_id + "]" : a.graph_node_id) : "") + " / " + (a.role || "未知角色") + " / " + a.outcome); cell(row,(a.reason || "—")+(a.usage_partial ? "；此用量為串流部分回報，非最終總量" : ""));
       const scope = a.role === "native_worker" ? "；原生代理 rollout 回報" : a.native_agent_usage_verified === false ? (a.native_children_observed > 0 ? "；dispatcher CLI 回報，子代理用量另列／未觀測者未知" : "；dispatcher CLI 回報，子代理用量／模型未獨立驗證") : "；CLI 回報";
-      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知") + scope);
+      const u = a.usage || {}; cell(row, (u.input_tokens ?? "未知") + " / " + (u.output_tokens ?? "未知") + scope + (a.usage_partial?"（部分回報，非最終總量）":"") + (a.cache_creation_input_tokens!==null && a.cache_creation_input_tokens!==undefined?"；快取建立 "+number(a.cache_creation_input_tokens):""));
       $("attemptRows").appendChild(row);
     }
     $("usageSummary").textContent = Object.entries(stats.providers).map(([name,p])=>name+"：CLI "+p.cliAttempts+" 次（"+briefUsage(p)+"）"+(p.nativeAgents?"；原生代理 "+p.nativeAgents+" 筆（"+briefUsage(p.nativeUsage)+"）":"")).join(" · ") || "尚無完成的呼叫用量；等待回報。";
+    if(stats.attempts.some(a=>a.usage_partial))$("usageSummary").textContent+=" · 包含串流部分回報，非完整用量總計。";
     const metric = (value,known,total) => value === null || value === undefined ? "未知（" + total + " 筆未回報）" : value + "（" + (known < total ? "已知部分，" : "") + known + "/" + total + " 筆已知）";
     const usageText=(p,total)=>"in " + metric(p.inTok,p.inKnown,total) + " / out " + metric(p.outTok,p.outKnown,total) + " / cache " + metric(p.cacheTok,p.cacheKnown,total) + "，成本 USD " + metric(p.cost,p.costKnown,total);
     $("providerMetrics").textContent = Object.entries(stats.providers).map(([name,p]) => name + ": CLI " + p.cliAttempts + " 次，" + usageText(p,p.cliAttempts) + (p.nativeAgents ? "；原生代理 " + p.nativeAgents + " 筆，" + usageText(p.nativeUsage,p.nativeAgents) + "（獨立列示，不與 CLI 相加）" : "")).join(" · ");
@@ -727,7 +730,7 @@ ${wiringEditor.markup}
       $("bar").textContent='';
       const graph=m.graphResult;
       const labels={ok:'成功',failed:'失敗',quota_exhausted:'額度耗盡',skipped:'未執行'};
-      $("phaseText").textContent=(graph?'接線'+(graph.status==='completed'?'已完成':'受阻')+'；'+Object.entries(graph.graph_states || {}).map(([id,status])=>id+'：'+(labels[status] || status)).join(' · '):'等待本次接線執行結果')+'。未驗證七階段交付。';
+      $("phaseText").textContent=(graph?'接線'+(graph.status==='completed'?'已完成':'受阻')+'；'+Object.entries(graph.graph_states || {}).map(([id,status])=>id+'：'+(labels[status] || status)).join(' · '):(['running','心跳逾期'].includes(m.run.status)?'等待本次接線執行結果':'接線已停止／未完成，未取得完整節點結果；'+(m.run.reason || '請查看失敗原因與活動日誌')))+'。未驗證七階段交付。';
     }
     if (s.historyLoaded === false) {
       $("historyNotice").textContent="未載入；為保持即時更新，不掃描歷史 session。實際用量請看上方本次任務證據。";
@@ -807,6 +810,7 @@ function computeState(root, { includeHistory = true } = {}) {
       run.status = result.status; run.reason = result.reason;
     }
   }
+  if(run?.route?.mode==='graph'){const result=routing.taskResult(root,run);if(result.terminalEvidence){run.status=result.status;run.reason=result.reason;}}
   summary.runStatus = run && run.status;
   summary.failureReason = null;
   if (run && ["failed", "launch_failed", "blocked", "incomplete"].includes(run.status)) {

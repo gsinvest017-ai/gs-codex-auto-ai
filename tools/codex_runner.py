@@ -355,7 +355,16 @@ def output_metadata(output: str) -> dict:
     # Claude result usage is authoritative for the whole CLI invocation. Assistant
     # message usage must not be added to that final aggregate a second time.
     finals = [p for p in payloads if p.get("type") == "result" and isinstance(p.get("usage"), dict)]
-    selected = finals[-1:] if finals else payloads
+    assistant_usage = {}
+    if not finals:
+        for payload in payloads:
+            message = payload.get("message")
+            if payload.get("type") == "assistant" and isinstance(message, dict) and isinstance(message.get("id"), str) and isinstance(message.get("usage"), dict):
+                identifier = message["id"]
+                assistant_usage[identifier] = {**assistant_usage.get(identifier, {}), **message["usage"]}
+    partial = bool(assistant_usage) and not finals
+    selected = finals[-1:] if finals else [{"id": identifier, "usage": value} for identifier, value in assistant_usage.items()] if partial else payloads
+    cache_creation = None
     for payload in payloads:
         if isinstance(payload.get("model"), str):
             actual_model = payload["model"]
@@ -377,6 +386,9 @@ def output_metadata(output: str) -> dict:
             if identity in seen:
                 continue
             seen.add(identity)
+        creation = source.get("cache_creation_input_tokens")
+        if isinstance(creation, (int, float)) and not isinstance(creation, bool) and math.isfinite(creation) and creation >= 0:
+            cache_creation = (cache_creation or 0) + creation
         cache = source.get("cache", {})
         for key, aliases in (("input_tokens", ("input_tokens", "input")),
                              ("output_tokens", ("output_tokens", "output")),
@@ -386,8 +398,9 @@ def output_metadata(output: str) -> dict:
                 number = cache.get("read")
             if isinstance(number, (int, float)) and not isinstance(number, bool) and number >= 0 and math.isfinite(number):
                 usage[key] = (usage[key] or 0) + number
-    return {"usage": usage, "actual_model": actual_model,
-            "usage_source": "cli_output" if any(v is not None for v in usage.values()) else "unavailable"}
+    return {"usage": usage, "actual_model": actual_model, "cache_creation_input_tokens": cache_creation,
+            "usage_partial": True if partial else False if finals else None,
+            "usage_source": "claude_stream_partial" if partial else "cli_output" if any(v is not None for v in usage.values()) else "unavailable"}
 
 
 def record_attempt(cwd: Path, event: dict) -> None:
@@ -407,6 +420,56 @@ def _tail(path: Path, limit: int = 1500) -> str:
         return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
     except OSError:
         return ""
+
+
+def unresolved_permission_denials(payload: dict) -> bool:
+    """Historical denials are acceptable only in an explicitly successful result."""
+    confirmed_success = (payload.get("type") == "result" and payload.get("subtype") == "success"
+                         and payload.get("is_error") is False)
+    return bool(payload.get("permission_denials")) and not confirmed_success
+
+
+def startup_blocker(output: str, provider: str) -> tuple[str, str]:
+    """Recognize CLI diagnostics, never quoted tool output or assistant prose.
+
+    Workspace permission warnings are not fatal: a CLI may keep working normally.
+    Only explicit error/refusal diagnostics or terminal permission denials qualify.
+    """
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    messages = []
+    for line in output.splitlines():
+        line = ansi.sub("", line).strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            if unresolved_permission_denials(payload):
+                return "permission_blocked", provider + " CLI did not confirm success after permission denials; no permissions were changed."
+            if payload.get("type") == "error" or payload.get("is_error") is True or payload.get("type") == "turn.failed":
+                error = payload.get("error") or payload.get("result") or payload.get("message")
+                if isinstance(error, dict):
+                    code = str(error.get("code", ""))
+                    if code in ("authentication_error", "invalid_api_key", "not_authenticated"):
+                        return "authentication_required", provider + " CLI reported an authentication error; no credentials were changed."
+                    error = str(error.get("message") or code)
+                if isinstance(error, str):
+                    messages.append((error, True))
+            continue
+        # Structured assistant/tool records and quoted example strings are not CLI diagnostics.
+        if line.startswith(('{', '[', '"', "'", '>')):
+            continue
+        messages.append((line, False))
+    for message, structured in messages:
+        if re.fullmatch(r"error:\s*(?:workspace (?:has not been trusted|is not trusted)|refusing to (?:run|execute) in (?:an? )?untrusted workspace)(?:[.: ].*)?", message, re.I):
+            return "workspace_untrusted", provider + " CLI explicitly refused the untrusted workspace; no trust settings were changed."
+        if re.fullmatch(r"(?:error:\s*)?(?:authentication[_ ](?:failed|required)|not logged in|invalid[_ ]api[_ ]key|unauthorized|oauth token (?:has )?expired)(?:[.: ].*)?", message, re.I):
+            return "authentication_required", provider + " CLI reported an authentication blocker; authenticate through its normal user-controlled workflow before retrying."
+        if re.fullmatch(r"(?:error:\s*)?(?:please run|run) (?:/?login|claude login|codex login)(?:[ .].*)?", message, re.I):
+            return "authentication_required", provider + " CLI requires login; no authentication settings were changed."
+    return "", ""
 
 
 def run_once(cmd: list[str], cwd: Path, expects: list[str],
@@ -474,7 +537,12 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
             out = ""
         if result_metadata is not None:
             result_metadata.update(output_metadata(out))
-        if not ok:
+        blocker_kind, blocker_hint = startup_blocker(out, provider)
+        if blocker_kind:
+            ok, reason = False, f"fatal:{blocker_kind} {blocker_hint}"
+            if result_metadata is not None:
+                result_metadata.update(failure_kind=blocker_kind, blocked_reason=blocker_hint)
+        if not ok and not blocker_kind:
             kind, hint = classify_failure(out)
             if provider != "codex" and kind != "invalid_cli_arguments":
                 kind, hint = "", ""
@@ -499,7 +567,25 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
     session_seen, root_id = False, None
     own_output_size, own_last_activity = 0, start
     last_identity_check, linked_mtime = 0.0, None
+    blocker_output_size = -1
     while True:
+        try:
+            size = log.stat().st_size
+            if size != blocker_output_size:
+                blocker_output_size = size
+                with log.open(encoding="utf-8", errors="replace") as stream:
+                    diagnostics = stream.read(65536)
+                if size > 65536:
+                    with log.open("rb") as stream:
+                        stream.seek(max(0, size - 65536))
+                        diagnostics += "\n" + stream.read(65536).decode("utf-8", errors="replace")
+                blocker_kind, blocker_hint = startup_blocker(diagnostics, provider)
+                if blocker_kind:
+                    if proc.poll() is None:
+                        _kill_tree(proc)
+                    return _done(False, f"fatal:{blocker_kind} {blocker_hint}")
+        except OSError:
+            pass
         rc = proc.poll()
         if rc is not None:
             if provider == "codex":
@@ -514,6 +600,8 @@ def run_once(cmd: list[str], cwd: Path, expects: list[str],
             return _done(False, f"exit={rc} expects_ok={_expects_ok(cwd, expects)}")
         now = time.time()
         if now - start > timeout:
+            if result_metadata is not None:
+                result_metadata.update(timeout_kind="wall_clock_hard_cap", timeout_seconds=timeout)
             _kill_tree(proc)
             return _done(False, f"{provider} timeout after {timeout}s")
         if provider != "codex":
@@ -661,7 +749,9 @@ def provider_command(route: dict, prompt: str) -> list[str]:
     else:
         cmd += ["--approval-mode", "plan"]
         prompt = worker_instruction + "\n\nAssigned task:\n" + prompt
-    cmd += ["-p", prompt, "--output-format", "json"]
+    cmd += ["-p", prompt, "--output-format", "stream-json" if provider == "claude" else "json"]
+    if provider == "claude":
+        cmd += ["--verbose"]
     if model:
         cmd += ["--model", model]
     return cmd
@@ -683,7 +773,7 @@ def provider_reported_error(path: Path) -> str | None:
             except ValueError:
                 pass
     for payload in payloads:
-        if isinstance(payload, dict) and (payload.get("is_error") is True or payload.get("error") or payload.get("permission_denials") or payload.get("type") == "error"):
+        if isinstance(payload, dict) and (payload.get("is_error") is True or payload.get("error") or payload.get("type") == "error" or unresolved_permission_denials(payload)):
             return str(payload.get("error") or payload.get("result") or "provider reported an error")[:400]
     for payload in payloads:
         if isinstance(payload, dict):
@@ -869,7 +959,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--graph-id", help="Execute the explicitly selected saved scenario graph")
     ap.add_argument("--graph-digest", help="Reject a saved graph changed since UI preview")
     ap.add_argument("--timeout", type=float, default=1800.0,
-                    help="Maximum seconds per attempt for every provider")
+                    help="Hard wall-clock cap per attempt, including time with active streaming output")
     ap.add_argument("--expect", action="append", default=[],
                     help="成功必須存在的檔案（可多個；相對 --cwd）")
     ap.add_argument("--cwd", default=".")
